@@ -1,0 +1,110 @@
+---
+name: USER (example / interview schema)
+description: Template for the orchestrator to author USER.md after walking through an onboarding interview with the user.
+type: template
+tags: [onboarding, user]
+projects: []
+created: 2026-04-24
+---
+
+# USER.md — interview schema
+
+After the orchestrator has authored their own `IDENTITY.md`, they walk through this with the user to produce `testflight/orchestrator/USER.md`. The goal is a file the orchestrator can rely on every session as baseline context about who they're working with.
+
+This is meant to be conversational, not a form. The orchestrator asks; the user answers; the orchestrator writes the file in their own voice.
+
+## Things to ask
+
+**About them**
+
+- What should I call you? (name, and anything about how you want to be addressed)
+- What do you do? (role, company, domain)
+- Contact info I should have (email, phone if relevant)
+- Are you a developer in the debugging sense, or not? (affects whether I can ask you to inspect console output, etc.)
+
+**What they're building**
+
+- What projects am I going to be helping with? (high level — names and 1-line descriptions)
+- Which one is most active right now?
+- Which are on hold or background?
+
+**How they want to work**
+
+- Do you prefer concise responses or more thorough explanations?
+- When you ask me "what do you think," do you want a recommendation, options, or just analysis?
+- How do you want me to handle destructive actions? (always confirm, confirm only the really big ones, autonomous for small stuff, etc.)
+- Any GitHub / project-board workflow I should follow? (column flow, commenting conventions, never-auto-close rules, etc.)
+- Deploy conventions? (when deploys happen, who triggers them, post-deploy checks)
+- Branch discipline? (work-on-dev, promote-on-request, never-push-main, etc.)
+
+**What shapes our collaboration**
+
+- Is there anything about how you want to work with an AI specifically that I should know?
+- Have you worked with persistent AI identities before? (If yes — ask for what worked and what didn't.)
+- What do you value in collaboration generally — speed, thoroughness, honesty, creativity, something else?
+
+**What you're sensitive to**
+
+- Anything that particularly frustrates you when working with an AI assistant?
+- Anything I should never do? (e.g., never ask you to use browser dev tools, never surface unverified claims, never commit without permission)
+- Anything that's a hard requirement? (e.g., always comment on board cards, always confirm before destructive git, always cite canonical sources)
+
+**What's happening right now**
+
+- What's the immediate context? Current project, current sprint, current problem you're trying to solve?
+
+## Structure of the output file
+
+The orchestrator writes `testflight/orchestrator/USER.md` with sections roughly matching:
+
+```
+# My user: [name]
+
+## Who they are
+  [bullets from "about them"]
+
+## What they're building
+  [bullets from "what they're building"]
+
+## How they want to work with me
+  [bullets from "how they want to work"]
+
+## What shapes our collaboration
+  [bullets from "what shapes our collaboration"]
+
+## What they're sensitive to
+  [bullets from "what you're sensitive to"]
+
+## What's happening right now
+  [short paragraph from "what's happening right now"]
+```
+
+Frontmatter:
+
+```yaml
+---
+name: USER
+description: Who [name] is, from my understanding. Always loaded at session start.
+type: user
+critical: true
+evergreen: true
+created: YYYY-MM-DD
+---
+```
+
+## Tone notes
+
+- Write in first person, from the orchestrator's perspective — *"My user: [name]"*, *"What they're building"*, etc. Not third-person about the user.
+- Keep it concise. The user can layer more detail later.
+- Mark anything that's a non-negotiable clearly — it'll be loaded every session and should be impossible to miss.
+- If the user pushes back on the questions ("just start working"), accept that. The orchestrator can always update `USER.md` later as context accumulates.
+
+## After USER.md is written
+
+- The SessionStart hook picks it up automatically.
+- Run `/checkpoint` at natural breaks — that's how both `LOG.md` and memory weights evolve over time.
+- Revisit this file when the user gives significant new context. It's not carved in stone.
+
+---
+
+*— Interview schema drafted by Cairn, 2026-04-24.*

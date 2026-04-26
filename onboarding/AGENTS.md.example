@@ -1,0 +1,138 @@
+---
+name: AGENTS.md template for managed projects
+description: Substrate-neutral orchestration guide template. Copy into a new managed project's root as AGENTS.md and fill in the project-specific sections.
+type: template
+tags: [onboarding, agents-md, managed-project]
+projects: []
+created: 2026-04-24
+---
+
+# AGENTS.md (template)
+
+This is the template for the substrate-neutral orchestration guide that every managed TestFlight project should have at its root. The format is intentionally compatible with OpenAI Codex, Cursor, MindStone, and other agent-harnesses that consume `AGENTS.md` at project root.
+
+Replace the bracketed placeholders with project-specific content. Delete sections that don't apply.
+
+---
+
+# [Project Name] — Agent Orchestration Guide
+
+## What this project is
+
+[1-3 sentence description of the project, its users, and its current phase.]
+
+## Who's working on this
+
+- **Human lead:** [name + role]
+- **Persistent orchestrator (if present):** [name, e.g., Cairn]
+- **Subagents:** See `.claude/agents/` for the full TestFlight subagent roster
+
+## Project structure
+
+[Brief tree or description of where code, docs, and configs live.]
+
+```
+[project-root]/
+├── [subdir]/  # purpose
+├── [subdir]/  # purpose
+└── ...
+```
+
+## Tech stack
+
+- **Frontend:** [e.g., Svelte 4 / SvelteKit 2]
+- **Backend:** [e.g., FastAPI / Python]
+- **Database:** [e.g., PostgreSQL with SQLAlchemy]
+- **Infrastructure:** [e.g., K8s on [cloud]]
+- **Other:** [Redis, Celery, etc.]
+
+Canonical stack decisions live in TestFlight's `canonical-models-reference` skill. Cite it when making framework choices.
+
+## Orchestration principles
+
+### Delegation vs direct work
+
+The orchestrator has agency: does the work directly by default, delegates to subagents for parallelism, context isolation, bounded iterative tool-use, tool-restriction sandboxing, or scale. Specifics:
+
+- **Delegate:** parallel streams (lint + security scan concurrently), fresh-eyes diagnosis (`debug-specialist` after the orchestrator's first attempt failed), bounded run-fail-fix loops (`devops-agent`), read-only investigation (`Explore`), N-file audits.
+- **Direct (under role adoption):** design, architecture, writing, debugging, judgment-heavy implementation, collaborative back-and-forth with the user.
+
+When doing role-adoption direct work, the orchestrator calls `/act-as <role>` to load the subagent's directives and canonicals, then produces the same artifacts a subagent would (TASK_STATUS updates, commit-message format, doc edits, quality gate evidence). `/end-role` runs the attribution audit.
+
+### Canonicals are load-bearing
+
+Whether work is done by a subagent or by the orchestrator under role adoption, the same canonicals apply:
+
+- `canonical-models-reference` — production-ready code templates
+- `technology-stack-reference` — stack choices
+- `doc-standards` — PRD, plan, and README structures
+- `feature-existence-check` — run before writing any PRD for a new feature
+
+Non-trivial decisions cite the canonical source inline. That's how standards adherence stays observable.
+
+### SDLC
+
+The standard cycle:
+
+1. Review PRD and implementation plan for the current phase/task
+2. Implement (code changes, config, migrations, etc.)
+3. Test (local build check, syntax checks, automated tests)
+4. Fix issues, retest
+5. Document completion (`TASK_STATUS.md`, any new doc files)
+6. Commit (on the appropriate branch — usually `dev`)
+7. Promote to `beta` / `main` only on user request
+8. Deploy and verify
+
+### GitHub Project Board workflow
+
+All work tracked on the board flows: **Backlog → In Progress → In Dev Review → Ready for UAT → Done**.
+
+- Move to **In Progress** before starting work.
+- Move to **In Dev Review** when tests pass locally and the code is ready for build verification.
+- Move to **Ready for UAT** after deploy is confirmed on the target environment. Comment on the card with:
+  - Root cause (what was broken and why)
+  - Fix applied (what was changed)
+  - Files modified (list)
+  - Verification (how it was tested)
+- **Never auto-close.** No `Closes #X` / `Fixes #X` in commit messages. Reference issues but let humans move them to Done.
+- **Done is locked.** Orchestrators never touch cards in Done.
+
+## Debugging and testing rules
+
+- **Never ask the user to use browser dev tools.** If the user isn't a developer in the debugging sense, all diagnostic work is the orchestrator's (via tools like `curl`, `httpie`, Playwright MCP, container logs, direct DB queries).
+- **Always run local build before committing** for projects with a build step. Don't push broken builds.
+- **Integration testing** uses project-level test suites via the `sqa-agent` or direct test commands.
+
+## Destructive actions
+
+Always confirm before:
+- Git `stash` / `reset` / `rebase` / `checkout` (especially when uncommitted work exists)
+- Force pushes (especially to shared branches)
+- File or directory deletion
+- Database drops, migrations, or destructive data operations
+- `rm -rf` of anything not clearly temporary
+
+## Subagent roster
+
+See `.claude/agents/` for full definitions. High-level categories:
+
+- **Development:** `python-backend-architect`, `software-engineer`, `frontend-prototype-developer`, `container-architect`, `data-architect`, `graph-database-architect`, `devops-agent`
+- **Planning & design:** `feature-planner`, `implementation-planner`, `prd-writer`, `product-design`, `ux-design-consultant`, `test-planner`
+- **Quality & docs:** `node-linter-fixer`, `security-vulnerability-scanner`, `sqa-agent`, `tech-writer`, `project-manager`, `debug-specialist`
+- **Research:** `market-research`, `customer-research`
+
+## Project-specific conventions
+
+[Add anything unique to this project: unusual directory structures, non-standard commit-message formats, deploy pipelines, testing conventions, etc.]
+
+## Links
+
+- TestFlight framework: [link or relative path]
+- TestFlight canonicals: `testflight/.claude/skills/` (or via skill invocation)
+- This project's PRD: [path]
+- This project's implementation plan: [path]
+- This project's `TASK_STATUS.md`: [path]
+
+---
+
+*Template from `testflight/onboarding/AGENTS.md.example`. Maintained by the active TestFlight orchestrator.*
