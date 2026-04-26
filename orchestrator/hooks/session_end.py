@@ -37,6 +37,12 @@ DB_PATH = ORCHESTRATOR_DIR / "vectors.db"
 # Format: ~/.claude/projects/-<escaped-cwd>/<session-uuid>.jsonl
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
+# When invoked by the intra-session watchdog (from user_prompt_submit.py),
+# we still want to archive + vectorize, but we should NOT auto-increment
+# memory hit counters — the per-turn Stop hook already does that, and
+# repeating it every N turns from the watchdog would inflate counters.
+WATCHDOG_MODE = os.environ.get("CAIRN_WATCHDOG_MODE") == "1"
+
 # ---------------------------------------------------------------------------
 # Stop-hook input protocol
 # ---------------------------------------------------------------------------
@@ -260,17 +266,23 @@ def main():
 
     n_chunks = vectorize_transcript(archived)
 
-    incremented = auto_increment_hits(archived)
+    # Watchdog runs hit-bumping risk inflated counters; let the per-turn
+    # Stop hook own that responsibility.
+    incremented = [] if WATCHDOG_MODE else auto_increment_hits(archived)
 
     # Append a brief note to LOG.md so the activity is visible next session.
+    header = "### Watchdog-archive" if WATCHDOG_MODE else "### Auto-archive"
     log_entry = [
         f"",
-        f"### Auto-archive — {datetime.now(tz=timezone.utc).isoformat(timespec='seconds')}",
+        f"{header} — {datetime.now(tz=timezone.utc).isoformat(timespec='seconds')}",
         f"- Archived: `{archived.name}`",
         f"- Transcript chunks vectorized: {n_chunks if n_chunks >= 0 else 'skipped (vectors unavailable)'}",
-        f"- Memory hits auto-incremented: {len(incremented)}"
-        + (f" ({', '.join(incremented[:5])}{'...' if len(incremented) > 5 else ''})" if incremented else ""),
     ]
+    if not WATCHDOG_MODE:
+        log_entry.append(
+            f"- Memory hits auto-incremented: {len(incremented)}"
+            + (f" ({', '.join(incremented[:5])}{'...' if len(incremented) > 5 else ''})" if incremented else "")
+        )
     log_path = ORCHESTRATOR_DIR / "LOG.md"
     if log_path.exists():
         try:

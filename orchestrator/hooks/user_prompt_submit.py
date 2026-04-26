@@ -16,6 +16,8 @@ Falls back to empty context gracefully if anything's unavailable.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -34,6 +36,21 @@ MIN_SIMILARITY = 0.30
 
 # Per-chunk display budget (chars) — keep context lean
 MAX_CHARS_PER_CHUNK = 800
+
+# ---------------------------------------------------------------------------
+# Intra-session archive watchdog
+# ---------------------------------------------------------------------------
+# The Stop hook fires per-turn-completion, so `/exit`, abrupt termination,
+# or sessions that die on errors lose post-last-turn texture from auto-archive.
+# Mitigation: every N user prompts, fork session_end.py in the background to
+# refresh the archive + vector index. Worst-case loss becomes N turns instead
+# of "everything since the last successful turn before the error."
+#
+# Threshold is configurable via env var; state is per-session in a JSON file
+# under transcripts/ (already gitignored).
+WATCHDOG_TURN_THRESHOLD = int(os.environ.get("CAIRN_WATCHDOG_THRESHOLD", "10"))
+WATCHDOG_STATE_FILE = ORCHESTRATOR_DIR / "transcripts" / ".watchdog_state.json"
+SESSION_END_HOOK = HOOK_FILE.parent / "session_end.py"
 
 def read_hook_input() -> dict:
     try:
@@ -69,9 +86,108 @@ def truncate(text: str, n: int) -> str:
         return text
     return text[:n] + "..."
 
+# ---------------------------------------------------------------------------
+# Watchdog
+# ---------------------------------------------------------------------------
+
+def _resolve_session_id(hook_input: dict) -> str | None:
+    sid = hook_input.get("session_id") or hook_input.get("sessionId")
+    if sid:
+        return sid
+    sess = hook_input.get("session")
+    if isinstance(sess, dict):
+        return sess.get("id")
+    return None
+
+
+def _fork_session_end(hook_input: dict) -> None:
+    """Spawn session_end.py as a detached background process in watchdog mode.
+
+    Returns immediately; we do not wait for completion. The subprocess inherits
+    no controlling terminal (start_new_session) so it survives `/exit`.
+    """
+    if not SESSION_END_HOOK.exists():
+        return
+
+    env = os.environ.copy()
+    env["CAIRN_WATCHDOG_MODE"] = "1"
+
+    forwarded_input = json.dumps({
+        "session_id": _resolve_session_id(hook_input),
+        "cwd": hook_input.get("cwd", os.getcwd()),
+    }).encode()
+
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, str(SESSION_END_HOOK)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+    except Exception as e:
+        print(f"[user_prompt_submit] watchdog fork failed ({e})", file=sys.stderr)
+        return
+
+    try:
+        if proc.stdin is not None:
+            proc.stdin.write(forwarded_input)
+            proc.stdin.close()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def maybe_run_watchdog(hook_input: dict) -> None:
+    """Increment per-session turn counter; fork session_end.py at threshold.
+
+    State shape: { "<session_id>": <turns_since_last_archive> }
+    Resets the counter to 0 on the firing prompt so the next firing is N more
+    turns away. All errors are swallowed so the watchdog never blocks recall.
+    """
+    try:
+        session_id = _resolve_session_id(hook_input)
+        if not session_id:
+            return
+
+        WATCHDOG_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+        state: dict = {}
+        if WATCHDOG_STATE_FILE.exists():
+            try:
+                state = json.loads(WATCHDOG_STATE_FILE.read_text())
+                if not isinstance(state, dict):
+                    state = {}
+            except Exception:
+                state = {}
+
+        count = int(state.get(session_id, 0)) + 1
+
+        if count >= WATCHDOG_TURN_THRESHOLD:
+            _fork_session_end(hook_input)
+            state[session_id] = 0
+        else:
+            state[session_id] = count
+
+        try:
+            WATCHDOG_STATE_FILE.write_text(json.dumps(state))
+        except Exception as e:
+            print(f"[user_prompt_submit] watchdog state write failed ({e})", file=sys.stderr)
+    except Exception as e:
+        print(f"[user_prompt_submit] watchdog error ({e})", file=sys.stderr)
+
+
 def main():
     hook_input = read_hook_input()
     prompt = extract_prompt(hook_input)
+
+    # Watchdog: every N turns, fork session_end.py in the background to keep
+    # the archive + vector index fresh in case this session ends via /exit
+    # or an error before the next Stop hook fires.
+    maybe_run_watchdog(hook_input)
 
     # No prompt to work with, or too short to be worth embedding.
     if not prompt or len(prompt) < 8:
