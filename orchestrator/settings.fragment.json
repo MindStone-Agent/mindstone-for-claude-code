@@ -1,0 +1,48 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/hooks/session_start.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/hooks/session_end.py"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/hooks/user_prompt_submit.py"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/hooks/pre_compact.py"
+          }
+        ]
+      }
+    ]
+  }
+}

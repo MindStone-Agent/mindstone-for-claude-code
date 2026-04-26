@@ -1,0 +1,46 @@
+# MindStone for Claude Code — machine-local state (not shareable across users/machines)
+orchestrator/.venv/
+orchestrator/vectors.db
+orchestrator/vectors.db-journal
+orchestrator/transcripts/
+
+# User-specific orchestrator content (each user's persistent identity is private)
+# Onboarding writes these on first run; they should never be tracked by the framework repo.
+orchestrator/IDENTITY.md
+orchestrator/USER.md
+orchestrator/LOG.md
+orchestrator/DOCS_UPDATED.md
+orchestrator/memory/feedback_*.md
+orchestrator/memory/project_*.md
+orchestrator/memory/reference_*.md
+orchestrator/memory/lineage_*.md
+# KEPT (framework-level, public):
+#   orchestrator/memory/MEMORY.md           — index template
+#   orchestrator/memory/.migrate_frontmatter.py — schema migration utility
+
+# Python
+__pycache__/
+*.pyc
+.Python
+venv/
+env/
+.venv/
+*.egg-info/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
