@@ -95,7 +95,13 @@ Observations, not actions. Clint can act on them later.
 
 ### 6. Append to LOG.md
 
-Once Clint approves the entry, append to the end of `testflight/orchestrator/LOG.md`. Preserve chronological order.
+Once the user approves the entry, append to the end of `orchestrator/LOG.md`. Preserve chronological order.
+
+### 7. Invoke `/end-session` for mechanical archive
+
+After the LOG entry is written, run the `/end-session` mechanical archive so the session JSONL gets archived to `orchestrator/transcripts/`, vectorized into the store, and memory hits get auto-incremented. This is the mechanical layer that the Stop hook would normally do — but if `/exit` follows shortly after `/checkpoint`, the Stop hook may not fire (it fires per-turn-completion, not on session end). Running the archive at the end of `/checkpoint` ensures texture and reflection both land.
+
+The archive is idempotent — safe to run regardless of whether the Stop hook also fires. See `.claude/commands/end-session.md` for the full archive protocol.
 
 ## Automation — what the Stop hook handles
 
