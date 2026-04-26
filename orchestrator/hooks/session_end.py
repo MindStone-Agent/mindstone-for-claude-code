@@ -55,13 +55,12 @@ def read_hook_input() -> dict:
 
 def resolve_session_path(hook_input: dict) -> Path | None:
     """Figure out which JSONL file corresponds to this session."""
-    # Common fields in the hook input across Claude Code versions
-    session_id = (
-        hook_input.get("session_id")
-        or hook_input.get("sessionId")
-        or hook_input.get("session", {}).get("id")
-        if isinstance(hook_input.get("session"), dict) else None
-    )
+    # Try common shapes in order
+    session_id = hook_input.get("session_id") or hook_input.get("sessionId")
+    if not session_id:
+        sess = hook_input.get("session")
+        if isinstance(sess, dict):
+            session_id = sess.get("id")
     cwd = hook_input.get("cwd") or os.getcwd()
 
     # Derive the project dir name (Claude Code escapes slashes to dashes)
