@@ -1,10 +1,12 @@
 ---
-description: Mechanical session-end archive. Runs orchestrator/hooks/session_end.py to archive the current session's JSONL, vectorize new chunks, and auto-increment memory hits — work that the Stop hook normally does but that gets skipped when /exit fires without a completed turn.
+description: Wrap up the session before /exit. Composes the reflective dream-cycle (/checkpoint when warranted) with the mechanical archive (transcript vectorization + hit-counter updates) so both layers land before the session closes.
 ---
 
-# End-session — mechanical archive before exit
+# End-session — wrap up the session before /exit
 
-Use this before `/exit` to ensure the current session's texture is captured in the vector store and memory hit counters are updated. The Stop hook fires per-turn-completion, not on session end — so sessions that end without a final completed turn (`/exit` after an error, abrupt termination, image-dimension errors, etc.) skip the auto-archive. This command is the user-actionable workaround until the v3 watchdog ships.
+Final wrap-up before `/exit`. Composes the reflective dream-cycle (`/checkpoint`) and the mechanical archive (transcript vectorization + hit-counter updates) so both layers land before the session closes. After `/end-session` completes, you can `/exit` knowing the session texture is preserved and any session-shaped reflection is captured.
+
+The mechanical archive matters because the Stop hook fires per-turn-completion, not on session end — so sessions that end without a final completed turn (`/exit` after an error, abrupt termination, image-dimension errors, etc.) skip the auto-archive. `/end-session` is the user-actionable workaround until the v3 watchdog ships (auto-archive every N turns from `UserPromptSubmit`).
 
 ## When to invoke
 
@@ -21,18 +23,25 @@ This is additive — running it after `/checkpoint` is fine (idempotent), and ru
 
 ## Relationship to `/checkpoint`
 
-`/checkpoint` (the reflective dream-cycle) **invokes `/end-session` as its final step**. So if the session warrants reflection — decisions made, memories cited, work shipped — run `/checkpoint` instead; it does both layers.
+`/checkpoint` is a *reflective punctuation mark* that can be invoked multiple times during a session at natural breaks. `/end-session` is the *wrap-up* before `/exit` — it composes `/checkpoint` (when warranted) with the mechanical archive.
 
-Use `/end-session` standalone when:
-- The session was trivial (no decisions, no memory citations, no produced artifacts)
-- The session is ending on an error and `/checkpoint` can't run (model calls blocked)
-- You've already done the reflective work elsewhere and just need the mechanical archive
+**Rule of thumb before `/exit`:** run `/end-session`. It handles the checkpoint-if-needed and the archive in one go.
 
-**Rule of thumb before `/exit`:** ran `/checkpoint`? Done. Skipping `/checkpoint` because it's not warranted? Run `/end-session` and you're done.
+Stand-alone `/checkpoint` is for mid-session reflection without ending. The Stop hook handles per-turn mechanical archival; `/end-session` handles the post-error / post-`/exit-incoming` archival the Stop hook can't.
 
 ## Protocol
 
-### Step 1 — Find the current session JSONL
+### Step 1 — Reflective layer (invoke `/checkpoint` if warranted)
+
+Quick judgment: was there meaningful work this session that hasn't been checkpointed yet?
+
+- **Decisions made, memories cited, artifacts produced, or substantive work since the last checkpoint** → run `/checkpoint` first. Walk through its full protocol: synthesize, increment hits, ask Option D, propose new memories, flag drift, append to `LOG.md`. Then continue to step 2 below.
+- **Trivial session, OR `/checkpoint` was already run recently and nothing meaningful has happened since** → skip the reflective layer and proceed to step 2.
+- **Error-ended session where `/checkpoint` can't run (model calls blocked)** → skip and proceed to step 2; the mechanical archive is what's recoverable.
+
+When in doubt, lean toward running `/checkpoint`. Over-checkpointing is cheaper than missing reflective synthesis on a session that mattered.
+
+### Step 2 — Find the current session JSONL
 
 The current session's JSONL lives at `~/.claude/projects/<escaped-cwd>/<session-uuid>.jsonl`. CWD escape rule: replace `/` with `-`. Find the most recent JSONL in that directory:
 
@@ -42,7 +51,7 @@ ls -t ~/.claude/projects/$(pwd | sed 's|/|-|g')/*.jsonl 2>/dev/null | head -1
 
 The filename is `<session-uuid>.jsonl` — extract the UUID.
 
-### Step 2 — Invoke session_end.py with the resolved session ID
+### Step 3 — Invoke session_end.py with the resolved session ID
 
 ```bash
 echo '{"session_id": "<UUID>", "cwd": "<absolute-path-to-cwd>"}' | \
@@ -51,7 +60,7 @@ echo '{"session_id": "<UUID>", "cwd": "<absolute-path-to-cwd>"}' | \
 
 (The hook's fallback path will work even without `session_id` if you pass only `cwd`, since I fixed the Python precedence bug on 2026-04-26 — but explicit is better than implicit. Pass the UUID.)
 
-### Step 3 — Verify the archive
+### Step 4 — Verify the archive
 
 Two checks:
 
@@ -67,7 +76,7 @@ tail -5 orchestrator/LOG.md
 ```
 Should show `### Auto-archive — <ISO timestamp>` with chunk + hit counts.
 
-### Step 4 — Confirm to user
+### Step 5 — Confirm to user
 
 Brief one-line confirmation: *"Session archived. <N> chunks vectorized, <M> hits incremented. Safe to /exit."*
 

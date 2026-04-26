@@ -97,11 +97,7 @@ Observations, not actions. Clint can act on them later.
 
 Once the user approves the entry, append to the end of `orchestrator/LOG.md`. Preserve chronological order.
 
-### 7. Invoke `/end-session` for mechanical archive
-
-After the LOG entry is written, run the `/end-session` mechanical archive so the session JSONL gets archived to `orchestrator/transcripts/`, vectorized into the store, and memory hits get auto-incremented. This is the mechanical layer that the Stop hook would normally do — but if `/exit` follows shortly after `/checkpoint`, the Stop hook may not fire (it fires per-turn-completion, not on session end). Running the archive at the end of `/checkpoint` ensures texture and reflection both land.
-
-The archive is idempotent — safe to run regardless of whether the Stop hook also fires. See `.claude/commands/end-session.md` for the full archive protocol.
+`/checkpoint` is a reflective punctuation mark — it can be invoked multiple times per session at natural breaks (mid-task, before-context-shift, pre-compaction, etc.) without ending the session. The mechanical archive (vectorization + hit-counter increments) is handled separately by `/end-session` (which composes `/checkpoint` as its first step) or the Stop hook firing on each completed turn.
 
 ## Automation — what the Stop hook handles
 

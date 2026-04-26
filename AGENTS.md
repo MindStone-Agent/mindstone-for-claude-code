@@ -68,7 +68,7 @@ Memory files live in `orchestrator/memory/`. The included `MEMORY.md` is an inde
 Three orchestrator commands ship with the framework:
 
 - **`/checkpoint`** — Dream-cycle session synthesis. Updates `LOG.md`, asks the user which cited memories prevented a mistake, proposes new memories, flags drift (role-shaped work without `/act-as`, decisions without canonical attribution).
-- **`/end-session`** — Mechanical session-end archive. Invokes `session_end.py` to archive the current session JSONL, vectorize new chunks, and auto-increment memory hits. Use before `/exit` to ensure session texture is preserved when the Stop hook can't fire reliably (errors, abrupt termination). The mechanical sibling of `/checkpoint`.
+- **`/end-session`** — Wrap-up before `/exit`. Composes `/checkpoint` (when warranted) and the mechanical archive (vectorize transcript + auto-increment hits) into a single command. Use before `/exit` so reflection and persistence both land. Workaround for the Stop hook firing per-turn-completion rather than on session end.
 - **`/act-as <role>`** — Structural role adoption. Loads `.claude/agents/<role>.md` directives + referenced canonicals so the orchestrator can do implementation work directly while staying bound to the same standards.
 - **`/end-role`** — Exit role adoption. Runs an attribution audit (what canonicals were cited, what artifacts were produced) and logs the role span to `LOG.md`.
 
