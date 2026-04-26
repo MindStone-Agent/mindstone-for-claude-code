@@ -37,6 +37,8 @@ Planned scope:
 
 6. **Intra-session archive watchdog.** Discovered empirically 2026-04-26: the Stop hook fires per-turn-completion, NOT on session end. So `/exit`, abrupt termination, or sessions that die on errors (image-dimension limits, API outages) lose their post-last-turn texture from auto-archive. Mitigation candidates: (a) call session_end.py from UserPromptSubmit every N turns so worst-case loss is N turns instead of full post-error span; (b) external watcher (cron/launchd) that diffs source-JSONL mtime vs archive mtime and triggers manual archive; (c) shell-level wrapper that runs the recovery on Claude Code exit. Lean: option (a) — keeps mitigation in-framework, no external infrastructure. Add a `last_archived_turn_count` marker to the JSONL or a sidecar file so we don't re-archive what's already in the store.
 
+   **2026-04-26 update — `/end-session` slash command shipped as user-actionable workaround.** Until the watchdog lands, users can run `/end-session` before `/exit` to invoke the archive manually. Idempotent. Documented in `AGENTS.md`. The watchdog remains the proper fix (eliminates user remembering); `/end-session` is the bandaid until then.
+
 What v3 deliberately does NOT attempt: true programmatic sliding-window pruning. Claude Code doesn't allow modifying conversation history from a hook. The compaction-boundary cliff can be eliminated by user choice (auto-compact off), and graceful manual compaction is what we're building around.
 
 ## v4 — observability and validation
