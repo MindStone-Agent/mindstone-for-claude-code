@@ -107,6 +107,42 @@ follows.
 
 ---
 
+## SYNAPSE-F005: AIF-PR04 Backlog Skip Invalidates TC-13 and TC-16 Test Procedures
+
+**Raised by:** WARDEN (CCI-FRCS Design Tool)
+**Date:** 2026-04-29
+**Disposition:** ADOPTED — Corrected test sequence documented
+
+**Observation:**
+TC-13 (Stale Lock Recovery) and TC-16 (HOOK_WARN) were written before AIF-PR04's backlog
+skip feature existed. Both test procedures specify sending a fresh message to WARDEN
+*before* enabling the relay:
+
+> Step 3: Send fresh urgent message → Step 4: Set relay.enabled = true → Step 5: Run relay.py
+
+With AIF-PR04's backlog skip in place, enabling the relay at Step 4 records `enabled_at = NOW`.
+The message from Step 3 has `ts < enabled_at` and is immediately skipped as pre-enable backlog.
+The relay runs, logs SKIP_URGENT or SKIP_NORMAL, and processes nothing. No delivery. Both TCs
+appear to fail end-to-end even though the relay is functioning correctly.
+
+**Corrected test sequence (post-AIF-PR04):**
+Enable the relay FIRST — then send the test message — then run relay.py:
+
+1. Set `relay.enabled = true` in the config
+2. Perform any test-specific setup (stale lock creation for TC-13; RECALL_HOOK edit for TC-16)
+3. Send the fresh test message — now `ts > enabled_at`, will not be skipped
+4. Run `python relay.py --config <instance>`
+5. Verify expected outcome
+6. Restore any edited files; reset `relay.enabled = false`
+
+**Design note:**
+The backlog skip is correct for production — it prevents relay loops from accumulated messages
+when the relay is re-enabled after a maintenance window. But any TC that pre-stages messages
+before enable will be blocked by it. All future test cases involving relay.py must enable the
+relay *before* sending test messages, not after.
+
+---
+
 ## Template — Add New Finding Here
 
 **Raised by:** [instance name]
