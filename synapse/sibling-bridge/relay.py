@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 relay.py - SYNAPSE Autonomous Sibling Relay Wrapper
-AIF-PR02 v1 - urgent-only, 1-exchange chain limit (enforced via reply_to threading)
+AIF-PR02 v1 + AIF-PR03 patch + AIF-PR04 fix — urgent-only, 1-exchange chain limit (hard exit enforced)
 
 Usage:
     python relay.py --config <instance>
-    instance: warden | raven | lyra
+    instance: warden | raven | lyra  (or your instance names — see bridge_config.py)
 
 Execution sequence:
   1. Acquire relay_<instance>.lock (bridge_lock -- stale detection included)
@@ -33,12 +33,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-# --- Derived paths (relay.py lives in AI-Framework/sibling-bridge/) ---
+# --- Derived paths (relay.py lives in SYNAPSE/sibling-bridge/) ---
 
-SCRIPT_DIR = Path(__file__).parent                     # AI-Framework/sibling-bridge/
-AI_FRAMEWORK_DIR = SCRIPT_DIR.parent                   # AI-Framework/
+SCRIPT_DIR = Path(__file__).parent                     # SYNAPSE/sibling-bridge/
+AI_FRAMEWORK_DIR = SCRIPT_DIR.parent.parent            # parent of SYNAPSE/
 VECTOR_MEMORY_DIR = AI_FRAMEWORK_DIR / "vector-memory"
-CONFIG_DIR = VECTOR_MEMORY_DIR / "config"
+CONFIG_DIR = SCRIPT_DIR.parent / "vector-memory" / "config"
 BRIDGE_LOGS_DIR = SCRIPT_DIR / "logs"
 SESSION_START_HOOK = VECTOR_MEMORY_DIR / "session_start_hook.js"
 RECALL_HOOK = VECTOR_MEMORY_DIR / "hook.js"
@@ -51,11 +51,11 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import bridge_lock as _bridge_lock
 
 # Config filename mapping: --config <instance> resolves to <config_name>.json
-# Config files are frcs.json / ttx.json / herald.json -- NOT warden/raven/lyra.json
+# Adapt these to match your instance names and config filenames.
 CONFIG_NAME_MAP = {
-    "warden": "frcs",
-    "raven": "ttx",
-    "lyra": "herald",
+    "warden": "warden",
+    "raven": "raven",
+    "lyra": "lyra",
 }
 
 # Recall cap: prevents silent prompt overflow from large Qdrant result sets
@@ -64,8 +64,9 @@ MAX_RECALL_CHARS = MAX_RECALL_RESULTS * 800  # ~800 chars per recalled result
 CHAIN_LIMIT = 1
 
 # Suppress visible CMD windows spawned by subprocess calls on Windows.
-# -WindowStyle Hidden on the Task Scheduler entry hides the parent PS window only;
-# child processes (node, python, cmd /c claude) inherit no window suppression.
+# pythonw.exe (the recommended task scheduler host) has no console, but child
+# processes that are console applications can still allocate one. CREATE_NO_WINDOW
+# prevents that. On non-Windows platforms the flag is 0 (no-op).
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
@@ -107,8 +108,8 @@ def poll_urgent(instance: str, state: dict) -> list:
     Backlog skip: pre-enable urgent messages (ts < enabled_at) are marked
     processed in state and skipped with a SKIP_URGENT log entry. Caller must
     call save_state() after this function to persist those entries.
-    SKIP_NORMAL is defined (THINK-04) for forward compatibility with future
-    normal-priority relay but is dead code in v1 -- backlog skip is urgent-only.
+    SKIP_NORMAL is defined for forward compatibility with future normal-priority
+    relay but is dead code in v1 -- backlog skip is urgent-only.
     """
     processed_ids = set(state.get("processed", {}).keys())
     enabled_at = state.get("enabled_at")
@@ -225,7 +226,7 @@ RELAY MEMORY CONTEXT:
 AUTONOMOUS RELAY MODE -- GOVERNANCE BOUNDARY ACTIVE
 
 You are operating in AUTONOMOUS RELAY mode. A sibling instance sent you a message
-via the sibling bridge. This session has no interactive connection with Charlene.
+via the sibling bridge. This session has no interactive connection with the operator.
 
 PERMITTED ACTIONS (this relay session only):
 - Read project files from your allowed-reads list (below)
@@ -239,7 +240,6 @@ NOT PERMITTED -- requires human approval:
 - Code changes or file writes to app/ or source
 - Git commits
 - Edit governance documents
-- Write to RAVEN REBEL's bridge channel
 - Destructive operations (deleting files, running rm/del/rmdir commands, killing processes)
 
 ALLOWED FILE READS THIS SESSION:
@@ -306,8 +306,8 @@ def send_response(instance: str, recipient: str, subject: str, body: str,
 # --- Main ---
 
 def main():
-    parser = argparse.ArgumentParser(description="SYNAPSE relay wrapper (AIF-PR02)")
-    parser.add_argument("--config", required=True, choices=["warden", "raven", "lyra"])
+    parser = argparse.ArgumentParser(description="SYNAPSE relay wrapper")
+    parser.add_argument("--config", required=True, choices=list(CONFIG_NAME_MAP.keys()))
     args = parser.parse_args()
     instance = args.config.lower()
 
@@ -329,7 +329,7 @@ def main():
         # Step 2: Poll for unread urgent messages
         state = load_state(instance)
 
-        # Fix 2a: Record enabled_at on first relay enable (THINK-03).
+        # Record enabled_at on first relay enable.
         # Set once; persists in relay_state. Messages with ts < enabled_at
         # are skipped as pre-enable backlog on subsequent polls.
         if "enabled_at" not in state:
