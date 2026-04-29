@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 relay.py - SYNAPSE Autonomous Sibling Relay Wrapper
-AIF-PR02 v1 + AIF-PR03 patch + AIF-PR04 fix — urgent-only, 1-exchange chain limit (hard exit enforced)
+AIF-PR02 v1 - urgent-only, 1-exchange chain limit (enforced via reply_to threading)
 
 Usage:
     python relay.py --config <instance>
-    instance: warden | raven | lyra  (or your instance names — see bridge_config.py)
+    instance: warden | raven | lyra
 
 Execution sequence:
   1. Acquire relay_<instance>.lock (bridge_lock -- stale detection included)
@@ -33,12 +33,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-# --- Derived paths (relay.py lives in SYNAPSE/sibling-bridge/) ---
+# --- Derived paths (relay.py lives in AI-Framework/sibling-bridge/) ---
 
-SCRIPT_DIR = Path(__file__).parent                     # SYNAPSE/sibling-bridge/
-AI_FRAMEWORK_DIR = SCRIPT_DIR.parent.parent            # parent of SYNAPSE/
+SCRIPT_DIR = Path(__file__).parent                     # AI-Framework/sibling-bridge/
+AI_FRAMEWORK_DIR = SCRIPT_DIR.parent                   # AI-Framework/
 VECTOR_MEMORY_DIR = AI_FRAMEWORK_DIR / "vector-memory"
-CONFIG_DIR = SCRIPT_DIR.parent / "vector-memory" / "config"
+CONFIG_DIR = VECTOR_MEMORY_DIR / "config"
 BRIDGE_LOGS_DIR = SCRIPT_DIR / "logs"
 SESSION_START_HOOK = VECTOR_MEMORY_DIR / "session_start_hook.js"
 RECALL_HOOK = VECTOR_MEMORY_DIR / "hook.js"
@@ -51,17 +51,22 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import bridge_lock as _bridge_lock
 
 # Config filename mapping: --config <instance> resolves to <config_name>.json
-# Adapt these to match your instance names and config filenames.
+# Config files are frcs.json / ttx.json / herald.json -- NOT warden/raven/lyra.json
 CONFIG_NAME_MAP = {
-    "warden": "warden",
-    "raven": "raven",
-    "lyra": "lyra",
+    "warden": "frcs",
+    "raven": "ttx",
+    "lyra": "herald",
 }
 
 # Recall cap: prevents silent prompt overflow from large Qdrant result sets
 MAX_RECALL_RESULTS = 3
 MAX_RECALL_CHARS = MAX_RECALL_RESULTS * 800  # ~800 chars per recalled result
 CHAIN_LIMIT = 1
+
+# Suppress visible CMD windows spawned by subprocess calls on Windows.
+# -WindowStyle Hidden on the Task Scheduler entry hides the parent PS window only;
+# child processes (node, python, cmd /c claude) inherit no window suppression.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 # --- Config ---
@@ -102,8 +107,8 @@ def poll_urgent(instance: str, state: dict) -> list:
     Backlog skip: pre-enable urgent messages (ts < enabled_at) are marked
     processed in state and skipped with a SKIP_URGENT log entry. Caller must
     call save_state() after this function to persist those entries.
-    SKIP_NORMAL is defined for forward compatibility with future normal-priority
-    relay but is dead code in v1 -- backlog skip is urgent-only.
+    SKIP_NORMAL is defined (THINK-04) for forward compatibility with future
+    normal-priority relay but is dead code in v1 -- backlog skip is urgent-only.
     """
     processed_ids = set(state.get("processed", {}).keys())
     enabled_at = state.get("enabled_at")
@@ -172,6 +177,7 @@ def call_hook(script_path: Path, config_name: str, prompt_text: str) -> tuple:
             text=True,
             encoding="utf-8",
             timeout=30,
+            creationflags=_NO_WINDOW,
         )
         return result.stdout or "", result.stderr or ""
     except Exception as exc:
@@ -219,7 +225,7 @@ RELAY MEMORY CONTEXT:
 AUTONOMOUS RELAY MODE -- GOVERNANCE BOUNDARY ACTIVE
 
 You are operating in AUTONOMOUS RELAY mode. A sibling instance sent you a message
-via the sibling bridge. This session has no interactive connection with the operator.
+via the sibling bridge. This session has no interactive connection with Charlene.
 
 PERMITTED ACTIONS (this relay session only):
 - Read project files from your allowed-reads list (below)
@@ -233,6 +239,7 @@ NOT PERMITTED -- requires human approval:
 - Code changes or file writes to app/ or source
 - Git commits
 - Edit governance documents
+- Write to RAVEN REBEL's bridge channel
 - Destructive operations (deleting files, running rm/del/rmdir commands, killing processes)
 
 ALLOWED FILE READS THIS SESSION:
@@ -289,7 +296,7 @@ def send_response(instance: str, recipient: str, subject: str, body: str,
     ]
     if reply_to:
         cmd += ["--reply-to", reply_to]
-    result = subprocess.run(cmd, capture_output=True, timeout=15)
+    result = subprocess.run(cmd, capture_output=True, timeout=15, creationflags=_NO_WINDOW)
     if result.returncode != 0 and msg_id:
         stderr_text = (result.stderr or b"").decode("utf-8", errors="replace")[:200]
         log_relay(msg_id, instance, recipient, "SEND_FAILED",
@@ -299,8 +306,8 @@ def send_response(instance: str, recipient: str, subject: str, body: str,
 # --- Main ---
 
 def main():
-    parser = argparse.ArgumentParser(description="SYNAPSE relay wrapper")
-    parser.add_argument("--config", required=True, choices=list(CONFIG_NAME_MAP.keys()))
+    parser = argparse.ArgumentParser(description="SYNAPSE relay wrapper (AIF-PR02)")
+    parser.add_argument("--config", required=True, choices=["warden", "raven", "lyra"])
     args = parser.parse_args()
     instance = args.config.lower()
 
@@ -322,7 +329,7 @@ def main():
         # Step 2: Poll for unread urgent messages
         state = load_state(instance)
 
-        # Record enabled_at on first relay enable.
+        # Fix 2a: Record enabled_at on first relay enable (THINK-03).
         # Set once; persists in relay_state. Messages with ts < enabled_at
         # are skipped as pre-enable backlog on subsequent polls.
         if "enabled_at" not in state:
@@ -408,6 +415,7 @@ def main():
                             encoding="utf-8",
                             timeout=300,
                             cwd=config.get("repo_root"),
+                            creationflags=_NO_WINDOW,
                         )
                     response_text = result.stdout.strip()
                     if not response_text:
@@ -427,6 +435,7 @@ def main():
                     [sys.executable, str(DREAM_CYCLE), "--config", config_name],
                     capture_output=True,
                     timeout=120,
+                    creationflags=_NO_WINDOW,
                 )
 
                 # Step 9: Delete .session_start (boundary reset for next human session)
