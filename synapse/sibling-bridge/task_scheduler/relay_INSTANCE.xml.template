@@ -8,14 +8,20 @@
        PLACEHOLDER_INSTANCE     → your instance name (e.g. warden, raven, lyra)
        PLACEHOLDER_RELAY_PATH   → full path to relay.py
                                    e.g. C:\AI-Framework\SYNAPSE\sibling-bridge\relay.py
-       PLACEHOLDER_WORKING_DIR  → full path to your Claude Code project root
-                                   e.g. C:\Projects\my-claude-project
+       PLACEHOLDER_WORKING_DIR  → full path to sibling-bridge directory
+                                   e.g. C:\AI-Framework\SYNAPSE\sibling-bridge
+       PLACEHOLDER_PYTHONW_PATH → full path to pythonw.exe (NOT python.exe)
+                                   Find it: (Get-Command python).Source.Replace('python.exe','pythonw.exe')
+                                   e.g. C:\Users\you\AppData\Local\Programs\Python\Python311\pythonw.exe
   3. Import into Task Scheduler:
        schtasks /create /xml relay_<instance>.xml /tn "SYNAPSE Relay -- <INSTANCE>"
      Or via the Task Scheduler GUI: Action > Import Task
 
   NOTES:
   - Task is created DISABLED. Enable manually after pre-enable verification.
+  - Use pythonw.exe (NOT python.exe). python.exe creates a console window that
+    flashes on the desktop every 3 minutes. pythonw.exe is the no-console
+    Windows Python interpreter and produces no visible window.
   - ExecutionTimeLimit PT10M matches relay.py's try-once lock timeout (stale_after=600s).
   - MultipleInstancesPolicy=IgnoreNew prevents overlapping relay invocations.
   - PT3M trigger interval is the default. Adjust to your polling preference.
@@ -36,7 +42,7 @@
   </Triggers>
   <Actions Context="Author">
     <Exec>
-      <Command>python</Command>
+      <Command>PLACEHOLDER_PYTHONW_PATH</Command>
       <Arguments>"PLACEHOLDER_RELAY_PATH" --config PLACEHOLDER_INSTANCE</Arguments>
       <WorkingDirectory>PLACEHOLDER_WORKING_DIR</WorkingDirectory>
     </Exec>
@@ -46,7 +52,7 @@
     <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <Hidden>false</Hidden>
+    <Hidden>true</Hidden>
     <Enabled>false</Enabled>
   </Settings>
 </Task>
