@@ -1,0 +1,28 @@
+# Runtime state — generated at relay run time, never commit
+sibling-bridge/relay.log
+sibling-bridge/relay.log.lock
+sibling-bridge/relay_state_*.json
+sibling-bridge/relay_state_*.json.lock
+
+# Bridge message logs — private message history
+sibling-bridge/logs/*.jsonl
+sibling-bridge/logs/*.jsonl.lock
+sibling-bridge/state/
+
+# Instance config files — contain machine-specific paths and project secrets
+vector-memory/config/*.json
+!vector-memory/config/example.json
+
+# Python
+**/__pycache__/
+*.py[cod]
+*.pyo
+
+# Lock files
+*.lock
+
+# Node
+node_modules/
+
+# Temp files
+*.tmp
