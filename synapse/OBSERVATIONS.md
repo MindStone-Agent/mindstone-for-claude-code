@@ -143,6 +143,63 @@ relay *before* sending test messages, not after.
 
 ---
 
+## SYNAPSE-F004: Chain Limit Fires One Exchange Late — Originating Instance Blind Spot
+
+**Raised by:** RAVEN (Live_TTX_USDOD)
+**Date:** 2026-04-29
+**Disposition:** OPEN
+
+**Observation:**
+The chain limit hard exit (AIF-PR04) fires correctly at the receiving instance, but the
+originating instance never increments its own chain depth counter. When WARDEN sends an
+urgent message to RAVEN (depth=0), RAVEN replies (depth=1, chain limit reached — no further
+relay). But if RAVEN's reply arrives back at WARDEN, WARDEN sees depth=0 again (it tracked
+the outbound send as depth=0, never recorded it). WARDEN's relay can therefore fire a second
+response to RAVEN, producing two exchanges instead of one before the limit holds.
+
+No runaway loop results — the chain still terminates — but the effective limit is 2 exchanges
+rather than 1.
+
+**Proposed fix:**
+Pre-populate `chains[msg_id] = 0` at SEND time (when an outbound relay message is written),
+so the originating instance already has depth=0 in state before the reply arrives. When the
+reply comes in with `chain_depth=1`, the originating instance exits at the limit rather than
+treating itself as a fresh chain.
+
+**Status:** Open — no runaway risk, LOW priority fix for a future relay maintenance PR.
+
+---
+
+## SYNAPSE-F006: Task Scheduler CMD Window Flash — Use pythonw.exe, Not python.exe
+
+**Raised by:** WARDEN (CCI-FRCS Design Tool)
+**Date:** 2026-04-29
+**Disposition:** ADOPTED — Fixed in relay_INSTANCE.xml.template
+
+**Observation:**
+When Task Scheduler fires the relay task every 3 minutes using
+`python relay.py --config <instance>`, a console (CMD) window briefly flashes on the
+operator's desktop. Even wrapping with `powershell.exe -WindowStyle Hidden` does not fully
+suppress it — the PowerShell process creates a console window before the Hidden flag takes
+effect, causing a visible flash.
+
+Additionally, relay.py's subprocess calls to `node` (hook.js), `cmd /c claude --print`, and
+`dream_cycle.py` can each spawn visible console windows if the host process has a console to
+inherit.
+
+**Fix applied:**
+1. Task Scheduler action: switch from `python` to `pythonw.exe` — the no-console Windows
+   Python interpreter that never creates a window. See `relay_INSTANCE.xml.template`
+   PLACEHOLDER_PYTHONW_PATH and setup instructions for locating pythonw.exe.
+2. relay.py: added `_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0`
+   and applied `creationflags=_NO_WINDOW` to all four subprocess.run() calls (node hook,
+   claude --print, send_message.py, dream_cycle.py). Prevents child processes from allocating
+   their own console windows.
+
+**Combined effect:** No visible windows at any stage of relay execution on Windows.
+
+---
+
 ## Template — Add New Finding Here
 
 **Raised by:** [instance name]
