@@ -1,0 +1,65 @@
+{
+  "_comment": "SYNAPSE relay config example. Copy to <instance_name>.json and fill in paths.",
+  "_instance": "Replace with your instance name (must match bridge_config.py VALID_AGENTS)",
+
+  "project_id": "my-project",
+  "display_name": "My Claude Code Project",
+
+  "repo_root": "/path/to/your/project",
+
+  "session_path": "/path/to/.claude/projects/<encoded-project-path>",
+
+  "identity_file": "/path/to/your/project/.claude/CLAUDE.md",
+
+  "user_file": "/path/to/.claude/projects/<encoded-project-path>/memory/user_identity.md",
+
+  "ingest_sources": [
+    {
+      "type": "sessions",
+      "include_compaction": true,
+      "include_messages": true,
+      "session_cutoff": null
+    },
+    {
+      "type": "files",
+      "globs": [
+        "docs/**/*.md",
+        ".claude/CLAUDE.md"
+      ],
+      "exclude_globs": [
+        "**/node_modules/**"
+      ]
+    }
+  ],
+
+  "recall": {
+    "top_k": 10,
+    "score_threshold": 0.6,
+    "injection_label": "vector-memory",
+    "prevented_multiplier": 3,
+    "project_boost": 5.0
+  },
+
+  "dream_cycle": {
+    "enabled": true,
+    "llm_provider": "ollama",
+    "llm_url": "http://localhost:11434",
+    "llm_model": "llama3.1:8b",
+    "embedding_provider": "lmstudio",
+    "embedding_url": "http://localhost:1234",
+    "embedding_model": "nomic-embed-text-v1.5",
+    "journal_dir": "/path/to/your/project/tools/journal",
+    "qdrant_url": "http://localhost:6333",
+    "chunk_size_tokens": 512,
+    "chunk_overlap_tokens": 64,
+    "max_turns_for_journal": 40
+  },
+
+  "relay": {
+    "enabled": false,
+    "allowed_reads": [
+      "memory/",
+      "docs/"
+    ]
+  }
+}
