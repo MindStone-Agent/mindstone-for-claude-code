@@ -4,7 +4,9 @@
 Mechanical, non-LLM operations:
   1. Archive the current session's JSONL transcript into orchestrator/transcripts/
   2. Vectorize the new transcript chunks into the vector store
-  3. Auto-increment `hits` counters on memory files that appear to have been
+  3. Re-index any memory files whose mtime is newer than their stored vector
+     chunks (catches new + edited memories without a manual backfill)
+  4. Auto-increment `hits` counters on memory files that appear to have been
      cited in this session (simple filename match against transcript content)
 
 None of this requires the orchestrator to be "awake" or running. Runs
@@ -150,6 +152,74 @@ def vectorize_transcript(archived_path: Path) -> int:
         return 0
 
 # ---------------------------------------------------------------------------
+# Re-index changed memory files (mtime-delta against vector store)
+# ---------------------------------------------------------------------------
+
+def reindex_changed_memory() -> tuple[int, int]:
+    """Re-index any memory files whose mtime is newer than their stored chunks.
+
+    Returns (files_reindexed, chunks_added). New files (no chunks yet) and
+    edited files (mtime > stored last_seen_at) are both picked up. Unchanged
+    files are skipped — no embedding cost.
+    """
+    if not MEMORY_DIR.exists():
+        return 0, 0
+
+    try:
+        from embedder import Embedder
+        from indexer import Indexer
+        from vectorstore import VectorStore
+    except Exception as e:
+        print(f"[session_end] Vector stack unavailable ({e}); skipping memory reindex.", file=sys.stderr)
+        return 0, 0
+
+    store = VectorStore(DB_PATH)
+    store.init_schema()
+    try:
+        embedder = Embedder()
+    except Exception as e:
+        print(f"[session_end] Embedder not available ({e}); skipping memory reindex.", file=sys.stderr)
+        return 0, 0
+
+    # Build {source_path: max(last_seen_at)} for memory chunks already in store.
+    stored: dict[str, int] = {}
+    try:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.execute(
+            "SELECT source_path, MAX(last_seen_at) FROM chunks "
+            "WHERE source_type='memory' GROUP BY source_path"
+        )
+        for path, ts in cur.fetchall():
+            stored[path] = int(ts or 0)
+        conn.close()
+    except Exception as e:
+        print(f"[session_end] Could not query vector store ({e}); skipping memory reindex.", file=sys.stderr)
+        return 0, 0
+
+    idx = Indexer(store, embedder, verbose=False)
+    files_reindexed = 0
+    chunks_added = 0
+    for p in sorted(MEMORY_DIR.glob("*.md")):
+        try:
+            mtime = int(p.stat().st_mtime)
+        except Exception:
+            continue
+        last_seen = stored.get(str(p), 0)
+        # 2-second slack to avoid re-embedding files we just indexed.
+        if mtime <= last_seen + 2:
+            continue
+        try:
+            n = idx.index_memory_file(p)
+            if n > 0:
+                files_reindexed += 1
+                chunks_added += n
+        except Exception as e:
+            print(f"[session_end] Failed to re-index {p.name}: {e}", file=sys.stderr)
+
+    return files_reindexed, chunks_added
+
+# ---------------------------------------------------------------------------
 # Auto-increment hits based on memory filenames appearing in the transcript
 # ---------------------------------------------------------------------------
 
@@ -266,6 +336,10 @@ def main():
 
     n_chunks = vectorize_transcript(archived)
 
+    # Re-index any memory files that have been added or edited since their
+    # last vectorization. Cheap mtime check; only changed files are re-embedded.
+    mem_files, mem_chunks = reindex_changed_memory()
+
     # Watchdog runs hit-bumping risk inflated counters; let the per-turn
     # Stop hook own that responsibility.
     incremented = [] if WATCHDOG_MODE else auto_increment_hits(archived)
@@ -277,6 +351,7 @@ def main():
         f"{header} — {datetime.now(tz=timezone.utc).isoformat(timespec='seconds')}",
         f"- Archived: `{archived.name}`",
         f"- Transcript chunks vectorized: {n_chunks if n_chunks >= 0 else 'skipped (vectors unavailable)'}",
+        f"- Memory files re-indexed: {mem_files} ({mem_chunks} chunks)",
     ]
     if not WATCHDOG_MODE:
         log_entry.append(
