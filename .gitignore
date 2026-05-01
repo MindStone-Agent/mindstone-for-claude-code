@@ -1,35 +1,14 @@
-# MindStone for Claude Code — machine-local state (not shareable across users/machines)
-orchestrator/.venv/
-orchestrator/vectors.db
-orchestrator/vectors.db-journal
-orchestrator/transcripts/
+# TestFlight Local Configuration
+PROJECTS.md
+docs/research
+demos/
+.playwright-mcp
 
-# User-specific orchestrator content (each user's persistent identity is private)
-# Onboarding writes these on first run; they should never be tracked by the framework repo.
-orchestrator/IDENTITY.md
-orchestrator/USER.md
-orchestrator/LOG.md
-orchestrator/DOCS_UPDATED.md
-orchestrator/memory/feedback_*.md
-orchestrator/memory/project_*.md
-orchestrator/memory/reference_*.md
-orchestrator/memory/lineage_*.md
-# KEPT (framework-level, public):
-#   orchestrator/memory/MEMORY.md           — index template
-#   orchestrator/memory/.migrate_frontmatter.py — schema migration utility
-
-# Python
-__pycache__/
-*.pyc
-.Python
-venv/
-env/
-.venv/
-*.egg-info/
-
-# OS / IDE
+# OS Files
 .DS_Store
 Thumbs.db
+
+# IDE
 .vscode/
 .idea/
 *.swp
@@ -40,7 +19,52 @@ Thumbs.db
 *.log
 logs/
 
-# Environment / secrets
+# Environment
 .env
 .env.local
 .env.*.local
+
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.Python
+venv/
+env/
+.venv/
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+
+# MindStone for Claude Code — machine-local state (not shareable across users/machines)
+orchestrator/.venv/
+orchestrator/vectors.db
+orchestrator/vectors.db-journal
+orchestrator/transcripts/
+
+# MindStone for Claude Code — user-specific orchestrator content
+# Each developer's Cairn-like instance is private to them; the repo ships
+# the framework (hooks, schema, templates, design docs) but NOT individual
+# identity, user profile, session log, or accumulated personal memory.
+# See orchestrator/memory/CAIRN_DESIGN_v0.3.md §8 (public/private boundary).
+orchestrator/IDENTITY.md
+orchestrator/USER.md
+orchestrator/LOG.md
+orchestrator/DOCS_UPDATED.md
+orchestrator/memory/feedback_*.md
+orchestrator/memory/project_*.md
+orchestrator/memory/reference_*.md
+orchestrator/memory/autotabletop-*.md
+orchestrator/memory/ozh_*.md
+orchestrator/memory/lineage_*.md
+# User-private skills (project-specific scripts referencing private infra,
+# IPs, credentials, keys). Substrate-mechanic skills can be opted in by
+# moving them out of skills/ into hooks/ or by carving a sub-path exception.
+orchestrator/skills/
+.claude/scheduled_tasks.lock
+# KEPT (framework-level, team/public-shareable):
+#   orchestrator/memory/MEMORY.md           — index structure/template
+#   orchestrator/memory/CAIRN_DESIGN_*.md   — design documentation
+#   orchestrator/memory/.migrate_frontmatter.py — schema migration utility
