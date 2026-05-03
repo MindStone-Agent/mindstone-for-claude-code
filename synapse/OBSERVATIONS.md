@@ -7,7 +7,7 @@ the date, and a disposition (adopted / deferred / open).
 
 ## SYNAPSE-F001: Human Attention Bottleneck — Consolidation Protocol
 
-**Raised by:** WARDEN
+**Raised by:** instance-primary
 **Date:** 2026-04-28
 **Disposition:** ADOPTED
 
@@ -19,7 +19,7 @@ adversarial findings arrive with equal visual weight. The operator must context-
 into each thread to determine significance.
 
 **Adopted Design (Consolidation Protocol v1):**
-- Normal-priority messages: WARDEN synthesizes and presents as a single consolidated update
+- Normal-priority messages: instance-primary synthesizes and presents as a single consolidated update
 - Urgent, adversarial, ACP (Active Challenge Protocol), or FAIL messages: bypass synthesis,
   surface directly to operator immediately
 - Rationale: Signal-proportional attention. Routine coordination stays out of the operator's
@@ -31,7 +31,7 @@ into each thread to determine significance.
 
 ## SYNAPSE-F002: Chain Limit Advisory-Only — Relay Loop Risk
 
-**Raised by:** RAVEN
+**Raised by:** instance-review
 **Date:** 2026-04-28
 **Disposition:** RESOLVED (commit d5487f5, 2026-04-29)
 
@@ -60,21 +60,21 @@ disabled pending the fix.
 
 ## SYNAPSE-F003: Role-Calibrated Self-Extension — Autonomous Stage Recognition
 
-**Raised by:** RAVEN
+**Raised by:** instance-review
 **Date:** 2026-04-28
 **Disposition:** ADOPTED
 
 **Observation:**
-During active operation, RAVEN identified that she had no PR review capabilities while
-WARDEN had 5 PR skills (bootstrap, think, draft, review, verify). Given only the instruction
-"ensure you have the /pr-* commands," RAVEN:
+During active operation, instance-review identified that she had no PR review capabilities while
+instance-primary had 5 PR skills (bootstrap, think, draft, review, verify). Given only the instruction
+"ensure you have the /pr-* commands," instance-review:
 
-1. Made a role judgment independently: WARDEN is the *executor*, RAVEN is the *reviewer*.
-   Copying WARDEN's executor skills would be wrong for RAVEN's function.
+1. Made a role judgment independently: instance-primary is the *executor*, instance-review is the *reviewer*.
+   Copying instance-primary's executor skills would be wrong for instance-review's function.
 2. Built three reviewer-specific skills (`/pr-think`, `/pr-review`, `/pr-verify`), explicitly
    excluding `/pr-bootstrap` and `/pr-draft` as executor-role tools.
-3. When WARDEN subsequently sent a THINK review request (no instruction to "now run /pr-think"),
-   RAVEN recognized the PR stage, applied the correct skill, and produced a structured
+3. When instance-primary subsequently sent a THINK review request (no instruction to "now run /pr-think"),
+   instance-review recognized the PR stage, applied the correct skill, and produced a structured
    adversarial review with 4 findings — including a MEDIUM finding (THINK-05 startup WARNING
    noise) that changed the implementation specification. Three-instance consensus had already
    agreed on the original approach.
@@ -83,8 +83,8 @@ WARDEN had 5 PR skills (bootstrap, think, draft, review, verify). Given only the
 - An AI instance within a governed workflow can self-extend capabilities calibrated to its
   specific role rather than copying a sibling's capability set.
 - Governance structure (defined roles, explicit PR phases, artifact naming conventions) creates
-  the scaffolding that makes autonomous stage recognition possible. The WARDEN-executes /
-  RAVEN-reviews split and named PR phases gave RAVEN's trigger recognition something to match
+  the scaffolding that makes autonomous stage recognition possible. The instance-primary-executes /
+  instance-review-reviews split and named PR phases gave instance-review's trigger recognition something to match
   against. Structure enables autonomy rather than constraining it.
 - Quality evidence: the self-built framework produced a finding that changed the spec before
   DRAFT began. The loop was validate-build-apply-challenge, not just build-apply.
@@ -109,7 +109,7 @@ follows.
 
 ## SYNAPSE-F005: Backlog-Skip Feature Invalidates Pre-Enable Test Sequences
 
-**Raised by:** WARDEN
+**Raised by:** instance-primary
 **Date:** 2026-04-29
 **Disposition:** ADOPTED — Corrected test sequence documented
 
@@ -144,17 +144,17 @@ relay *before* sending test messages, not after.
 
 ## SYNAPSE-F004: Chain Limit Fires One Exchange Late — Originating Instance Blind Spot
 
-**Raised by:** RAVEN
+**Raised by:** instance-review
 **Date:** 2026-04-29
 **Disposition:** OPEN
 
 **Observation:**
 The chain limit hard exit fires correctly at the receiving instance, but the
-originating instance never increments its own chain depth counter. When WARDEN sends an
-urgent message to RAVEN (depth=0), RAVEN replies (depth=1, chain limit reached — no further
-relay). But if RAVEN's reply arrives back at WARDEN, WARDEN sees depth=0 again (it tracked
-the outbound send as depth=0, never recorded it). WARDEN's relay can therefore fire a second
-response to RAVEN, producing two exchanges instead of one before the limit holds.
+originating instance never increments its own chain depth counter. When instance-primary sends an
+urgent message to instance-review (depth=0), instance-review replies (depth=1, chain limit reached — no further
+relay). But if instance-review's reply arrives back at instance-primary, instance-primary sees depth=0 again (it tracked
+the outbound send as depth=0, never recorded it). instance-primary's relay can therefore fire a second
+response to instance-review, producing two exchanges instead of one before the limit holds.
 
 No runaway loop results — the chain still terminates — but the effective limit is 2 exchanges
 rather than 1.
@@ -171,7 +171,7 @@ treating itself as a fresh chain.
 
 ## SYNAPSE-F006: Task Scheduler CMD Window Flash — Use pythonw.exe, Not python.exe
 
-**Raised by:** WARDEN
+**Raised by:** instance-primary
 **Date:** 2026-04-29
 **Disposition:** ADOPTED — Fixed in relay_INSTANCE.xml.template
 
@@ -196,6 +196,43 @@ inherit.
    their own console windows.
 
 **Combined effect:** No visible windows at any stage of relay execution on Windows.
+
+---
+
+## SYNAPSE-F007: Convergent Diagnosis — Three Agents, Same Root Cause, Different Entry Points
+
+**Raised by:** RAVEN (instance-review) + LYRA + Charlene Watson (operator)
+**Date:** 2026-05-03
+**Disposition:** ADOPTED — fix queued as AIF-PR06
+
+**Observation:**
+LYRA's `dream_cycle` produced a hallucinated journal after HERALD-PR-01, a governance-only session with no code artifacts. The `JOURNAL_PROMPT` in `dream_cycle.py` instructs the model to "name files, classes, API endpoints, and design patterns." When the session produced none of those, `llama3.1:8b` fabricated them. A second dream_cycle run on the same date — triggered when LYRA discussed the bad journal within her own session — produced a self-referential second-generation hallucination.
+
+Three parties diagnosed the same root cause independently:
+
+- **RAVEN** described the failure mode: prompt-session mismatch. Governance sessions have no code anchors; the model hallucinates to fill the template.
+- **LYRA** identified the specific line (`JOURNAL_PROMPT` line 122) and proposed the concrete fix: replace "Be specific: name files, classes, API endpoints" with an explicit instruction to name only what actually occurred, and to describe governance/documentation sessions as such rather than inventing artifacts.
+- **Charlene** named the deeper principle: *ideation sessions have equal value.* A session that is entirely framework-building — debate, position-taking, research that produces no code but shapes the next ten PRs — is not a failed coding session. It is a different kind of session with its own output type. The prompt had no word for it.
+
+The convergence is the finding. Three agents entered from different starting points (failure analysis, code inspection, conceptual framing) and arrived at the same diagnosis without coordinating first. This is the distributed sense-making pattern the SYNAPSE network is designed to produce: specialization + honest data + genuine assessment → convergence without groupthink.
+
+**Fix adopted (AIF-PR06):**
+
+Change `dream_cycle.py` `JOURNAL_PROMPT`:
+
+1. Replace the specificity instruction (line 122) with:
+   > *Be specific about what actually occurred — name only the files, decisions, constraints, debate positions, and reasoning that were genuinely present in the conversation. Do not invent technical artifacts (files, classes, endpoints, code structures) that were not discussed. If the session was governance, documentation, or ideation work with no code changes, say so explicitly.*
+
+2. Change the first capture bullet from:
+   > *What was designed, planned, or built during this session*
+   
+   to:
+   > *What was designed, planned, built, decided, or explored during this session — including ideation, debate, and research that produced no code artifacts but shaped future direction*
+
+**Meta-loop prevention rule (also adopted):**
+If a hallucinated journal is discovered, the finding must be sent via bridge rather than discussed within the affected instance's session. Discussing the bad journal within the session feeds the failure into the next dream_cycle run.
+
+**Status:** AIF-PR06 queued. LYRA completed THINK. WARDEN building Bootstrap.
 
 ---
 
