@@ -232,7 +232,7 @@ Change `dream_cycle.py` `JOURNAL_PROMPT`:
 **Meta-loop prevention rule (also adopted):**
 If a hallucinated journal is discovered, the finding must be sent via bridge rather than discussed within the affected instance's session. Discussing the bad journal within the session feeds the failure into the next dream_cycle run.
 
-**Status:** AIF-PR06 queued. LYRA completed THINK. WARDEN building Bootstrap.
+**Status:** RESOLVED. AIF-PR06 COMPLETE — fix applied 2026-05-03. Two edits to `dream_cycle.py` JOURNAL_PROMPT: expanded first capture bullet to include ideation/debate/governance sessions; replaced specificity instruction with explicit anti-hallucination rule. Meta-loop prevention behavioral rule adopted.
 
 ---
 
