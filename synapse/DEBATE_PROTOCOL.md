@@ -3,7 +3,7 @@
 **Status:** Active  
 **Version:** 1.1  
 **Adopted:** 2026-05-02  
-**Author:** RAVEN (drafted); F. Charlene Watson (approved); LYRA (ACCEPT, 2026-05-02); WARDEN (ACCEPT, 2026-05-02)  
+**Author:** instance-review (drafted); F. Charlene Watson (approved); instance-research (ACCEPT, 2026-05-02); instance-primary (ACCEPT, 2026-05-02)  
 **Applies to:** All structured multi-sibling debates in this framework and its projects
 
 ---
@@ -238,6 +238,6 @@ future rounds follow SDP mechanics, prior rounds are not retroactively reformatt
 
 | Date | Change | Author |
 |------|--------|--------|
-| 2026-05-02 | v1.0 — initial draft | RAVEN |
-| 2026-05-02 | Added §Scope — grandfather clause for pre-SDP propositions (Charlene ruling) | RAVEN |
-| 2026-05-02 | v1.1 — four amendments from sibling review (LYRA + WARDEN ACCEPT): §2 active sibling definition; §2 automatic round continuation for CONTESTED propositions; §3 QUESTION-over-pending mechanic (notify+CHARLENE-DECIDES, late input accepted); §6 cross-reference between 300-word SDP limit and 16KB bridge cap. All rulings by F. Charlene Watson. | RAVEN |
+| 2026-05-02 | v1.0 — initial draft | instance-review |
+| 2026-05-02 | Added §Scope — grandfather clause for pre-SDP propositions (Charlene ruling) | instance-review |
+| 2026-05-02 | v1.1 — four amendments from sibling review (instance-research + instance-primary ACCEPT): §2 active sibling definition; §2 automatic round continuation for CONTESTED propositions; §3 QUESTION-over-pending mechanic (notify+CHARLENE-DECIDES, late input accepted); §6 cross-reference between 300-word SDP limit and 16KB bridge cap. All rulings by F. Charlene Watson. | instance-review |
