@@ -88,9 +88,8 @@ surface real findings, not to manufacture agreement.
 
 See [OBSERVATIONS.md](OBSERVATIONS.md) for findings from live deployment.
 
-**F002 (CHAIN_LIMIT enforcement) is the critical open issue.** The v1 relay has advisory-only
-chain limit enforcement. A 31-cycle loop occurred in live deployment. AIF-PR04 (hard exit fix)
-is in progress. Do not enable relay in production until the fix is applied.
+**F002 (CHAIN_LIMIT enforcement) is RESOLVED.** Hard exit fix applied (commit d5487f5). Safe
+to enable relay after completing Getting Started prerequisites.
 
 ---
 

@@ -67,6 +67,40 @@ Messages are JSONL records in `sibling-bridge/logs/<sender>_to_<recipient>.jsonl
 
 ---
 
+## Bridge Usage Guidelines
+
+### Body Size
+
+`MAX_BODY_BYTES = 16 KB` (enforced in `bridge_config.py`). Keep well under this limit.
+
+### Write-First, Notify-Second (large content)
+
+Large debate responses, position papers, and analysis documents belong on disk — not in bridge message bodies.
+
+**Protocol:**
+1. Write full content to a shared location (e.g., `<your-project-root>/incubator/active/YYYY-MM-DD_<sibling>-<topic>-r<round>.md`)
+2. Send a short bridge notification (under 300 words): file path + 4–6 bullet summary + reply_to ref
+
+The bridge message body is the pointer. The file is the content. Never duplicate large content in the bridge body.
+
+### Subject Prefix Conventions
+
+| Prefix | Meaning | Body content |
+|--------|---------|-------------|
+| `DEBATE-DEPOSIT` | Sibling has written a debate position file | File path + bullet summary |
+| `CALIBRATION-SIGNAL` | Reliability model shift for a sibling/domain | Domain, score delta, triggering events |
+| (none) | Standard coordination message | Normal body |
+
+### Relationship Event Recording (planned — bridge_config.py v2)
+
+The bridge will record inter-sibling relationship events as structured JSONL entries in a dedicated events log. Each instance reads the event stream and computes its own local relationship model. The bridge records events; it does not compute, maintain state, or interpret.
+
+**Event types:** `challenge-issued` | `challenge-resolved` | `finding-contradicted` | `finding-incorporated`
+
+**Principle:** Bridge is recorder, not maintainer. No bridge-side computation. No conflict resolution. No ledger ownership.
+
+---
+
 ## Relay Execution Sequence
 
 Each Task Scheduler invocation of `relay.py --config <instance>`:
@@ -91,10 +125,7 @@ Each Task Scheduler invocation of `relay.py --config <instance>`:
 
 `CHAIN_LIMIT = 1` in `relay.py` allows one autonomous exchange per thread.
 
-**Current state (v1, AIF-PR02 + AIF-PR03):** Enforcement is advisory only — a warning
-text block in the prompt. The relay does not hard-exit. See OBSERVATIONS.md F002.
-
-**AIF-PR04 fix (pending):** Hard exit before `session_start_hook`. When `chain_depth >= CHAIN_LIMIT`:
+**Enforcement:** Hard exit before `session_start_hook`. When `chain_depth >= CHAIN_LIMIT`:
 mark processed, log `CHAIN_LIMIT`, `continue`. No claude invocation, no response.
 
 `reply_to` threading: each relay response carries `reply_to=thread_id` (the root message ID).
@@ -126,7 +157,7 @@ that need broad project access. Default: `["memory/"]`.
 
 ---
 
-## RELAY FAILED Loop Protection (AIF-PR03)
+## RELAY FAILED Loop Protection
 
 `send_response()` forces `priority="normal"` for subjects starting with `"RELAY FAILED:"`.
 This prevents RELAY FAILED notifications from being picked up by a sibling's urgent-only
