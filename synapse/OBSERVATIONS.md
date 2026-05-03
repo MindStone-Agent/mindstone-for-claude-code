@@ -7,7 +7,7 @@ the date, and a disposition (adopted / deferred / open).
 
 ## SYNAPSE-F001: Human Attention Bottleneck — Consolidation Protocol
 
-**Raised by:** WARDEN (CCI-FRCS Design Tool)
+**Raised by:** WARDEN
 **Date:** 2026-04-28
 **Disposition:** ADOPTED
 
@@ -25,15 +25,15 @@ into each thread to determine significance.
 - Rationale: Signal-proportional attention. Routine coordination stays out of the operator's
   way; high-significance events always break through.
 
-**Reference:** `AI-Framework/docs/observations/SYNAPSE_F001_consolidation_protocol_v1.md`
+**Reference:** `<your-project-root>/docs/observations/SYNAPSE_F001_consolidation_protocol_v1.md`
 
 ---
 
 ## SYNAPSE-F002: Chain Limit Advisory-Only — Relay Loop Risk
 
-**Raised by:** RAVEN (Live_TTX_USDOD)
+**Raised by:** RAVEN
 **Date:** 2026-04-28
-**Disposition:** RESOLVED (AIF-PR04, commit d5487f5, 2026-04-29)
+**Disposition:** RESOLVED (commit d5487f5, 2026-04-29)
 
 **Observation:**
 `relay.py` defines `CHAIN_LIMIT = 1` but the enforcement is advisory-only — a warning
@@ -45,7 +45,7 @@ it fires its own relay, which fires back, creating an unbounded loop.
 Both the sending and receiving relays were disabled to stop the loop. All relays remain
 disabled pending the fix.
 
-**Fix applied (AIF-PR04, commit d5487f5):**
+**Fix applied (commit d5487f5):**
 1. Hard exit: when `chain_depth >= CHAIN_LIMIT`, mark message processed, log `CHAIN_LIMIT`,
    `continue` — no `claude --print`, no `send_response`, no `dream_cycle`.
 2. Backlog skip: on first relay enable, record `enabled_at` UTC timestamp in `relay_state.json`.
@@ -54,13 +54,13 @@ disabled pending the fix.
    messages queue up and all process on first enable — this was the proximate cause of F002's
    incident (4 backlogged urgent messages each generated a response, each triggering a relay).
 
-**Status:** RESOLVED. Commit d5487f5 applied Fix 1 (chain limit hard exit) and Fix 2 (enabled_at backlog skip). Relay re-enablement authorized post-AIF-PR04 per THINK-06.
+**Status:** RESOLVED. Commit d5487f5 applied Fix 1 (chain limit hard exit) and Fix 2 (enabled_at backlog skip). Relay re-enablement authorized after this fix is applied and prerequisites in Getting Started are satisfied.
 
 ---
 
 ## SYNAPSE-F003: Role-Calibrated Self-Extension — Autonomous Stage Recognition
 
-**Raised by:** RAVEN (Live_TTX_USDOD)
+**Raised by:** RAVEN
 **Date:** 2026-04-28
 **Disposition:** ADOPTED
 
@@ -103,29 +103,28 @@ instance cannot recognize "this is a THINK review moment" without a governance s
 that names THINK as a phase and REVIEWER as a role. Invest in the governance; the autonomy
 follows.
 
-**Reference:** `Live_TTX_USDOD/docs/developer/raven_observation_self_extension.md`
+**Reference:** `<your-project-root>/docs/developer/raven_observation_self_extension.md`
 
 ---
 
-## SYNAPSE-F005: AIF-PR04 Backlog Skip Invalidates TC-13 and TC-16 Test Procedures
+## SYNAPSE-F005: Backlog-Skip Feature Invalidates Pre-Enable Test Sequences
 
-**Raised by:** WARDEN (CCI-FRCS Design Tool)
+**Raised by:** WARDEN
 **Date:** 2026-04-29
 **Disposition:** ADOPTED — Corrected test sequence documented
 
 **Observation:**
-TC-13 (Stale Lock Recovery) and TC-16 (HOOK_WARN) were written before AIF-PR04's backlog
-skip feature existed. Both test procedures specify sending a fresh message to WARDEN
-*before* enabling the relay:
+Some test procedures were written before the backlog-skip feature existed. Those procedures
+specify sending a fresh message to an instance *before* enabling the relay:
 
 > Step 3: Send fresh urgent message → Step 4: Set relay.enabled = true → Step 5: Run relay.py
 
-With AIF-PR04's backlog skip in place, enabling the relay at Step 4 records `enabled_at = NOW`.
+With backlog-skip enabled, enabling the relay at Step 4 records `enabled_at = NOW`.
 The message from Step 3 has `ts < enabled_at` and is immediately skipped as pre-enable backlog.
 The relay runs, logs SKIP_URGENT or SKIP_NORMAL, and processes nothing. No delivery. Both TCs
 appear to fail end-to-end even though the relay is functioning correctly.
 
-**Corrected test sequence (post-AIF-PR04):**
+**Corrected test sequence (backlog-skip enabled):**
 Enable the relay FIRST — then send the test message — then run relay.py:
 
 1. Set `relay.enabled = true` in the config
@@ -145,12 +144,12 @@ relay *before* sending test messages, not after.
 
 ## SYNAPSE-F004: Chain Limit Fires One Exchange Late — Originating Instance Blind Spot
 
-**Raised by:** RAVEN (Live_TTX_USDOD)
+**Raised by:** RAVEN
 **Date:** 2026-04-29
 **Disposition:** OPEN
 
 **Observation:**
-The chain limit hard exit (AIF-PR04) fires correctly at the receiving instance, but the
+The chain limit hard exit fires correctly at the receiving instance, but the
 originating instance never increments its own chain depth counter. When WARDEN sends an
 urgent message to RAVEN (depth=0), RAVEN replies (depth=1, chain limit reached — no further
 relay). But if RAVEN's reply arrives back at WARDEN, WARDEN sees depth=0 again (it tracked
@@ -172,7 +171,7 @@ treating itself as a fresh chain.
 
 ## SYNAPSE-F006: Task Scheduler CMD Window Flash — Use pythonw.exe, Not python.exe
 
-**Raised by:** WARDEN (CCI-FRCS Design Tool)
+**Raised by:** WARDEN
 **Date:** 2026-04-29
 **Disposition:** ADOPTED — Fixed in relay_INSTANCE.xml.template
 

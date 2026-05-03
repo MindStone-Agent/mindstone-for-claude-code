@@ -112,7 +112,7 @@ For each instance, create a scheduled task:
 3. Open in a text editor and replace all placeholders:
    - `PLACEHOLDER_INSTANCE` → `alpha`
    - `PLACEHOLDER_RELAY_PATH` → full path to `relay.py`
-     e.g. `C:\AI-Framework\SYNAPSE\sibling-bridge\relay.py`
+     e.g. `C:\<your-project-root>\SYNAPSE\sibling-bridge\relay.py`
    - `PLACEHOLDER_WORKING_DIR` → your project root
      e.g. `C:\Projects\alpha-project`
 4. Import: `schtasks /create /xml relay_alpha.xml /tn "SYNAPSE Relay -- ALPHA"`
