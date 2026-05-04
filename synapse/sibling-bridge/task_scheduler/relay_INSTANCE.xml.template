@@ -7,9 +7,9 @@
   2. Replace ALL placeholder strings (search and replace in a text editor):
        PLACEHOLDER_INSTANCE     → your instance name (e.g. warden, raven, lyra)
        PLACEHOLDER_RELAY_PATH   → full path to relay.py
-                                   e.g. C:\AI-Framework\SYNAPSE\sibling-bridge\relay.py
+                                   e.g. C:\path\to\synapse\sibling-bridge\relay.py
        PLACEHOLDER_WORKING_DIR  → full path to sibling-bridge directory
-                                   e.g. C:\AI-Framework\SYNAPSE\sibling-bridge
+                                   e.g. C:\path\to\synapse\sibling-bridge
        PLACEHOLDER_PYTHONW_PATH → full path to pythonw.exe (NOT python.exe)
                                    Find it: (Get-Command python).Source.Replace('python.exe','pythonw.exe')
                                    e.g. C:\Users\you\AppData\Local\Programs\Python\Python311\pythonw.exe
