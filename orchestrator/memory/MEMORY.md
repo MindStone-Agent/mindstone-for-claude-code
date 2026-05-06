@@ -53,6 +53,12 @@ Examples:
 
 - `project_<name>.md` — Per-project context: scope, current sprint, decisions, key files.
 
+## Design (active design docs / pointers)
+
+Memory files of `type: design`. Either working drafts under active iteration (pre-scaffold), or pointers to canonical design docs that have moved to their own repos.
+
+- `design_agora.md` — Pointer to Agora, the family agent+human comms service. Canonical: https://github.com/R1ngZer0/agora/blob/main/docs/DESIGN.md. `critical: true` while Hearth is leading the project.
+
 ## Reference (evergreen — never decays)
 
 Memory files of `type: reference` and `evergreen: true`. External-system pointers, environment specifics, infrastructure knowledge that doesn't decay because it describes durable external state.
