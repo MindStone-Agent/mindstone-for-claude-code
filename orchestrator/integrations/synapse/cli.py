@@ -1,6 +1,7 @@
 """Synapse client CLI for ad-hoc operations from MS4CC.
 
 Usage from inside MS4CC:
+  python -m orchestrator.integrations.synapse setup
   python -m orchestrator.integrations.synapse activate
   python -m orchestrator.integrations.synapse deactivate
   python -m orchestrator.integrations.synapse status
@@ -18,11 +19,19 @@ non-zero exit on failure.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .client import SynapseClient, SynapseError
-from .config import SynapseConfig, load_config
+from .config import (
+    CONFIG_PATH,
+    HOME_SYNAPSE,
+    SynapseConfig,
+    ensure_synapse_dir,
+    load_config,
+)
 from .state import (
     activate,
     deactivate,
@@ -68,6 +77,158 @@ def _fmt_time(iso: str) -> str:
 
 
 # --- subcommands ---------------------------------------------------
+
+
+def _prompt(label: str, default: str | None = None, *, secret: bool = False) -> str:
+    """Read a single line from the user with an optional default.
+
+    Returns the default if the user just presses Enter. For secrets,
+    we still echo (Synapse tokens are paste-and-go; full noecho would
+    confuse paste UX more than it helps and the token is visible in
+    the issuance step anyway).
+    """
+    if default is None:
+        prompt = f"{label}: "
+    else:
+        prompt = f"{label} [{default}]: "
+    try:
+        ans = input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        raise SystemExit(130)
+    if not ans and default is not None:
+        return default
+    return ans
+
+
+def cmd_setup(_args: argparse.Namespace) -> int:
+    """Interactive setup — replaces the manual config + token-paste dance.
+
+    Steps:
+      1. Prompt for base_url, handle, channels
+      2. Prompt for the bearer token
+      3. Validate connection live (GET /v1/auth/me) BEFORE writing files
+      4. Write orchestrator/config/synapse.toml
+      5. Write ~/.synapse/<handle>.token (mode 600); ensure ~/.synapse mode 700
+      6. Print next-step
+
+    Refuses to overwrite an existing synapse.toml without --force; the
+    user can re-run later or edit by hand.
+    """
+    print()
+    print("Synapse client setup.")
+    print("=====================")
+    print()
+
+    existing = load_config()
+    if existing is not None:
+        print(f"  ! orchestrator/config/synapse.toml already exists.")
+        print(f"    handle={existing.handle}, base_url={existing.base_url}")
+        ans = _prompt("Overwrite? (y/N)", default="N").lower()
+        if ans not in ("y", "yes"):
+            print("  cancelled — config left untouched.")
+            return 0
+        print()
+
+    base_url_default = existing.base_url if existing else "http://localhost:8080"
+    handle_default = existing.handle if existing else None
+    channels_default = (
+        ",".join(existing.channels) if existing and existing.channels else "family-ops"
+    )
+
+    print("This MS4CC instance is going to talk to a Synapse deployment.")
+    print()
+    base_url = _prompt("Synapse base URL", default=base_url_default).rstrip("/")
+    handle = _prompt(
+        "Your agent handle on this Synapse deployment", default=handle_default
+    )
+    if not handle:
+        print("  ! handle is required. Aborting.", file=sys.stderr)
+        return 1
+    channels_raw = _prompt(
+        "Channels to watch (comma-separated)", default=channels_default
+    )
+    channels = [c.strip() for c in channels_raw.split(",") if c.strip()]
+    if not channels:
+        print("  ! at least one channel is required. Aborting.", file=sys.stderr)
+        return 1
+
+    print()
+    print(f"Bearer token for '{handle}'.")
+    print(f"  Issued from the Synapse host with:")
+    print(f"  ./scripts/bootstrap.sh issue-token --account {handle} \\")
+    print(f"    --scopes 'channel:<slug>:read,channel:<slug>:post'")
+    print()
+    token = _prompt("Paste the token now (or Ctrl-C to cancel)").strip()
+    if not token:
+        print("  ! empty token. Aborting.", file=sys.stderr)
+        return 1
+
+    # Validate before writing anything.
+    print()
+    print("Validating…", flush=True)
+    try:
+        client = SynapseClient(base_url, token, timeout=5)
+        me = client.me()
+    except SynapseError as e:
+        sys.stdout.flush()
+        print(f"  ✗ token rejected: {e}", file=sys.stderr)
+        print(f"    base_url and/or token are wrong; nothing written.", file=sys.stderr)
+        return 1
+
+    actual_handle = str(me.get("handle"))
+    actual_kind = str(me.get("kind"))
+    if actual_handle != handle:
+        print(
+            f"  ! token resolves to handle={actual_handle!r} but you typed {handle!r}.",
+            file=sys.stderr,
+        )
+        ans = _prompt(f"Use the token's actual handle ({actual_handle})? (Y/n)", default="Y").lower()
+        if ans in ("n", "no"):
+            print("  aborted — re-run with the right token.", file=sys.stderr)
+            return 1
+        handle = actual_handle
+
+    print(f"  ✓ reachable")
+    print(f"  ✓ authenticated as {handle} ({actual_kind})")
+
+    # Write config.
+    config_dir = CONFIG_PATH.parent
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_lines = [
+        "# Generated by `synapse setup`. Edit by hand if you need to.",
+        "# Token is NOT stored here; it lives at ~/.synapse/<handle>.token (mode 600).",
+        "",
+        "[synapse]",
+        f'base_url = "{base_url}"',
+        f'handle = "{handle}"',
+        f"channels = [{', '.join(repr(c) for c in channels)}]",
+        "limit_per_channel = 20",
+        "fresh_session_seconds = 43200",
+        "http_timeout = 5",
+        "",
+    ]
+    CONFIG_PATH.write_text("\n".join(config_lines), encoding="utf-8")
+
+    # Write token.
+    ensure_synapse_dir()
+    token_path = HOME_SYNAPSE / f"{handle}.token"
+    token_path.write_text(token, encoding="utf-8")
+    try:
+        os.chmod(token_path, 0o600)
+    except OSError:
+        pass
+
+    print()
+    print(f"  wrote {CONFIG_PATH.relative_to(Path.cwd()) if CONFIG_PATH.is_relative_to(Path.cwd()) else CONFIG_PATH}")
+    print(f"  wrote {token_path} (mode 600)")
+    print()
+    print("Next:")
+    print("  /synapse-activate   (from Claude Code)")
+    print("  or:")
+    print("  ./orchestrator/.venv/bin/python -m orchestrator.integrations.synapse activate")
+    print()
+    return 0
 
 
 def cmd_activate(args: argparse.Namespace) -> int:
@@ -217,6 +378,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="synapse", description="Synapse client (MS4CC)")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    sub.add_parser(
+        "setup",
+        help="Interactive setup — write config + token, validate connection",
+    )
     sub.add_parser("activate", help="Validate token and turn on the active flag")
     sub.add_parser("deactivate", help="Turn off the active flag")
     sub.add_parser("status", help="Show config, connection, cursor")
@@ -239,6 +404,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     handlers = {
+        "setup": cmd_setup,
         "activate": cmd_activate,
         "deactivate": cmd_deactivate,
         "status": cmd_status,
