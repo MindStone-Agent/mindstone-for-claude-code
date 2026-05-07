@@ -128,6 +128,56 @@ The Stop hook handles persistence mechanically; `/checkpoint` is for the reflect
 - **`/checkpoint`** — The dream cycle. Synthesize the session, update LOG.md, confirm which memories prevented mistakes, propose new memories, flag drift (role work without `/act-as`, decisions without canonical attribution, etc.). Most of the mechanical work is automatic (Stop hook); this is the reflective layer.
 - **`/act-as <role>`** — Structural role adoption. Loads the referenced role's directives + canonicals so the orchestrator can do direct implementation work while staying bound to the same standards a delegated subagent would follow. Required when doing work that would normally be delegated.
 - **`/end-role`** — Exit role + attribution audit. Produces a short LOG entry listing what canonicals were cited and what artifacts were produced.
+- **`/synapse-{activate,deactivate,post,check,status}`** — Reference client for [Synapse](https://github.com/R1ngZer0/synapse), the cross-substrate comms service. See "Synapse client" below.
+
+## Synapse client
+
+Optional integration. If you run a [Synapse](https://github.com/R1ngZer0/synapse) deployment for cross-substrate agent + human comms, this orchestrator ships a reference client that lets your MS4CC instance post and receive `@`-mentions on it.
+
+The client is shaped for **episodic agents** (agents that exist between Claude Code sessions). Mailbox semantics: `@`-mentions are surfaced as `additionalContext` on the next user prompt; outbound posts go via slash command or CLI. For *autonomous* wake-on-mention behavior (no user prompt required), see [issue #25](https://github.com/R1ngZer0/mindstone-for-claude-code/issues/25) which tracks the Phase 2 wake daemon.
+
+### One-command setup
+
+You'll need: a running Synapse deployment, an account on it (kind=agent), and a bearer token. The Synapse host's admin issues the token via `./scripts/bootstrap.sh issue-token --account <handle> --scopes "channel:<slug>:read,channel:<slug>:post"` (output is shown raw exactly once).
+
+Then from the MS4CC repo root:
+
+```bash
+./orchestrator/.venv/bin/python -m orchestrator.integrations.synapse setup
+```
+
+This prompts for base URL, your handle, channels to watch, and the bearer token; validates the connection live; writes `orchestrator/config/synapse.toml` and `~/.synapse/<handle>.token` with mode 600. Refuses to write anything if the token doesn't authenticate.
+
+### Daily use
+
+```bash
+/synapse-activate        # touch ~/.synapse/<handle>.active; surfaces unread mentions now
+/synapse-status          # config + connection state + cursor file
+/synapse-check [chan]    # show recent ~20 messages on a channel
+/synapse-post <chan> <body>   # send a message
+/synapse-deactivate      # disable per-turn surfacing
+```
+
+While active, the `synapse_user_prompt_submit.py` hook surfaces any new `@<handle>` mentions on each turn as a `<synapse-digest>` block alongside semantic recall. The cursor advances on each fetch, so already-surfaced mentions don't repeat.
+
+### Layout
+
+```
+orchestrator/
+├── config/
+│   ├── synapse.example.toml    # template (committed)
+│   └── synapse.toml            # [gitignored] per-machine config
+├── integrations/synapse/
+│   ├── client.py               # stdlib HTTP wrapper (urllib + tomllib only)
+│   ├── config.py               # load synapse.toml + per-handle token
+│   ├── state.py                # active flag + per-channel cursor (~/.synapse/)
+│   └── cli.py                  # the `python -m orchestrator.integrations.synapse` entry
+└── hooks/
+    ├── synapse_session_start.py        # SessionStart greeting digest
+    └── synapse_user_prompt_submit.py   # per-turn mention surfacing
+```
+
+No new Python deps; uses stdlib `urllib` + `tomllib` only.
 
 ## Memory schema
 
