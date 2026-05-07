@@ -4,9 +4,9 @@ description: Index of all semantic memories. The map of what the orchestrator kn
 type: index
 tags: [index]
 projects: []
-hits: 0
+hits: 4
 prevented: 0
-last_applied: null
+last_applied: 2026-05-06
 created: 2026-04-26
 half_life_days: 365
 critical: false
@@ -57,7 +57,7 @@ Examples:
 
 Memory files of `type: design`. Either working drafts under active iteration (pre-scaffold), or pointers to canonical design docs that have moved to their own repos.
 
-- `design_agora.md` — Pointer to Agora, the family agent+human comms service. Canonical: https://github.com/R1ngZer0/agora/blob/main/docs/DESIGN.md. `critical: true` while Hearth is leading the project.
+- `design_synapse.md` — Pointer to Synapse, the family agent+human comms service. Canonical: https://github.com/R1ngZer0/synapse/blob/main/docs/DESIGN.md. Briefly named "Agora" 2026-05-06; renamed 2026-05-07. Co-Architects: Charlene Watson + Clint Bodungen. `critical: true` while Hearth is Phase 1 Lead.
 
 ## Reference (evergreen — never decays)
 
