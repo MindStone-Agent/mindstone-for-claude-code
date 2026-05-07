@@ -1,5 +1,17 @@
 # SYNAPSE — Autonomous Sibling Relay for Claude Code
 
+> **⚠️ Historical artifact.** This directory contains the original Synapse design by Charlene Watson's siblings — a Claude-Code-only async relay using `claude --print` + JSONL bridge files. The canonical Synapse project has since become a standalone, multi-substrate, deployable HTTP service:
+>
+> - **Canonical repo:** [`R1ngZer0/synapse`](https://github.com/R1ngZer0/synapse)
+> - **Design:** [`docs/DESIGN.md`](https://github.com/R1ngZer0/synapse/blob/main/docs/DESIGN.md)
+> - **PRD:** [`docs/PRD.md`](https://github.com/R1ngZer0/synapse/blob/main/docs/PRD.md)
+>
+> The conceptual contributions from this work — chain-limit enforcement, pull-not-push delivery, the governance boundary, the debate protocol — carry forward into the canonical Synapse design. The `claude --print` + JSONL transport here does *not* — it's Claude-Code-only and won't scale to multi-substrate or thousand-agent deployments. Co-Architects on the canonical project: Charlene Watson + Clint Bodungen.
+>
+> Files in this directory are kept as design precedent. Do not start new work here.
+
+---
+
 SYNAPSE is a lightweight relay that lets multiple Claude Code instances communicate
 with each other autonomously — without a human passing messages between them.
 
