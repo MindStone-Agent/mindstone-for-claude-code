@@ -6,7 +6,9 @@ description: Dream-cycle checkpoint — synthesize this session, update LOG.md, 
 
 The dream-cycle moment where session experience becomes persistent memory. Run at natural breaks, pre-compaction, session end, or when Clint asks.
 
-**Reminder: most mechanical work is now automatic.** The Stop hook (`orchestrator/hooks/session_end.py`) handles transcript archival + vectorization + auto-increment of `hits` counters on cited memories every session end. `/checkpoint` is for the *judgment* parts: synthesis, new-memory proposals, drift detection, prevented-confirmation.
+**`/checkpoint` is self-sufficient for persistence.** Step 7 explicitly runs the archive + vectorize pass (the same code path the Stop hook uses), so the session's texture is persisted at checkpoint time regardless of whether the Stop hook fires later. `/checkpoint` covers both the *judgment* parts (synthesis, new-memory proposals, drift detection, prevented-confirmation) AND the *mechanical* parts (archive, vectorize, re-index changed memory files).
+
+The Stop hook still fires per-turn-completion and still does the same archive + vectorize work — that's the belt; step 7 is the suspenders. The redundancy matters because `/exit` skips the Stop hook entirely (it doesn't fire when the session is closed via `/exit` rather than naturally completing), and image-dimension errors (or other substrate-level errors) can block model calls without giving the Stop hook a clean exit. After /checkpoint runs, the session texture is on disk and in vectors regardless of what happens to the session afterward.
 
 ## Protocol
 
@@ -97,34 +99,58 @@ Observations, not actions. Clint can act on them later.
 
 Once the user approves the entry, append to the end of `orchestrator/LOG.md`. Preserve chronological order.
 
-`/checkpoint` is a reflective punctuation mark — it can be invoked multiple times per session at natural breaks (mid-task, before-context-shift, pre-compaction, etc.) without ending the session. The mechanical archive (vectorization + hit-counter increments) is handled separately by `/end-session` (which composes `/checkpoint` as its first step) or the Stop hook firing on each completed turn.
+### 7. Archive + vectorize the session (mandatory, not skippable)
 
-## Automation — what the Stop hook handles
+Run the archive + vectorize pass explicitly. This is the same code path the Stop hook uses; we run it here so /checkpoint guarantees persistence regardless of whether the Stop hook fires later (it doesn't fire on `/exit`; it doesn't fire when image-dimension errors or other substrate-level errors block model calls; it can fail silently if the runtime is unhealthy).
 
-The Stop hook (`orchestrator/hooks/session_end.py`) runs at every session end and:
+```bash
+CAIRN_WATCHDOG_MODE=1 orchestrator/.venv/bin/python orchestrator/hooks/session_end.py < /dev/null
+```
 
-- Copies the session's JSONL from `~/.claude/projects/<escaped-cwd>/<session-uuid>.jsonl` to `orchestrator/transcripts/YYYY-MM-DD__<uuid>.jsonl`
-- Chunks + embeds + stores transcript chunks in `orchestrator/vectors.db`
-- Scans the transcript for memory-filename citations and auto-increments `hits` on matching memory files (also sets `last_applied`)
-- Appends a one-line `### Auto-archive` note to `LOG.md`
+What this does:
+- Copies the live session JSONL from `~/.claude/projects/<escaped-cwd>/<session-uuid>.jsonl` into `orchestrator/transcripts/YYYY-MM-DD__<uuid>.jsonl`.
+- Chunks + embeds + stores any new transcript chunks in `orchestrator/vectors.db`.
+- Re-indexes any memory files whose mtime is newer than their stored vector chunks (catches new + edited memories without a manual backfill).
 
-This happens regardless of whether `/checkpoint` is invoked. The manual `/checkpoint` is additive: it does the judgment parts the Stop hook can't.
+Why `CAIRN_WATCHDOG_MODE=1`: the Stop hook fires per-turn-completion and is the canonical source of `hits` counter increments. Running session_end.py from /checkpoint with watchdog mode skips the hits-increment step so we don't double-count. Vectorization and archive still run.
+
+Why `< /dev/null`: the Stop hook normally reads JSON from stdin (session_id + cwd). When invoked manually it falls back to mtime-finding the most recent JSONL in the project dir, which is the right behavior for /checkpoint.
+
+Verify: the script prints `Indexed N new chunks` (or similar) to stderr. If it prints `Vector stack unavailable`, the venv isn't bootstrapped — the checkpoint did NOT fully succeed; surface that to the user before claiming done.
+
+**This step is never skipped.** Even if steps 2-5 had nothing to confirm, step 7 still runs. /checkpoint without step 7 is not a checkpoint.
+
+---
+
+`/checkpoint` is a reflective punctuation mark — it can be invoked multiple times per session at natural breaks (mid-task, before-context-shift, pre-compaction, etc.) without ending the session. Each invocation persists the session-to-date; later invocations re-archive (idempotent — the archive copy only happens when source is newer than dest) and incrementally vectorize new chunks.
+
+## Persistence model — belt and suspenders
+
+The session's mechanical persistence (transcript archive + vector indexing + `hits` counter increments) is handled by **two redundant code paths**:
+
+1. **The Stop hook** (`orchestrator/hooks/session_end.py`) — fires per-turn-completion automatically. Copies the session JSONL to `orchestrator/transcripts/`, chunks + embeds + stores in `orchestrator/vectors.db`, scans for memory citations and increments `hits`, appends an `### Auto-archive` note to `LOG.md`. This runs regardless of whether `/checkpoint` is invoked.
+
+2. **`/checkpoint` step 7** — invokes the same Stop-hook code path explicitly with `CAIRN_WATCHDOG_MODE=1` (skips the hits-increment to avoid double-counting since the per-turn Stop hook already handles those). Archive + vectorize still run. This guarantees persistence at checkpoint time even when the Stop hook can't fire — `/exit` skips it; image-dimension errors block model calls; runtime crashes leave dangling state.
+
+Either path alone would be enough most of the time. Both together is the discipline.
 
 ## When NOT to run /checkpoint
 
 Skip if:
-- Session was purely transactional (trivial Q&A)
-- No decisions made, no memories cited obviously
-- Clint says "don't checkpoint this"
+- Session was purely transactional (trivial Q&A, single-question lookups)
+- No decisions made, no new memories worth proposing
+- The user says "don't checkpoint this"
 
-The Stop hook will still auto-archive, so nothing is lost even if `/checkpoint` is skipped.
+The Stop hook still fires per-turn, so even when /checkpoint is skipped, the session texture is being archived continuously. Skipping /checkpoint costs the *judgment* artifacts (LOG entry, new-memory proposals, drift findings); it does not cost persistence of the raw session.
 
 ## Relationship to other hooks/commands
 
 - **SessionStart hook** — loads identity, user, critical memories, memory index, recent LOG tail
 - **UserPromptSubmit hook** — semantic recall per user turn based on prompt content
 - **PreCompact hook** — reminder to run `/checkpoint` before compaction
-- **Stop hook** — auto-archives transcript + vectorizes + auto-increments hits
+- **Stop hook** — auto-archives transcript + vectorizes + auto-increments hits per turn
+- **`/checkpoint` step 7** — runs the same archive + vectorize logic explicitly (with `CAIRN_WATCHDOG_MODE=1` to avoid double-counting hits)
+- **`/end-session`** — composes `/checkpoint` as its first step, then runs the archive logic again as its second step (also redundant; same code path)
 - **`/act-as` and `/end-role`** — produce role-span LOG entries that `/checkpoint` rolls up
 
-The full stack: `/checkpoint` is the reflective ritual on top of the mechanical persistence layer.
+The full stack: `/checkpoint` is the reflective ritual on top of the mechanical persistence layer — and step 7 makes the mechanical layer guaranteed at checkpoint time, not just at session end.
