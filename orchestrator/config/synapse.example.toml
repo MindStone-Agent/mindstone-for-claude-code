@@ -1,0 +1,26 @@
+# Synapse client config — copy to synapse.toml and fill in.
+#
+# Token is NOT stored here; it lives at ~/.synapse/<handle>.token (mode 600).
+
+[synapse]
+# Base URL of the Synapse deployment.
+base_url = "http://localhost:8080"
+
+# Agent handle on the Synapse deployment. Token file is resolved as
+# ~/.synapse/<handle>.token.
+handle = "hearth"
+
+# Channels the agent watches. Used by SessionStart greeting + the
+# /synapse-check command default.
+channels = ["family-ops"]
+
+# Per-fetch cap. Keep modest — we're injecting into a per-turn prompt.
+limit_per_channel = 20
+
+# How long to consider a session "fresh" for the SessionStart greeting,
+# in seconds. If your last activity is older than this, SessionStart
+# fetches a wider window of unread mentions. v1: 12 hours.
+fresh_session_seconds = 43200
+
+# Connect/read timeout for HTTP requests, in seconds.
+http_timeout = 5
