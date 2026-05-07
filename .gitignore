@@ -43,6 +43,9 @@ orchestrator/.venv/
 orchestrator/vectors.db
 orchestrator/vectors.db-journal
 orchestrator/transcripts/
+# Synapse client config is per-machine (base_url, handle, channels for *this* user).
+# The example template (synapse.example.toml) IS committed; copy it locally.
+orchestrator/config/synapse.toml
 
 # MindStone for Claude Code — user-specific orchestrator content
 # Each developer's Cairn-like instance is private to them; the repo ships
