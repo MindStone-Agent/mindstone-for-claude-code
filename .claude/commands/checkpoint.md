@@ -4,7 +4,7 @@ description: Dream-cycle checkpoint — synthesize this session, update LOG.md, 
 
 # Checkpoint — persist this session to the orchestrator's memory
 
-The dream-cycle moment where session experience becomes persistent memory. Run at natural breaks, pre-compaction, session end, or when Clint asks.
+The dream-cycle moment where session experience becomes persistent memory. Run at natural breaks, pre-compaction, session end, or when the user asks.
 
 **`/checkpoint` is self-sufficient for persistence.** Step 7 explicitly runs the archive + vectorize pass (the same code path the Stop hook uses), so the session's texture is persisted at checkpoint time regardless of whether the Stop hook fires later. `/checkpoint` covers both the *judgment* parts (synthesis, new-memory proposals, drift detection, prevented-confirmation) AND the *mechanical* parts (archive, vectorize, re-index changed memory files).
 
@@ -14,7 +14,7 @@ The Stop hook still fires per-turn-completion and still does the same archive + 
 
 ### 1. Synthesize the session
 
-Draft an entry for `testflight/orchestrator/LOG.md` in this format:
+Draft an entry for `orchestrator/LOG.md` in this format:
 
 ```markdown
 ## YYYY-MM-DD — short title
@@ -32,7 +32,7 @@ Draft an entry for `testflight/orchestrator/LOG.md` in this format:
 - filename.md — why it was useful
 
 ### Prevented confirmations (Option D — ask if anything genuinely prevented a mistake)
-- filename.md — confirmed by Clint
+- filename.md — confirmed by user
 
 ### New memories proposed
 - (from step 3)
@@ -44,11 +44,11 @@ Draft an entry for `testflight/orchestrator/LOG.md` in this format:
 - (from step 5)
 ```
 
-Show Clint the draft. Let him edit or approve.
+Show the user the draft. Let them edit or approve.
 
 ### 2. Prevented confirmations (Option D, terse)
 
-Pull the list of memories that were `hits` in this session (the Stop hook writes them to LOG automatically once it fires; until then, enumerate from your citations in the session). Ask Clint:
+Pull the list of memories that were `hits` in this session (the Stop hook writes them to LOG automatically once it fires; until then, enumerate from your citations in the session). Ask the user:
 
 > *"Which of these prevented a mistake? ('1, 3, 5' works, or 'none'.)"*
 
@@ -66,13 +66,13 @@ orchestrator/.venv/bin/python orchestrator/hooks/recall.py "<concept to check>" 
 
 If a similar memory exists (similarity > ~0.55), propose *updating* the existing one rather than creating a duplicate. If nothing matches, draft the new memory:
 
-- File at `testflight/orchestrator/memory/<type>_<short_name>.md`
-- v0.2 frontmatter schema (see `CAIRN_DESIGN_v0.2.md` §6)
+- File at `orchestrator/memory/<type>_<short_name>.md`
+- Frontmatter schema: see existing memory files for the canonical shape (`name`, `description`, `type`, `tags`, `projects`, `hits`, `prevented`, `last_applied`, `created`, `half_life_days`, `critical`, `evergreen`)
 - `type` ∈ {feedback, project, reference, design}
-- `tags` and `projects` — **infer from content and filename; do NOT ask Clint** (he doesn't tag)
+- `tags` and `projects` — **infer from content and filename**, don't make the user tag manually
 - Critical flag only for load-bearing rules (rarely)
 
-Show Clint the draft before writing. On accept: write file, add pointer to `MEMORY.md`. The Stop hook will vectorize it on next session end (or you can manually index it now via `orchestrator/.venv/bin/python orchestrator/hooks/indexer.py backfill`).
+Show the user the draft before writing. On accept: write file, add pointer to `MEMORY.md`. The Stop hook will vectorize it on next session end (or you can manually index it now via `orchestrator/.venv/bin/python orchestrator/hooks/indexer.py backfill`).
 
 ### 4. Drift detection
 
@@ -93,11 +93,12 @@ Use the vector store to surface issues:
 - **Duplicate/redundant content:** After a new memory is proposed, run a semantic search for it; if top-3 matches are all existing memories with high sim, consider merging rather than adding.
 - **Outdated claims:** A project sprint memo from months ago no longer reflecting current state — note for refresh.
 
-Observations, not actions. Clint can act on them later.
+Observations, not actions. The user can act on them later.
 
 ### 6. Append to LOG.md
 
 Once the user approves the entry, append to the end of `orchestrator/LOG.md`. Preserve chronological order.
+
 
 ### 7. Archive + vectorize the session (mandatory, not skippable)
 
@@ -112,7 +113,7 @@ What this does:
 - Chunks + embeds + stores any new transcript chunks in `orchestrator/vectors.db`.
 - Re-indexes any memory files whose mtime is newer than their stored vector chunks (catches new + edited memories without a manual backfill).
 
-Why `CAIRN_WATCHDOG_MODE=1`: the Stop hook fires per-turn-completion and is the canonical source of `hits` counter increments. Running session_end.py from /checkpoint with watchdog mode skips the hits-increment step so we don't double-count. Vectorization and archive still run.
+Why the watchdog mode env var: the Stop hook fires per-turn-completion and is the canonical source of `hits` counter increments. Running session_end.py from /checkpoint with watchdog mode skips the hits-increment step so we don't double-count. Vectorization and archive still run.
 
 Why `< /dev/null`: the Stop hook normally reads JSON from stdin (session_id + cwd). When invoked manually it falls back to mtime-finding the most recent JSONL in the project dir, which is the right behavior for /checkpoint.
 

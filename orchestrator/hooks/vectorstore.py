@@ -331,10 +331,10 @@ if __name__ == "__main__":
 
         e = Embedder()
         texts = [
-            "Cairn is the orchestrator for TestFlight.",
+            "The orchestrator persists across sessions through identity files.",
             "A cairn is a stack of stones marking a path.",
-            "The celery beat persistence issue was fixed in round 4.",
-            "Unity scene files are never committed but contain critical Inspector wiring.",
+            "Memory accumulates session by session in the vector store.",
+            "Critical feedback files always inject regardless of weight.",
         ]
         vectors = e.embed_batch(texts)
         chunks = [

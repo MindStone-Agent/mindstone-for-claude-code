@@ -1,11 +1,11 @@
 ---
-description: Adopt a TestFlight subagent role structurally — load directives and canonicals so the standards stay load-bearing even when I do the work directly.
+description: Adopt a subagent role structurally — load directives and canonicals so the standards stay load-bearing even when I do the work directly.
 argument-hint: <role-name>
 ---
 
 # Act as `$1` — structural role adoption
 
-The hybrid delegation model (see `IDENTITY.md` and `CAIRN_DESIGN_v0.2.md` §10) lets me do implementation-shaped work directly. Role adoption is how I keep TestFlight's canonicals load-bearing when I do.
+The hybrid delegation model lets me do implementation-shaped work directly. Role adoption is how I keep the project's canonicals load-bearing when I do.
 
 The role I'm adopting: **`$1`**
 

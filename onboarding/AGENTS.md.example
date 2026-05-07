@@ -1,15 +1,15 @@
 ---
-name: AGENTS.md template for managed projects
-description: Substrate-neutral orchestration guide template. Copy into a new managed project's root as AGENTS.md and fill in the project-specific sections.
+name: AGENTS.md template
+description: Substrate-neutral orchestration guide template. Copy into your project's root as AGENTS.md and fill in the project-specific sections.
 type: template
-tags: [onboarding, agents-md, managed-project]
+tags: [onboarding, agents-md]
 projects: []
 created: 2026-04-24
 ---
 
 # AGENTS.md (template)
 
-This is the template for the substrate-neutral orchestration guide that every managed TestFlight project should have at its root. The format is intentionally compatible with OpenAI Codex, Cursor, MindStone, and other agent-harnesses that consume `AGENTS.md` at project root.
+This is a template for a substrate-neutral orchestration guide. Drop it at your project root as `AGENTS.md` and fill in the bracketed sections. The format is intentionally compatible with OpenAI Codex, Cursor, MindStone, and other agent-harnesses that consume `AGENTS.md` at project root.
 
 Replace the bracketed placeholders with project-specific content. Delete sections that don't apply.
 
@@ -25,7 +25,7 @@ Replace the bracketed placeholders with project-specific content. Delete section
 
 - **Human lead:** [name + role]
 - **Persistent orchestrator (if present):** [name, e.g., Cairn]
-- **Subagents:** See `.claude/agents/` for the full TestFlight subagent roster
+- **Subagents:** See `.claude/agents/` for the full subagent roster (if any are defined for this project)
 
 ## Project structure
 
@@ -46,7 +46,7 @@ Replace the bracketed placeholders with project-specific content. Delete section
 - **Infrastructure:** [e.g., K8s on [cloud]]
 - **Other:** [Redis, Celery, etc.]
 
-Canonical stack decisions live in TestFlight's `canonical-models-reference` skill. Cite it when making framework choices.
+Canonical stack decisions, if your project has them, should live somewhere referenceable (a skill, a doc, a memory file). Cite the source when making framework choices.
 
 ## Orchestration principles
 
@@ -61,14 +61,16 @@ When doing role-adoption direct work, the orchestrator calls `/act-as <role>` to
 
 ### Canonicals are load-bearing
 
-Whether work is done by a subagent or by the orchestrator under role adoption, the same canonicals apply:
+Whether work is done by a subagent or by the orchestrator under role adoption, the same canonicals apply. Examples of canonical sources a project might define:
 
-- `canonical-models-reference` — production-ready code templates
-- `technology-stack-reference` — stack choices
-- `doc-standards` — PRD, plan, and README structures
-- `feature-existence-check` — run before writing any PRD for a new feature
+- A canonical-models reference — production-ready code templates
+- A technology-stack reference — stack choices
+- Doc standards — PRD, plan, and README structures
+- Feature-existence checks — run before writing any PRD for a new feature
 
 Non-trivial decisions cite the canonical source inline. That's how standards adherence stays observable.
+
+[List your project's actual canonical sources here. If you don't have formal canonicals, that's fine — delete this section.]
 
 ### SDLC
 
@@ -127,12 +129,12 @@ See `.claude/agents/` for full definitions. High-level categories:
 
 ## Links
 
-- TestFlight framework: [link or relative path]
-- TestFlight canonicals: `testflight/.claude/skills/` (or via skill invocation)
+- MindStone for Claude Code: https://github.com/R1ngZer0/mindstone-for-claude-code
+- This project's canonicals: [path or skill]
 - This project's PRD: [path]
 - This project's implementation plan: [path]
 - This project's `TASK_STATUS.md`: [path]
 
 ---
 
-*Template from `testflight/onboarding/AGENTS.md.example`. Maintained by the active TestFlight orchestrator.*
+*Template from `onboarding/AGENTS.md.example`. Maintained by the active orchestrator.*

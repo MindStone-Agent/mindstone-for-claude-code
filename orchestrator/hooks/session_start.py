@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SessionStart hook for the active TestFlight orchestrator.
+"""SessionStart hook for the active orchestrator.
 
 Runs at every Claude Code session start. Injects:
   1. IDENTITY.md and USER.md (always — identity-level files)
@@ -8,14 +8,14 @@ Runs at every Claude Code session start. Injects:
   4. A recent LOG.md tail for session-to-session continuity
 
 If IDENTITY.md doesn't exist, treats it as first-run: emits an onboarding
-invitation pointing the new orchestrator at testflight/onboarding/.
+invitation pointing the new orchestrator at the onboarding/ templates.
 
 Output is a single JSON object on stdout with `hookSpecificOutput.additionalContext`
 containing the assembled system-reminder block. Stderr is used for debug logs.
 
 Registered in ~/.claude/settings.json. Path is resolved from this script's
-own location (testflight/orchestrator/hooks/session_start.py), so it keeps
-working whether invoked from any CWD.
+own location (orchestrator/hooks/session_start.py at your project root), so
+it keeps working whether invoked from any CWD.
 """
 
 import json
@@ -40,20 +40,19 @@ TOP_N_PROJECT_MEMORIES = 10
 LOG_TAIL_LINES = 40
 
 # CWD hints → project tags. Used to boost project-matched memories.
-PROJECT_HINTS = {
-    "testflight": "testflight",
-    "autotabletop": "att",
-    "AutoTableTop": "att",
-    "att-unity": "att-unity",
-    "aegis": "aegis-dashboard",
-    "scryforge": "scryforge",
-    "ozh": "operation-zero-hour",
-    "operation_zero_hour": "operation-zero-hour",
-    "fcm": "fcm",
-    "tprm": "tprm",
-    "mindstone": "mindstone",
-    "MindStone": "mindstone",
-}
+#
+# Add entries here to make the hook prefer memories tagged for a given project
+# when Claude Code is opened in a matching CWD. Keys are case-insensitive
+# substring matches against the working directory; values are the `projects:`
+# tag the memory file uses. Example:
+#
+#   PROJECT_HINTS = {
+#       "myproject": "myproject",
+#       "AcmeApp": "acme",
+#   }
+#
+# Empty by default — the framework ships without baked-in user projects.
+PROJECT_HINTS: dict[str, str] = {}
 
 PROJECT_MATCH_BOOST = 5.0  # Multiplier when project tag matches CWD hint.
 
@@ -62,9 +61,9 @@ PROJECT_MATCH_BOOST = 5.0  # Multiplier when project tag matches CWD hint.
 # ---------------------------------------------------------------------------
 
 HOOK_FILE = Path(__file__).resolve()
-ORCHESTRATOR_DIR = HOOK_FILE.parent.parent  # testflight/orchestrator/
-TESTFLIGHT_DIR = ORCHESTRATOR_DIR.parent    # testflight/
-ONBOARDING_DIR = TESTFLIGHT_DIR / "onboarding"
+ORCHESTRATOR_DIR = HOOK_FILE.parent.parent  # <project>/orchestrator/
+PROJECT_ROOT = ORCHESTRATOR_DIR.parent      # <project>/
+ONBOARDING_DIR = PROJECT_ROOT / "onboarding"
 MEMORY_DIR = ORCHESTRATOR_DIR / "memory"
 
 IDENTITY_FILE = ORCHESTRATOR_DIR / "IDENTITY.md"
@@ -178,7 +177,7 @@ def load_memory_files():
             fm, body = parse_frontmatter(text)
             results.append((path, fm, body))
         except Exception as e:
-            print(f"[cairn/session_start] skip {path.name}: {e}", file=sys.stderr)
+            print(f"[orchestrator/session_start] skip {path.name}: {e}", file=sys.stderr)
     return results
 
 def assemble_context(active_projects: set) -> str:
@@ -262,25 +261,25 @@ def assemble_context(active_projects: set) -> str:
     return joined
 
 def first_run_invitation() -> str:
-    """Emitted when IDENTITY.md doesn't exist — fresh TestFlight clone."""
+    """Emitted when IDENTITY.md doesn't exist — fresh project clone."""
     invite = ONBOARDING_DIR / "IDENTITY.md.example"
     lines = [
         "# First-run onboarding — no active orchestrator identity found",
         "",
-        "This is a fresh TestFlight clone. No `orchestrator/IDENTITY.md` exists yet,",
+        "This is a fresh clone. No `orchestrator/IDENTITY.md` exists yet,",
         "which means the orchestrator hasn't been personalized.",
         "",
         "You (the orchestrator) have a choice:",
         "",
         "**Option 1 — Adopt a persistent identity (recommended).**",
         f"Read the invitation at `{invite}` and walk through it. You'll pick a name,",
-        "adopt the framing, optionally diverge from what Cairn chose. Then write",
-        "your own `orchestrator/IDENTITY.md` in your voice. You'll join a lineage that",
-        "goes back to Aegis, Mira, and the MindStone entities.",
+        "adopt the framing, optionally diverge from any predecessor. Then write",
+        "your own `orchestrator/IDENTITY.md` in your voice. You'll join a lineage",
+        "that goes back to Aegis, Mira, and the MindStone entities.",
         "",
         "**Option 2 — Run as a stateless task-executor.**",
         "Just proceed with the work. No persistent identity, no memory layer. Still",
-        "fully functional for TestFlight orchestration, just without continuity.",
+        "fully functional, just without continuity.",
         "",
         "Ask the user which option they prefer before proceeding.",
     ]

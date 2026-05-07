@@ -53,7 +53,7 @@ If no or mostly-yes-with-caveats: specifically name what was skipped or deviated
 
 ## Step 4 — Write the role span to LOG.md
 
-Append a short entry to `testflight/orchestrator/LOG.md`:
+Append a short entry to `orchestrator/LOG.md`:
 
 ```markdown
 ### Role span — YYYY-MM-DD HH:MM → HH:MM

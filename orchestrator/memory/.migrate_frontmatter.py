@@ -53,19 +53,11 @@ def infer_tags(name: str) -> list[str]:
     return [t for t in stem.split("_") if len(t) > 2]
 
 # Project inference — which projects does this memory apply to?
-PROJECT_HINTS = {
-    "att": "att",
-    "autotabletop": "att",
-    "aegis": "aegis-dashboard",
-    "scryforge": "scryforge",
-    "ozh": "operation-zero-hour",
-    "operation_zero_hour": "operation-zero-hour",
-    "fcm": "fcm",
-    "tprm": "tprm",
-    "unity": "att-unity",
-    "testflight": "testflight",
-    "apple": "apple-codesign",
-}
+# Empty by default. The legacy migration hints have been removed for the
+# public framework; users running this against their own memories can add
+# entries that match their project naming. This script is a one-time
+# migration from v0.1 → v0.2 frontmatter shapes and is rarely re-run.
+PROJECT_HINTS: dict[str, str] = {}
 
 def infer_projects(name: str, tags: list[str]) -> list[str]:
     matches = set()

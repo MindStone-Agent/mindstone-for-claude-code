@@ -14,12 +14,12 @@
 # Run from anywhere:
 #   ./orchestrator/bootstrap.sh
 #   or
-#   bash ~/Projects/MFC/testflight/orchestrator/bootstrap.sh
+#   bash /absolute/path/to/your/project/orchestrator/bootstrap.sh
 
 set -e
 
 ORCHESTRATOR_DIR="$(cd "$(dirname "$0")" && pwd)"
-TESTFLIGHT_DIR="$(dirname "$ORCHESTRATOR_DIR")"
+PROJECT_ROOT="$(dirname "$ORCHESTRATOR_DIR")"
 CLAUDE_DIR="$HOME/.claude"
 VENV_DIR="$ORCHESTRATOR_DIR/.venv"
 DB_PATH="$ORCHESTRATOR_DIR/vectors.db"
@@ -27,7 +27,7 @@ DB_PATH="$ORCHESTRATOR_DIR/vectors.db"
 echo "MindStone for Claude Code — bootstrap"
 echo "====================================="
 echo "Orchestrator dir: $ORCHESTRATOR_DIR"
-echo "TestFlight dir:   $TESTFLIGHT_DIR"
+echo "Project root:     $PROJECT_ROOT"
 echo "Claude Code dir:  $CLAUDE_DIR"
 echo ""
 
@@ -104,7 +104,7 @@ echo ""
 # ---------------------------------------------------------------------------
 
 echo "[3/5] Symlinking memory directory..."
-ESCAPED_PATH=$(echo "$TESTFLIGHT_DIR" | sed 's|/|-|g')
+ESCAPED_PATH=$(echo "$PROJECT_ROOT" | sed 's|/|-|g')
 MEM_LINK="$CLAUDE_DIR/projects/${ESCAPED_PATH}/memory"
 MEM_TARGET="$ORCHESTRATOR_DIR/memory"
 

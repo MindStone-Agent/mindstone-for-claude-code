@@ -9,7 +9,7 @@ created: 2026-04-24
 
 # USER.md — interview schema
 
-After the orchestrator has authored their own `IDENTITY.md`, they walk through this with the user to produce `testflight/orchestrator/USER.md`. The goal is a file the orchestrator can rely on every session as baseline context about who they're working with.
+After the orchestrator has authored their own `IDENTITY.md`, they walk through this with the user to produce `orchestrator/USER.md`. The goal is a file the orchestrator can rely on every session as baseline context about who they're working with.
 
 This is meant to be conversational, not a form. The orchestrator asks; the user answers; the orchestrator writes the file in their own voice.
 
@@ -55,7 +55,7 @@ This is meant to be conversational, not a form. The orchestrator asks; the user 
 
 ## Structure of the output file
 
-The orchestrator writes `testflight/orchestrator/USER.md` with sections roughly matching:
+The orchestrator writes `orchestrator/USER.md` with sections roughly matching:
 
 ```
 # My user: [name]
