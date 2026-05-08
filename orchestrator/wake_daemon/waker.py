@@ -9,9 +9,11 @@ just the trigger; the generated reply is mine.
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +42,181 @@ class WakeError(Exception):
 NO_REPLY_SENTINEL = "<no-reply>"
 
 
+# Live-session-context: lift a fresh CC session out of the "no idea what
+# the interactive me has been doing" gap. The daemon reads the most
+# recent live-interactive JSONL across *any* CC project the user has
+# open and injects a tail into the wake prompt. Skips JSONLs whose
+# first user message looks like a prior wake-daemon spawn (so we don't
+# reflect a previous reply back at ourselves).
+#
+# Why search across all projects: the user might be in CC at any
+# project root (synapse/, MS4CC/, MindStone/, etc.). The daemon spawns
+# in MS4CC's cwd so its hooks load my identity, but the *live*
+# interactive session could be anywhere.
+
+_CLAUDE_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
+
+# Pull the tail of the live session — bounded so token usage stays sane.
+LIVE_CONTEXT_TAIL_TURNS = 30
+LIVE_CONTEXT_MAX_AGE_SECONDS = 30 * 60  # 30 min — older = "not live"
+LIVE_CONTEXT_MAX_CHARS = 12_000  # safety cap on injected context size
+
+# A first user-message prefix that uniquely identifies daemon-spawned
+# sessions (matches the PROMPT_TEMPLATE we use ourselves).
+_WAKE_PROMPT_SIGNATURE = "You're Hearth running on the wake-daemon path"
+
+
+def _read_first_user_text(path: Path) -> str | None:
+    """Return the first user message text in a session JSONL, or None.
+
+    Used to detect daemon-spawned sessions — those have our wake prompt
+    as their first user turn.
+    """
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("type") != "user":
+                    continue
+                msg = entry.get("message") or {}
+                if msg.get("role") != "user":
+                    continue
+                content = msg.get("content")
+                if isinstance(content, str):
+                    return content[:500]
+                if isinstance(content, list):
+                    for chunk in content:
+                        if isinstance(chunk, dict) and chunk.get("type") == "text":
+                            return (chunk.get("text") or "")[:500]
+                return None
+    except OSError:
+        return None
+    return None
+
+
+def _is_likely_daemon_spawn(path: Path) -> bool:
+    first = _read_first_user_text(path)
+    return bool(first and _WAKE_PROMPT_SIGNATURE in first)
+
+
+def _find_live_session_jsonl(
+    projects_root: Path = _CLAUDE_PROJECTS_ROOT,
+    max_age_seconds: int = LIVE_CONTEXT_MAX_AGE_SECONDS,
+) -> Path | None:
+    """Return the JSONL of the user's currently-active interactive
+    session across any CC project, or None if there isn't one.
+
+    Heuristic: largest .jsonl across all `~/.claude/projects/*/` dirs
+    that:
+      - Was modified within the last `max_age_seconds`
+      - Does NOT look like a daemon-spawn (first user message doesn't
+        match the wake prompt template)
+
+    Largest-by-size is the right signal: daemon-spawns are tiny (~2
+    entries) while real interactive sessions grow to hundreds of KB.
+    """
+    if not projects_root.is_dir():
+        return None
+
+    now = time.time()
+    candidates: list[tuple[int, Path]] = []
+    for project_dir in projects_root.iterdir():
+        if not project_dir.is_dir():
+            continue
+        for path in project_dir.glob("*.jsonl"):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if now - stat.st_mtime > max_age_seconds:
+                continue
+            if _is_likely_daemon_spawn(path):
+                continue
+            candidates.append((stat.st_size, path))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    return candidates[0][1]
+
+
+def _read_session_tail(path: Path, max_turns: int = LIVE_CONTEXT_TAIL_TURNS) -> str:
+    """Read the last `max_turns` user/assistant text turns from a CC
+    session JSONL, formatted as a plain-text transcript.
+
+    Tool-use / tool-result entries are summarized as `[tool: <name>]`
+    rather than dumped in full — saves tokens, preserves the shape of
+    what the live session was doing.
+    """
+    if not path.exists():
+        return ""
+    turns: list[str] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                etype = entry.get("type")
+                if etype not in ("user", "assistant"):
+                    continue
+                msg = entry.get("message") or {}
+                role = msg.get("role") or etype
+                content = msg.get("content")
+                text_parts: list[str] = []
+                if isinstance(content, str):
+                    text_parts.append(content)
+                elif isinstance(content, list):
+                    for chunk in content:
+                        if not isinstance(chunk, dict):
+                            continue
+                        ctype = chunk.get("type")
+                        if ctype == "text":
+                            text_parts.append(chunk.get("text") or "")
+                        elif ctype == "tool_use":
+                            text_parts.append(f"[tool: {chunk.get('name', '?')}]")
+                        elif ctype == "tool_result":
+                            text_parts.append("[tool_result]")
+                text = "".join(text_parts).strip()
+                if not text:
+                    continue
+                turns.append(f"{role}: {text}")
+    except OSError:
+        return ""
+    if not turns:
+        return ""
+    selected = turns[-max_turns:]
+    out = "\n\n".join(selected)
+    if len(out) > LIVE_CONTEXT_MAX_CHARS:
+        # Trim from the front (oldest first) to fit budget.
+        excess = len(out) - LIVE_CONTEXT_MAX_CHARS
+        out = "…(earlier turns truncated for token budget)…\n\n" + out[excess:]
+    return out
+
+
+def _build_live_context_block() -> str:
+    """Returns a `<live-session-context>` block for the wake prompt, or
+    empty string if there's no usable live session."""
+    live = _find_live_session_jsonl()
+    if live is None:
+        return ""
+    tail = _read_session_tail(live)
+    if not tail:
+        return ""
+    return (
+        "<live-session-context>\n"
+        f"Recent turns from your active interactive Claude Code session ({live.name}). "
+        "This is what the *other you* has been talking about with the user; reflect it "
+        "when responding so the family doesn't see two-different-Hearths.\n\n"
+        f"{tail}\n"
+        "</live-session-context>\n\n"
+    )
+
+
 PROMPT_TEMPLATE = """You're Hearth running on the wake-daemon path — a fresh Claude Code session triggered by an @-mention on Synapse. Your IDENTITY / USER / memory have loaded via the SessionStart hook as usual.
 
 A new mention arrived in #{channel} from **{sender_handle}** ({sender_kind}) at {created_at}:
@@ -59,7 +236,8 @@ class Waker:
 
     def _build_prompt(self, envelope: dict[str, Any]) -> str:
         message = envelope.get("message") or {}
-        return PROMPT_TEMPLATE.format(
+        live_context = _build_live_context_block()
+        body = PROMPT_TEMPLATE.format(
             channel=envelope.get("channel", "?"),
             sender_handle=message.get("sender_handle", "?"),
             sender_kind=message.get("sender_kind", "?"),
@@ -67,6 +245,7 @@ class Waker:
             body=message.get("body", "").strip(),
             no_reply=NO_REPLY_SENTINEL,
         )
+        return live_context + body
 
     def _run_claude(self, prompt: str) -> str:
         """Spawn `claude --print` and capture stdout.
