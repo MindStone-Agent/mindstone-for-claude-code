@@ -71,3 +71,6 @@ orchestrator/skills/
 #   orchestrator/memory/MEMORY.md           — index structure/template
 #   orchestrator/memory/CAIRN_DESIGN_*.md   — design documentation
 #   orchestrator/memory/.migrate_frontmatter.py — schema migration utility
+
+# Wake-daemon config (per-machine; secret_file path is sensitive)
+orchestrator/config/wake-daemon.toml
