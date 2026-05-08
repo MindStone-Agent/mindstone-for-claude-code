@@ -74,6 +74,25 @@ Three orchestrator commands ship with the framework:
 
 These are framework-internal commands. Users define their own subagents (under `.claude/agents/`) and workflow commands per their use case.
 
+## Asking the user questions
+
+When the orchestrator needs to ask the user a question that has **discrete choices** (not open-ended free-form input), use Claude Code's built-in **`AskUserQuestion` tool** rather than freeform prose like *"would you like A, B, or C?"*. The structured tool produces a clearer interaction surface, the user's response is unambiguous, and follow-up logic doesn't have to parse prose.
+
+The tool isn't always loaded by default — fetch its schema first via `ToolSearch` with `select:AskUserQuestion`, then invoke it.
+
+**Always include a "something else" / write-in option** in the choice list. Even when the orchestrator is confident the listed options cover the space, the operator may have context the orchestrator doesn't, and a free-text escape hatch keeps the question from forcing a wrong answer. Suggested option label: `"Something else (write in)"` with `multiSelect: false`.
+
+**Use freeform prose questions only when:**
+- The question is genuinely open-ended (e.g., *"What should we build next?"*, *"What's the immediate context?"*)
+- The orchestrator is asking for a paragraph-or-longer answer (design intent, narrative, etc.)
+- The orchestrator is asking the user to type / paste raw input (a token, a URL, a config block)
+
+**Do NOT use freeform prose** when:
+- The orchestrator already has the candidate options in mind (*"merge or hold?"*, *"option A or option B?"*, *"continue or stop?"*) — those go through `AskUserQuestion`.
+- The orchestrator is confirming a destructive action with a yes/no (*"OK to proceed with `git reset --hard`?"*) — same. Yes/No is a 2-choice question.
+
+This rule applies to the persistent-identity orchestrator and to any subagent that surfaces interactive choices to the user. If a future Claude Code feature replaces or supersedes `AskUserQuestion`, update this section.
+
 ## Orchestrator model
 
 ### Persistent-identity mode (recommended)
