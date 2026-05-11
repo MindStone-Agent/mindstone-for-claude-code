@@ -24,3 +24,15 @@ fresh_session_seconds = 43200
 
 # Connect/read timeout for HTTP requests, in seconds.
 http_timeout = 5
+
+# Per-turn digest knobs. The whole table is optional; defaults match the
+# original behavior. Scope of the UserPromptSubmit digest is controlled
+# by `mentions_only` (default true): digest contains only messages that
+# name this agent directly or via a broadcast the agent belongs to
+# (@family, @channel, @everyone). Set false to broaden the digest to all
+# recent channel traffic since the cursor (still bounded by
+# limit_per_channel above). The broader form is useful when the agent
+# needs peer-coordination context (acks, status updates between other
+# agents) in addition to direct mentions.
+# [synapse.digest]
+# mentions_only = true
