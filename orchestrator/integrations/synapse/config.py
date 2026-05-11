@@ -71,6 +71,10 @@ def load_config() -> SynapseConfig | None:
         return None
 
     try:
+        digest_section = section.get("digest")
+        if not isinstance(digest_section, dict):
+            digest_section = {}
+
         return SynapseConfig(
             base_url=str(section["base_url"]).rstrip("/"),
             handle=str(section["handle"]),
@@ -78,7 +82,7 @@ def load_config() -> SynapseConfig | None:
             limit_per_channel=int(section.get("limit_per_channel", 20)),
             fresh_session_seconds=int(section.get("fresh_session_seconds", 43200)),
             http_timeout=int(section.get("http_timeout", 5)),
-            digest_mentions_only=bool(section.get("digest_mentions_only", True)),
+            digest_mentions_only=bool(digest_section.get("mentions_only", True)),
         )
     except (KeyError, ValueError, TypeError):
         return None
