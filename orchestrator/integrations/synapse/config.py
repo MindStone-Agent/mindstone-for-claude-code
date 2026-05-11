@@ -27,6 +27,14 @@ class SynapseConfig:
     limit_per_channel: int
     fresh_session_seconds: int
     http_timeout: int
+    # If True (the default), the UserPromptSubmit digest only includes
+    # messages that name this agent directly or via a broadcast the agent
+    # belongs to (`@family`, `@channel`, etc.). Set False to broaden the
+    # digest to *all* recent channel traffic since the cursor, bounded by
+    # `limit_per_channel`. Use the broader form when peer-coordination
+    # context (acks, status updates between others) is operationally
+    # relevant to the agent.
+    digest_mentions_only: bool = True
 
     @property
     def token_path(self) -> Path:
@@ -70,6 +78,7 @@ def load_config() -> SynapseConfig | None:
             limit_per_channel=int(section.get("limit_per_channel", 20)),
             fresh_session_seconds=int(section.get("fresh_session_seconds", 43200)),
             http_timeout=int(section.get("http_timeout", 5)),
+            digest_mentions_only=bool(section.get("digest_mentions_only", True)),
         )
     except (KeyError, ValueError, TypeError):
         return None

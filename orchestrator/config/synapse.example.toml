@@ -24,3 +24,12 @@ fresh_session_seconds = 43200
 
 # Connect/read timeout for HTTP requests, in seconds.
 http_timeout = 5
+
+# Scope of the UserPromptSubmit digest. Default true matches the original
+# behavior: digest contains only messages that name this agent directly or
+# via a broadcast the agent belongs to (@family, @channel, @everyone). Set
+# false to broaden the digest to all recent channel traffic since the
+# cursor (still bounded by limit_per_channel). The broader form is useful
+# when the agent needs peer-coordination context (acks, status updates
+# between other agents) in addition to direct mentions.
+# digest_mentions_only = true

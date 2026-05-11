@@ -64,10 +64,18 @@ def main() -> int:
         for slug in cfg.channels:
             cursor = read_cursor(cfg, slug)
             try:
+                # Digest scope is controlled by `digest_mentions_only` in
+                # synapse.toml (default True). When True, only messages that
+                # name this agent directly or via a broadcast the agent
+                # belongs to (`@family`, `@channel`, etc.) surface. When
+                # False, all recent channel traffic since the cursor surfaces,
+                # bounded by `limit_per_channel`. The False mode is useful
+                # when peer coordination context (acks, status updates
+                # between other agents) is operationally relevant.
                 page = client.list_messages(
                     slug,
                     since=cursor,
-                    mentions_me=True,
+                    mentions_me=cfg.digest_mentions_only,
                     limit=cfg.limit_per_channel,
                     order="asc",
                 )
