@@ -55,13 +55,45 @@ def main() -> int:
         if cfg is None or not is_active(cfg):
             return 0
         token = cfg.read_token()
-        if not token or not cfg.channels:
+        if not token:
             return 0
 
         client = SynapseClient(cfg.base_url, token, timeout=cfg.http_timeout)
 
+        # Channel discovery: ask the server which channels this account is
+        # a member of, rather than relying on a hand-maintained `channels`
+        # list. If `cfg.channels` is set in synapse.toml, it acts as a
+        # filter (intersection with memberships). If empty/unset, the
+        # digest covers every channel the account belongs to.
+        #
+        # Lift of MS4CC #30: removes the manual-toml-edit step from
+        # "admin adds me to a new channel" so the digest picks the new
+        # channel up on the next prompt automatically.
+        try:
+            membership_rows = client.list_channels()
+        except SynapseError as e:
+            print(f"[synapse_user_prompt_submit] list_channels: {e}", file=sys.stderr)
+            return 0
+
+        membership_slugs = tuple(
+            row["slug"]
+            for row in membership_rows
+            if isinstance(row, dict) and row.get("slug")
+        )
+        if cfg.channels:
+            # Filter mode: keep only configured channels we're actually a member of.
+            configured = {slug.lower() for slug in cfg.channels}
+            slugs_to_poll: tuple[str, ...] = tuple(
+                s for s in membership_slugs if s.lower() in configured
+            )
+        else:
+            slugs_to_poll = membership_slugs
+
+        if not slugs_to_poll:
+            return 0
+
         per_channel_blocks: list[str] = []
-        for slug in cfg.channels:
+        for slug in slugs_to_poll:
             cursor = read_cursor(cfg, slug)
             try:
                 # Digest scope is controlled by `digest_mentions_only` in
