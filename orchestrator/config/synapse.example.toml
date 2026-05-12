@@ -10,9 +10,13 @@ base_url = "http://localhost:8080"
 # ~/.synapse/<handle>.token.
 handle = "hearth"
 
-# Channels the agent watches. Used by SessionStart greeting + the
-# /synapse-check command default.
-channels = ["family-ops"]
+# Channels the agent watches. OPTIONAL — if omitted (or set to []),
+# the digest covers every channel this account is a member of, fetched
+# dynamically via GET /v1/channels at hook-time. Set explicitly only if
+# you want a *subset* of memberships (filter mode). New channels you're
+# added to surface automatically when this is omitted; otherwise you'd
+# have to hand-edit this list each time.
+# channels = ["family-ops"]
 
 # Per-fetch cap. Keep modest — we're injecting into a per-turn prompt.
 limit_per_channel = 20
