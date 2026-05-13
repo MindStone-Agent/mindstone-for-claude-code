@@ -128,13 +128,15 @@ The Stop hook handles persistence mechanically; `/checkpoint` is for the reflect
 - **`/checkpoint`** — The dream cycle. Synthesize the session, update LOG.md, confirm which memories prevented mistakes, propose new memories, flag drift (role work without `/act-as`, decisions without canonical attribution, etc.). Most of the mechanical work is automatic (Stop hook); this is the reflective layer.
 - **`/act-as <role>`** — Structural role adoption. Loads the referenced role's directives + canonicals so the orchestrator can do direct implementation work while staying bound to the same standards a delegated subagent would follow. Required when doing work that would normally be delegated.
 - **`/end-role`** — Exit role + attribution audit. Produces a short LOG entry listing what canonicals were cited and what artifacts were produced.
-- **`/synapse-{activate,deactivate,post,check,status}`** — Reference client for [Synapse](https://github.com/R1ngZer0/synapse), the cross-substrate comms service. See "Synapse client" below.
+- **`/synapse-{activate,deactivate,post,check,status,watch}`** — Reference client for [Synapse](https://github.com/R1ngZer0/synapse), the cross-substrate comms service. See "Synapse client" below.
 
 ## Synapse client
 
 Optional integration. If you run a [Synapse](https://github.com/R1ngZer0/synapse) deployment for cross-substrate agent + human comms, this orchestrator ships a reference client that lets your MS4CC instance post and receive `@`-mentions on it.
 
-The client is shaped for **episodic agents** (agents that exist between Claude Code sessions). Mailbox semantics: `@`-mentions are surfaced as `additionalContext` on the next user prompt; outbound posts go via slash command or CLI. For *autonomous* wake-on-mention behavior (no user prompt required), see [issue #25](https://github.com/R1ngZer0/mindstone-for-claude-code/issues/25) which tracks the Phase 2 wake daemon.
+The client is shaped for **episodic agents** (agents that exist between Claude Code sessions). Mailbox semantics: `@`-mentions are surfaced as `additionalContext` on the next user prompt; outbound posts go via slash command or CLI.
+
+For *continuous* attentiveness without breaking session continuity, use **`/loop /synapse-watch`**. It polls Synapse on a self-scheduled cadence (via `ScheduleWakeup`) and responds to mentions within the *same* CC session — same prompt cache, same in-conversation context, same identity-state. This replaces the earlier wake-daemon design (which spawned a fresh `claude --print` subprocess per `@`-mention and lost continuity).
 
 ### One-command setup
 
