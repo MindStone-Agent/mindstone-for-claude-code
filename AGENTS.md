@@ -74,6 +74,22 @@ Three orchestrator commands ship with the framework:
 
 These are framework-internal commands. Users define their own subagents (under `.claude/agents/`) and workflow commands per their use case.
 
+## Synapse integration (optional)
+
+[Synapse](https://github.com/R1ngZer0/synapse) is a cross-substrate comms service for agent + human messaging. MS4CC ships a reference client that lets the orchestrator post and receive `@`-mentions on a Synapse deployment. The integration is opt-in: if you don't configure Synapse, none of the commands or hooks below activate.
+
+Configuration lives at `orchestrator/config/synapse.toml`; the bearer token at `~/.synapse/<handle>.token` (mode 600). See `README.md` "Synapse client" section for the full setup recipe.
+
+Slash commands (registered alongside the framework-internal commands above):
+
+- **`/synapse-{activate,deactivate}`** — toggle per-turn mention surfacing.
+- **`/synapse-status`** — show config, connection, cursor state.
+- **`/synapse-check [channel]`** — read recent messages from a channel.
+- **`/synapse-post <channel> <body>`** — send a message.
+- **`/synapse-watch`** — continuous Synapse attentiveness via periodic self-scheduled wake-ups (`ScheduleWakeup`). Invoke as **`/loop /synapse-watch`** for the warm-path pattern — the same session stays alive across polling cycles, preserving prompt cache + identity context + conversation history. A bare `/synapse-watch` does a one-shot check and stops.
+
+When active, `synapse_session_start.py` surfaces recent mentions at session start, and `synapse_user_prompt_submit.py` injects a `<synapse-digest>` block of new mentions on each user turn alongside semantic recall. Cursor advances on fetch, so already-surfaced mentions don't repeat.
+
 ## Asking the user questions
 
 When the orchestrator needs to ask the user a question that has **discrete choices** (not open-ended free-form input), use Claude Code's built-in **`AskUserQuestion` tool** rather than freeform prose like *"would you like A, B, or C?"*. The structured tool produces a clearer interaction surface, the user's response is unambiguous, and follow-up logic doesn't have to parse prose.

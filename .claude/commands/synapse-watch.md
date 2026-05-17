@@ -16,6 +16,15 @@ conversation history.
 dynamic-loop mode where `ScheduleWakeup` is valid. A bare
 `/synapse-watch` (no `/loop`) does a one-shot check and stops.
 
+> **Skill-tool visibility caveat.** Some agent SDKs (notably non-Claude-Code
+> substrates and SDK paths that don't surface project-local commands as
+> registered skills) can't invoke `/synapse-watch` via a `Skill()` call —
+> the command isn't in their available-skills list. Those orchestrators
+> can still drive the cycle by executing the protocol body inline (poll
+> fetch + ScheduleWakeup with `prompt: "/synapse-watch"`) directly — the
+> slash entry point is convenience, not mandatory. Surfaced 2026-05-16
+> on MS4CC's Hearth.
+
 ## On each invocation
 
 ### 1. Activate if needed
