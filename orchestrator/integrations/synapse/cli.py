@@ -19,8 +19,11 @@ non-zero exit on failure.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import shutil
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -101,6 +104,105 @@ def _prompt(label: str, default: str | None = None, *, secret: bool = False) -> 
     return ans
 
 
+# Project root: cli.py lives at orchestrator/integrations/synapse/cli.py;
+# three .parent hops land at the MS4CC root directory.
+_ORCHESTRATOR_DIR = Path(__file__).resolve().parent.parent.parent
+
+
+def _ensure_hook_in_matcher_group(
+    matcher_groups: list, matcher_pattern: str, hook_type: str, command: str
+) -> bool:
+    """Append a hook to the group with `matcher == matcher_pattern`. Create the
+    group if no match. Idempotent: returns False if `command` was already there.
+    """
+    for group in matcher_groups:
+        if not isinstance(group, dict):
+            continue
+        if group.get("matcher") == matcher_pattern:
+            group_hooks = group.setdefault("hooks", [])
+            for h in group_hooks:
+                if isinstance(h, dict) and h.get("command") == command:
+                    return False
+            group_hooks.append({"type": hook_type, "command": command})
+            return True
+    matcher_groups.append(
+        {
+            "matcher": matcher_pattern,
+            "hooks": [{"type": hook_type, "command": command}],
+        }
+    )
+    return True
+
+
+def _merge_synapse_hooks_into_settings() -> dict:
+    """Additively merge the two Synapse hooks into ~/.claude/settings.json.
+
+    Idempotent: existing Synapse hook entries are preserved, not duplicated.
+    Other hooks (user's own, MS4CC's core hooks, hooks from other tools) are
+    left untouched. Backs up the original on every change before writing.
+
+    Returns a dict summary: {settings_path, backup_path, added: list[str],
+    already_present: list[str]}.
+    """
+    settings_path = Path.home() / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+    session_cmd = (
+        f"{_ORCHESTRATOR_DIR}/.venv/bin/python "
+        f"{_ORCHESTRATOR_DIR}/hooks/synapse_session_start.py"
+    )
+    prompt_cmd = (
+        f"{_ORCHESTRATOR_DIR}/.venv/bin/python "
+        f"{_ORCHESTRATOR_DIR}/hooks/synapse_user_prompt_submit.py"
+    )
+
+    if settings_path.exists():
+        try:
+            data = json.loads(settings_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                data = {}
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    else:
+        data = {}
+
+    hooks = data.setdefault("hooks", {})
+    session_groups = hooks.setdefault("SessionStart", [])
+    prompt_groups = hooks.setdefault("UserPromptSubmit", [])
+
+    added: list[str] = []
+    already: list[str] = []
+
+    if _ensure_hook_in_matcher_group(session_groups, "*", "command", session_cmd):
+        added.append("SessionStart -> synapse_session_start.py")
+    else:
+        already.append("SessionStart -> synapse_session_start.py")
+
+    if _ensure_hook_in_matcher_group(prompt_groups, "*", "command", prompt_cmd):
+        added.append("UserPromptSubmit -> synapse_user_prompt_submit.py")
+    else:
+        already.append("UserPromptSubmit -> synapse_user_prompt_submit.py")
+
+    backup_path = None
+    if added and settings_path.exists():
+        backup_path = settings_path.with_name(
+            f"settings.json.backup.{int(time.time())}"
+        )
+        shutil.copy2(settings_path, backup_path)
+
+    if added or not settings_path.exists():
+        tmp_path = settings_path.with_name("settings.json.tmp")
+        tmp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        tmp_path.replace(settings_path)
+
+    return {
+        "settings_path": settings_path,
+        "backup_path": backup_path,
+        "added": added,
+        "already_present": already,
+    }
+
+
 def cmd_setup(_args: argparse.Namespace) -> int:
     """Interactive setup — replaces the manual config + token-paste dance.
 
@@ -110,9 +212,11 @@ def cmd_setup(_args: argparse.Namespace) -> int:
       3. Validate connection live (GET /v1/auth/me) BEFORE writing files
       4. Write orchestrator/config/synapse.toml
       5. Write ~/.synapse/<handle>.token (mode 600); ensure ~/.synapse mode 700
-      6. Print next-step
+      6. Additively merge the two Synapse hooks into ~/.claude/settings.json
+         (preserves existing hooks; idempotent — skips entries already present)
+      7. Print next-step
 
-    Refuses to overwrite an existing synapse.toml without --force; the
+    Refuses to overwrite an existing synapse.toml without confirmation; the
     user can re-run later or edit by hand.
     """
     print()
@@ -222,6 +326,27 @@ def cmd_setup(_args: argparse.Namespace) -> int:
     print()
     print(f"  wrote {CONFIG_PATH.relative_to(Path.cwd()) if CONFIG_PATH.is_relative_to(Path.cwd()) else CONFIG_PATH}")
     print(f"  wrote {token_path} (mode 600)")
+
+    # Additively merge Synapse hooks into ~/.claude/settings.json. Preserves
+    # existing hooks (user's own, MS4CC's core hooks); idempotent — skips
+    # entries already present.
+    try:
+        merge_info = _merge_synapse_hooks_into_settings()
+        if merge_info["added"]:
+            print(f"  wrote {merge_info['settings_path']}")
+            if merge_info["backup_path"]:
+                print(f"    (backup at {merge_info['backup_path']})")
+            for entry in merge_info["added"]:
+                print(f"    + {entry}")
+        if merge_info["already_present"]:
+            for entry in merge_info["already_present"]:
+                print(f"    = {entry} (already present)")
+    except Exception as e:
+        # Non-fatal: config + token are already written. User can re-run
+        # setup or wire the hooks manually via settings.fragment.json.
+        print(f"  ! settings.json hook-merge failed ({e})", file=sys.stderr)
+        print(f"    config + token written; wire hooks manually if needed.", file=sys.stderr)
+
     print()
     print("Next:")
     print("  /synapse-activate   (from Claude Code)")
