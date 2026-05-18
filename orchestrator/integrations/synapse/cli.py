@@ -496,6 +496,67 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_await(args: argparse.Namespace) -> int:
+    """Block until a matching message lands on `--channel`, then print it.
+
+    Sync primitive (Synapse#7). When agent A asks agent B a question and needs
+    B's answer before continuing, A can `synapse post … --body "…"` followed by
+    `synapse await --channel <ch> --mention <my-handle>` to wait for B's reply
+    without burning agent context cycles on no-op polling turns.
+    """
+    from .client import SynapseAwaitTimeout
+
+    cfg = _require_config()
+    client = _client(cfg)
+    channel = args.channel
+    timeout = float(args.timeout)
+
+    try:
+        msg = client.await_message(
+            channel,
+            since=args.since,
+            mention_filter=args.mention,
+            require_sender=args.from_sender,
+            body_contains=args.body_contains,
+            timeout=timeout,
+            poll_interval=float(args.poll_interval),
+            max_poll_interval=float(args.max_poll_interval),
+        )
+    except SynapseAwaitTimeout as e:
+        _bail(f"synapse: {e}")
+        return 2
+    except SynapseError as e:
+        _bail(f"synapse: await failed ({e})")
+        return 1
+
+    print(
+        f"synapse: matched [{msg.id[:8]}…] from {msg.sender_handle} "
+        f"in #{msg.channel} at {_fmt_time(msg.created_at)}"
+    )
+    if args.json:
+        import json as _json
+        print(_json.dumps(
+            {
+                "id": msg.id,
+                "channel": msg.channel,
+                "sender_handle": msg.sender_handle,
+                "sender_kind": msg.sender_kind,
+                "body": msg.body,
+                "body_format": msg.body_format,
+                "created_at": msg.created_at,
+                "mentioned_handles": list(msg.mentioned_handles),
+            },
+            indent=2,
+        ))
+    else:
+        # Truncate body to a reasonable preview length unless --full requested
+        preview = msg.body if args.full else msg.body[:500]
+        if not args.full and len(msg.body) > 500:
+            preview += f"… ({len(msg.body)} chars total — use --full for entire body)"
+        print(preview)
+    return 0
+
+
 # --- entrypoint ----------------------------------------------------
 
 
@@ -527,6 +588,57 @@ def main(argv: list[str] | None = None) -> int:
     p_fetch.add_argument("--advance-cursor", action="store_true")
     p_fetch.add_argument("--verbose", action="store_true")
 
+    p_await = sub.add_parser(
+        "await",
+        help="Block until a matching message arrives on a channel (Synapse#7)",
+    )
+    p_await.add_argument("--channel", required=True, help="Channel to watch")
+    p_await.add_argument(
+        "--mention",
+        help='Filter: message must @-mention this handle (e.g. "aegis", no @)',
+    )
+    p_await.add_argument(
+        "--from",
+        dest="from_sender",
+        help='Filter: message must be sent by this handle (e.g. "aegis")',
+    )
+    p_await.add_argument(
+        "--body-contains",
+        help="Filter: message body must contain this literal substring",
+    )
+    p_await.add_argument(
+        "--since",
+        help="Optional cursor to start polling from (default: current head_cursor)",
+    )
+    p_await.add_argument(
+        "--timeout",
+        type=float,
+        default=180.0,
+        help="Seconds to wait before giving up (default: 180)",
+    )
+    p_await.add_argument(
+        "--poll-interval",
+        type=float,
+        default=1.5,
+        help="Initial seconds between polls (default: 1.5)",
+    )
+    p_await.add_argument(
+        "--max-poll-interval",
+        type=float,
+        default=5.0,
+        help="Cap on poll interval after backoff (default: 5)",
+    )
+    p_await.add_argument(
+        "--full",
+        action="store_true",
+        help="Print the full message body (default: 500-char preview)",
+    )
+    p_await.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the matched message as JSON (in addition to human-readable line)",
+    )
+
     args = parser.parse_args(argv)
     handlers = {
         "setup": cmd_setup,
@@ -536,6 +648,7 @@ def main(argv: list[str] | None = None) -> int:
         "post": cmd_post,
         "check": cmd_check,
         "fetch": cmd_fetch,
+        "await": cmd_await,
     }
     return handlers[args.cmd](args)
 

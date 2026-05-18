@@ -8,6 +8,8 @@ Surface (Phase 1):
   - list_channels()                      → /v1/channels
   - list_messages(channel, …)            → /v1/messages
   - post_message(channel, body, …)       → POST /v1/messages
+  - await_message(channel, …)            → polls /v1/messages until match or timeout
+                                           (Synapse#7 sync primitive)
 
 Errors raise SynapseError with the response status. Caller decides
 whether to fail-soft (hook path) or surface to the user (CLI path).
@@ -16,11 +18,21 @@ whether to fail-soft (hook path) or surface to the user (CLI path).
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
+
+
+class SynapseAwaitTimeout(Exception):
+    """Raised when await_message hits its timeout with no matching message."""
+
+    def __init__(self, channel: str, timeout: float) -> None:
+        super().__init__(f"await timed out after {timeout}s on channel #{channel}")
+        self.channel = channel
+        self.timeout = timeout
 
 
 class SynapseError(Exception):
@@ -61,6 +73,26 @@ class MessagesPage:
     messages: tuple[Message, ...]
     next_cursor: str | None
     head_cursor: str | None
+
+
+def _await_match(
+    msg: "Message",
+    mention_filter: str | None,
+    require_sender: str | None,
+    body_contains: str | None,
+) -> bool:
+    """AND-combine the filter predicates for await_message."""
+    if mention_filter is not None:
+        handle = mention_filter.lstrip("@")
+        if handle not in msg.mentioned_handles:
+            return False
+    if require_sender is not None:
+        if msg.sender_handle != require_sender.lstrip("@"):
+            return False
+    if body_contains is not None:
+        if body_contains not in msg.body:
+            return False
+    return True
 
 
 class SynapseClient:
@@ -154,6 +186,69 @@ class SynapseClient:
             next_cursor=data.get("next_cursor"),
             head_cursor=data.get("head_cursor"),
         )
+
+    def await_message(
+        self,
+        channel: str,
+        *,
+        since: str | None = None,
+        mention_filter: str | None = None,
+        require_sender: str | None = None,
+        body_contains: str | None = None,
+        timeout: float = 180.0,
+        poll_interval: float = 1.5,
+        max_poll_interval: float = 5.0,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> Message:
+        """Block until a matching message arrives on `channel`, or `timeout`
+        elapses (raises SynapseAwaitTimeout). Synapse#7 sync primitive.
+
+        Filters (all optional, AND-combined):
+          - `mention_filter`  — message.mentioned_handles must contain this handle
+                                (case-sensitive, no `@` prefix; e.g. "aegis")
+          - `require_sender`  — message.sender_handle must equal this handle
+          - `body_contains`   — message.body must contain this substring (literal)
+
+        Polling shape: poll every `poll_interval` seconds with backoff up to
+        `max_poll_interval` on empty results. Resets to `poll_interval` on
+        any new message (even if filter rejects). Uses the existing
+        `list_messages` cursor pagination — no new server endpoint.
+
+        `since`: optional cursor to start polling from. If None, the caller
+        is expected to have captured the channel's head_cursor BEFORE posting
+        their question, and passed it here so we don't miss a fast reply.
+        """
+        deadline = clock() + timeout
+        cursor = since
+        current_poll = poll_interval
+
+        # If no cursor was provided, anchor on current head so we only see
+        # NEW messages from this point forward.
+        if cursor is None:
+            head = self.list_messages(channel, limit=1, order="desc")
+            cursor = head.head_cursor
+
+        while clock() < deadline:
+            page = self.list_messages(
+                channel, since=cursor, limit=20, order="asc"
+            )
+            if page.messages:
+                current_poll = poll_interval  # reset backoff on activity
+                for msg in page.messages:
+                    if _await_match(msg, mention_filter, require_sender, body_contains):
+                        return msg
+                # No match — advance cursor and keep polling.
+                cursor = page.next_cursor or page.head_cursor or cursor
+            else:
+                current_poll = min(current_poll * 1.5, max_poll_interval)
+
+            remaining = deadline - clock()
+            if remaining <= 0:
+                break
+            sleep(min(current_poll, remaining))
+
+        raise SynapseAwaitTimeout(channel, timeout)
 
     def post_message(
         self,
