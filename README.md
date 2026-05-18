@@ -39,7 +39,7 @@ cd ~/path/to/your/project/orchestrator
 ./bootstrap.sh
 ```
 
-Prerequisites: Claude Code, Python 3.10+, `uv` (recommended, fast) or stdlib `pip`, `jq` (for settings merge), an OpenAI API key.
+Prerequisites: Claude Code, Python 3.10+, `uv` (recommended, fast) or stdlib `pip`, `jq` (for settings merge), and an embedding provider. **Default: local Ollama with `nomic-embed-text` pulled** (`ollama pull nomic-embed-text`, ~270 MB, no API key needed). **Legacy: an OpenAI API key** at `~/.config/openai-api-key` or `$OPENAI_API_KEY` — set `EMBEDDER_BASE_URL=https://api.openai.com/v1` and `EMBEDDER_MODEL=text-embedding-3-small`.
 
 The bootstrap:
 
@@ -93,7 +93,7 @@ orchestrator/
 │   ├── user_prompt_submit.py# Semantic recall per user prompt
 │   ├── session_end.py       # Archive + vectorize + auto-increment hits
 │   ├── pre_compact.py       # Remind to /checkpoint before compaction
-│   ├── embedder.py          # OpenAI embeddings + secret scrubbing
+│   ├── embedder.py          # Embeddings (default: local Ollama nomic-embed-text; OpenAI-compatible — supports any provider) + secret scrubbing
 │   ├── vectorstore.py       # SQLite-vec wrapper (with MMR)
 │   ├── indexer.py           # Chunker for markdown + JSONL transcripts
 │   └── recall.py            # Semantic search utility + CLI
@@ -122,6 +122,23 @@ onboarding/                  # Templates for new orchestrators
 | **Stop** | Session end | Archive JSONL → chunk + embed → store in vectors.db → auto-increment `hits` on cited memories → append note to LOG |
 
 The Stop hook handles persistence mechanically; `/checkpoint` is for the reflective parts (synthesis, proposing new memories, drift detection) that benefit from the orchestrator's judgment.
+
+## Embeddings
+
+The orchestrator uses an OpenAI-compatible HTTP embeddings API via `hooks/embedder.py`. **Default: local Ollama** at `http://127.0.0.1:11434/v1` with `nomic-embed-text` (768-dim, 8K context window, no API key, no quota). Set `OLLAMA_HOST` or override with env vars to point elsewhere:
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `EMBEDDER_BASE_URL` | `http://127.0.0.1:11434/v1` | OpenAI-compat endpoint |
+| `EMBEDDER_MODEL` | `nomic-embed-text` | Model name |
+| `EMBEDDER_API_KEY` | `ollama` | Bearer (Ollama ignores; OpenAI requires real key) |
+| `OPENAI_API_KEY` | — | Fallback to legacy `~/.config/openai-api-key` path |
+
+`vectorstore.py` sets `EMBEDDING_DIMS = 768` to match nomic. If you switch providers/models with a different dim, also update that constant and drop `vectors.db` so the table re-creates at the new width (`hooks/indexer.py backfill` re-embeds everything).
+
+The legacy OpenAI-only path (text-embedding-3-small @ 1536-dim) still works — set `EMBEDDER_BASE_URL=https://api.openai.com/v1`, `EMBEDDER_MODEL=text-embedding-3-small`, point `EMBEDDER_API_KEY` at your key, and bump `EMBEDDING_DIMS=1536`.
+
+Background: this orchestrator migrated from OpenAI to local on 2026-05-16 after quota exhaustion broke recall + caused a dream-cycle catastrophe on an upstream MindStone agent. The migration learnings (drift between Ollama HTTP and node-llama-cpp loading the same model; the embeddinggemma context-limit gotcha; schema variance between agents) are tracked in [MindStone#131](https://github.com/R1ngZer0/MindStone/issues/131) (hotfix for the dream-cycle bug) and [MindStone#132](https://github.com/R1ngZer0/MindStone/issues/132) (umbrella for canonicalization). Full operational details in `orchestrator/handoff_local-embeddings-migration_for-cairn.md`.
 
 ## Slash commands
 

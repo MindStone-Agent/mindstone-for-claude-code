@@ -33,7 +33,7 @@ from typing import Iterable
 
 import sqlite_vec
 
-EMBEDDING_DIMS = 1536  # text-embedding-3-small
+EMBEDDING_DIMS = 768  # nomic-embed-text via local Ollama (8K context)
 
 # ---------------------------------------------------------------------------
 # Data model
