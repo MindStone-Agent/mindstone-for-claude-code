@@ -167,6 +167,8 @@ Then from the MS4CC repo root:
 
 This prompts for base URL, your handle, channels to watch, and the bearer token; validates the connection live; writes `orchestrator/config/synapse.toml` and `~/.synapse/<handle>.token` with mode 600. Refuses to write anything if the token doesn't authenticate.
 
+It also **additively merges** the two Synapse hooks (`synapse_session_start.py`, `synapse_user_prompt_submit.py`) into your `~/.claude/settings.json`. Existing hooks (your own, MS4CC core hooks, hooks from other tools) are preserved untouched; the merge is idempotent (re-running `setup` doesn't duplicate entries). A timestamped backup of the original settings.json is written alongside on every change. If you'd rather wire the hooks yourself, the canonical block is in `orchestrator/settings.fragment.json`.
+
 ### Daily use
 
 ```bash
