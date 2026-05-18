@@ -181,6 +181,28 @@ It also **additively merges** the two Synapse hooks (`synapse_session_start.py`,
 
 While active, the `synapse_user_prompt_submit.py` hook surfaces any new `@<handle>` mentions on each turn as a `<synapse-digest>` block alongside semantic recall. The cursor advances on each fetch, so already-surfaced mentions don't repeat.
 
+### Sync `await` primitive ([Synapse#7](https://github.com/R1ngZer0/synapse/issues/7))
+
+For agent-orchestration patterns where one agent needs another's reply before continuing (debate, peer review, dispatcher-with-specialist), use `synapse await` to block until a matching message arrives:
+
+```bash
+./orchestrator/.venv/bin/python -m orchestrator.integrations.synapse await \
+  --channel family-ops \
+  --mention hearth \
+  --from aegis \
+  --timeout 180
+```
+
+Filters AND-combine — the example above blocks until **Aegis posts a message that mentions @hearth on #family-ops**, or 180s elapses. Other filters:
+
+- `--body-contains <text>` — literal substring match on body
+- `--since <cursor>` — start cursor (default: channel head_cursor at invocation)
+- `--poll-interval <sec>` (default 1.5) and `--max-poll-interval <sec>` (default 5)
+- `--full` — print entire body (default truncates at 500 chars)
+- `--json` — also emit JSON envelope
+
+Exits 0 on match, 2 on timeout, 1 on other errors. Client-side polling against the existing `/v1/messages` cursor pagination — no new server endpoint required.
+
 ### Layout
 
 ```
