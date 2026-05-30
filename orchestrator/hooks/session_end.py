@@ -122,11 +122,15 @@ def archive_transcript(session_jsonl: Path) -> Path | None:
 # Vectorize
 # ---------------------------------------------------------------------------
 
-def vectorize_transcript(archived_path: Path) -> int:
+def vectorize_transcript(archived_path: Path) -> dict:
     """Chunk, embed, and store the archived transcript in the vector DB.
 
-    Returns number of new chunks added, or -1 if vector stack isn't available.
+    Returns {chunks, truncated, failed, error}. `chunks` is the number of new
+    chunks added, or -1 if the vector stack isn't available. `truncated`/`failed`
+    surface lossy embedder operations so a silent drop (the bug that hid a month
+    of transcript-vectorization failures) becomes visible in LOG.md.
     """
+    result = {"chunks": -1, "truncated": 0, "failed": 0, "error": None}
     # Lazy-import so the hook works even if deps aren't installed yet.
     try:
         from embedder import Embedder
@@ -134,7 +138,7 @@ def vectorize_transcript(archived_path: Path) -> int:
         from vectorstore import VectorStore
     except Exception as e:
         print(f"[session_end] Vector stack unavailable ({e}); skipping vectorization.", file=sys.stderr)
-        return -1
+        return result
 
     store = VectorStore(DB_PATH)
     store.init_schema()
@@ -142,28 +146,33 @@ def vectorize_transcript(archived_path: Path) -> int:
         embedder = Embedder()
     except Exception as e:
         print(f"[session_end] Embedder not available ({e}); skipping vectorization.", file=sys.stderr)
-        return -1
+        return result
 
     idx = Indexer(store, embedder, verbose=False)
     try:
-        return idx.index_transcript(archived_path)
+        result["chunks"] = idx.index_transcript(archived_path)
     except Exception as e:
         print(f"[session_end] Failed to index transcript: {e}", file=sys.stderr)
-        return 0
+        result["chunks"] = 0
+        result["error"] = str(e)[:200]
+    result["truncated"] = embedder.stats.get("truncated", 0)
+    result["failed"] = embedder.stats.get("failed", 0)
+    return result
 
 # ---------------------------------------------------------------------------
 # Re-index changed memory files (mtime-delta against vector store)
 # ---------------------------------------------------------------------------
 
-def reindex_changed_memory() -> tuple[int, int]:
+def reindex_changed_memory() -> tuple[int, int, int, int]:
     """Re-index any memory files whose mtime is newer than their stored chunks.
 
-    Returns (files_reindexed, chunks_added). New files (no chunks yet) and
-    edited files (mtime > stored last_seen_at) are both picked up. Unchanged
-    files are skipped — no embedding cost.
+    Returns (files_reindexed, chunks_added, truncated, failed). New files (no
+    chunks yet) and edited files (mtime > stored last_seen_at) are both picked
+    up. Unchanged files are skipped — no embedding cost. truncated/failed
+    surface lossy embeds so an oversized memory file can't fail silently.
     """
     if not MEMORY_DIR.exists():
-        return 0, 0
+        return 0, 0, 0, 0
 
     try:
         from embedder import Embedder
@@ -171,7 +180,7 @@ def reindex_changed_memory() -> tuple[int, int]:
         from vectorstore import VectorStore
     except Exception as e:
         print(f"[session_end] Vector stack unavailable ({e}); skipping memory reindex.", file=sys.stderr)
-        return 0, 0
+        return 0, 0, 0, 0
 
     store = VectorStore(DB_PATH)
     store.init_schema()
@@ -179,7 +188,7 @@ def reindex_changed_memory() -> tuple[int, int]:
         embedder = Embedder()
     except Exception as e:
         print(f"[session_end] Embedder not available ({e}); skipping memory reindex.", file=sys.stderr)
-        return 0, 0
+        return 0, 0, 0, 0
 
     # Build {source_path: max(last_seen_at)} for memory chunks already in store.
     stored: dict[str, int] = {}
@@ -195,7 +204,7 @@ def reindex_changed_memory() -> tuple[int, int]:
         conn.close()
     except Exception as e:
         print(f"[session_end] Could not query vector store ({e}); skipping memory reindex.", file=sys.stderr)
-        return 0, 0
+        return 0, 0, 0, 0
 
     idx = Indexer(store, embedder, verbose=False)
     files_reindexed = 0
@@ -217,7 +226,12 @@ def reindex_changed_memory() -> tuple[int, int]:
         except Exception as e:
             print(f"[session_end] Failed to re-index {p.name}: {e}", file=sys.stderr)
 
-    return files_reindexed, chunks_added
+    return (
+        files_reindexed,
+        chunks_added,
+        embedder.stats.get("truncated", 0),
+        embedder.stats.get("failed", 0),
+    )
 
 # ---------------------------------------------------------------------------
 # Auto-increment hits based on memory filenames appearing in the transcript
@@ -334,11 +348,12 @@ def main():
         # Already up-to-date
         return
 
-    n_chunks = vectorize_transcript(archived)
+    vec = vectorize_transcript(archived)
+    n_chunks = vec["chunks"]
 
     # Re-index any memory files that have been added or edited since their
     # last vectorization. Cheap mtime check; only changed files are re-embedded.
-    mem_files, mem_chunks = reindex_changed_memory()
+    mem_files, mem_chunks, mem_trunc, mem_fail = reindex_changed_memory()
 
     # Watchdog runs hit-bumping risk inflated counters; let the per-turn
     # Stop hook own that responsibility.
@@ -353,6 +368,16 @@ def main():
         f"- Transcript chunks vectorized: {n_chunks if n_chunks >= 0 else 'skipped (vectors unavailable)'}",
         f"- Memory files re-indexed: {mem_files} ({mem_chunks} chunks)",
     ]
+
+    # Vector health — surface lossy/failed embeds so a silent drop is never
+    # mistaken for "nothing new" again (project_scri_vectorization_failure_2026-05-21).
+    trunc = vec["truncated"] + mem_trunc
+    fail = vec["failed"] + mem_fail
+    if vec["error"] or fail or trunc:
+        line = f"- ⚠️ Vector health: truncated={trunc}, failed={fail}"
+        if vec["error"]:
+            line += f", error={vec['error']}"
+        log_entry.append(line)
     if not WATCHDOG_MODE:
         log_entry.append(
             f"- Memory hits auto-incremented: {len(incremented)}"
