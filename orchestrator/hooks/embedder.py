@@ -1,4 +1,4 @@
-"""Local embedding client (Ollama mxbai-embed-large) with secret scrubbing.
+"""Local embedding client (Ollama nomic-embed-text) with secret scrubbing.
 
 Uses Ollama's OpenAI-compatible /v1/embeddings endpoint. No API key required
 for the default local-Ollama setup. Scrubs obvious secret-shaped tokens from
@@ -12,15 +12,26 @@ Usage:
     vecs = e.embed_batch(["a", "b"])   # batch → list[list[float]]
 
 Switched from OpenAI text-embedding-3-small (1536-dim) to nomic-embed-text
-(768-dim, 8192-token context) on 2026-05-15 — OpenAI account quota exhausted,
-family already on local Ollama for inference. nomic chosen over mxbai-embed-large
-for its 8K context window (mxbai is 512 and overflows long memory sections).
+(768-dim) on 2026-05-15 — OpenAI account quota exhausted, family already on
+local Ollama for inference.
+
+CONTEXT CEILING (verified empirically 2026-05-29): nomic-embed-text as served
+by Ollama enforces the model's TRAINED context of **2048 tokens**, NOT the 8192
+implied by the Modelfile's `PARAMETER num_ctx 8192`. Past 2048 tokens Ollama
+silently truncates prose and returns HTTP 400 "input length exceeds the context
+length" for token-dense input (JSON / logs / hex tokenize at ~1.3–1.5
+chars/token). That 400, on a single chunk inside an embed_batch() request, used
+to fail the WHOLE batch and abort a transcript's indexing — silently dropping a
+month of session texture. The chunker now sizes chunks to SAFE_INPUT_CHARS, and
+embed_batch() degrades to per-item embedding so one bad chunk can't poison the
+rest. See orchestrator/memory/project_scri_vectorization_failure_2026-05-21.md.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
 
 # Lazy import — we only need openai when actually embedding.
@@ -40,7 +51,19 @@ def _get_openai():
 DEFAULT_MODEL = "nomic-embed-text"
 DEFAULT_DIMS = 768
 DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1"
-BATCH_SIZE = 64      # mxbai is small; conservative batch keeps Ollama responsive
+BATCH_SIZE = 64      # conservative batch keeps local Ollama responsive
+
+# Hard input ceiling of the active embedding model, in tokens. nomic-embed-text
+# via Ollama enforces its trained 2048-token context (see module docstring).
+MAX_INPUT_TOKENS = 2048
+# Char cap the chunker (indexer.py) targets and embed() enforces as a
+# last-resort safety net. Sized to stay under MAX_INPUT_TOKENS even at
+# worst-case tokenization density (~1.3 chars/token for hex/base64/JSON):
+# 2400 / 1.3 ≈ 1846 tokens < 2048. The OpenAI build of this file sets these
+# to 8191 / ~24000 instead; indexer.py reads SAFE_INPUT_CHARS from here so the
+# chunker stays correct (and byte-identical) across both embedder builds.
+SAFE_INPUT_CHARS = 2400
+
 API_KEY_FILE = Path.home() / ".config" / "openai-api-key"  # only consulted if base_url overridden to cloud
 
 # ---------------------------------------------------------------------------
@@ -99,6 +122,10 @@ class Embedder:
             or "ollama"
         )
         self._client = None
+        # Lossy-operation counters. Read (and reset) by callers like
+        # session_end.py so a silently-truncated or dropped chunk is never
+        # invisible the way the month-long failure was.
+        self.stats = {"truncated": 0, "failed": 0}
 
     def _client_or_init(self):
         if self._client is None:
@@ -107,25 +134,78 @@ class Embedder:
         return self._client
 
     def embed(self, text: str) -> list[float]:
-        """Embed a single string. Returns a list of floats."""
+        """Embed a single string. Over-long input is capped to SAFE_INPUT_CHARS
+        (counted in self.stats) so a stray long input can never raise. Returns a
+        vector (zero-vector only if the model rejects it even after truncation)."""
         clean = scrub(text) if text else ""
         if not clean:
             return [0.0] * DEFAULT_DIMS
         client = self._client_or_init()
-        resp = client.embeddings.create(model=self.model, input=clean)
-        return resp.data[0].embedding
+        return self._embed_one_safe(client, clean)
+
+    def _embed_one_safe(self, client, text: str) -> list[float]:
+        """Embed one already-scrubbed string, guaranteeing no exception escapes.
+
+        Cap at SAFE_INPUT_CHARS up front (keeps us under the model's token
+        ceiling at any density); if the model still rejects it for length,
+        halve and retry; as a final fallback return a zero vector. Every lossy
+        step is counted and logged so failures are never silent.
+        """
+        if len(text) > SAFE_INPUT_CHARS:
+            text = text[:SAFE_INPUT_CHARS]
+            self.stats["truncated"] += 1
+        attempt = text
+        for _ in range(5):
+            try:
+                resp = client.embeddings.create(model=self.model, input=attempt)
+                return resp.data[0].embedding
+            except Exception as e:
+                msg = str(e).lower()
+                if "context length" in msg or "maximum context" in msg or "too long" in msg or " 400" in msg:
+                    # Length rejection — shrink and retry.
+                    attempt = attempt[: max(256, len(attempt) // 2)]
+                    self.stats["truncated"] += 1
+                    continue
+                # Non-length error (network, model down, etc.): don't spin.
+                self.stats["failed"] += 1
+                print(f"[embedder] embed failed ({type(e).__name__}: {str(e)[:120]}); "
+                      f"using zero vector", file=sys.stderr)
+                return [0.0] * DEFAULT_DIMS
+        self.stats["failed"] += 1
+        print("[embedder] embed still rejected after truncation; using zero vector",
+              file=sys.stderr)
+        return [0.0] * DEFAULT_DIMS
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Embed a batch of strings. Returns a list of vectors."""
+        """Embed a batch of strings. Returns a list of vectors (1:1 with input).
+
+        Each input is scrubbed and capped to SAFE_INPUT_CHARS, so one oversized
+        item can no longer 400 the whole request. If a batch call fails anyway,
+        fall back to per-item embedding so a single bad item can never drop the
+        other 63 — the all-or-nothing failure that silently lost a month of
+        transcript texture.
+        """
         if not texts:
             return []
         client = self._client_or_init()
         out: list[list[float]] = []
         for i in range(0, len(texts), BATCH_SIZE):
-            batch = [scrub(t) if t else "" for t in texts[i : i + BATCH_SIZE]]
-            batch = [b if b else " " for b in batch]
-            resp = client.embeddings.create(model=self.model, input=batch)
-            out.extend(item.embedding for item in resp.data)
+            batch: list[str] = []
+            for t in texts[i : i + BATCH_SIZE]:
+                c = scrub(t) if t else ""
+                c = c if c else " "
+                if len(c) > SAFE_INPUT_CHARS:
+                    c = c[:SAFE_INPUT_CHARS]
+                    self.stats["truncated"] += 1
+                batch.append(c)
+            try:
+                resp = client.embeddings.create(model=self.model, input=batch)
+                out.extend(item.embedding for item in resp.data)
+            except Exception as e:
+                print(f"[embedder] batch embed failed ({str(e)[:100]}); "
+                      f"retrying per-item", file=sys.stderr)
+                for c in batch:
+                    out.append(self._embed_one_safe(client, c))
         return out
 
 # ---------------------------------------------------------------------------

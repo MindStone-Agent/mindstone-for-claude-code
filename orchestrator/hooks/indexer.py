@@ -24,17 +24,60 @@ import re
 from pathlib import Path
 
 from embedder import Embedder, scrub
+try:
+    from embedder import SAFE_INPUT_CHARS as _SAFE_INPUT_CHARS
+except ImportError:  # older embedder build without the constant
+    _SAFE_INPUT_CHARS = 2400
 from vectorstore import Chunk, VectorStore
 
 # ---------------------------------------------------------------------------
 # Chunk sizing
 # ---------------------------------------------------------------------------
 
-# Soft targets for a single chunk. Markdown chunks try to respect headers;
-# transcript chunks try to group conversational turns.
-TARGET_CHUNK_CHARS = 2000       # ~500 tokens
-MAX_CHUNK_CHARS = 4000          # ~1000 tokens (hard cap)
-MIN_CHUNK_CHARS = 200           # below this, merge with neighbor
+# The hard cap is the ACTIVE embedder's safe input ceiling (SAFE_INPUT_CHARS),
+# so the chunker stays correct across embedder builds (nomic ~2400 / OpenAI
+# ~24000) WITHOUT this file diverging between the TestFlight and MS4CC repos.
+# Every assembled chunk — its header AND body — is guaranteed <= MAX_CHUNK_CHARS,
+# which keeps it under the model's token ceiling at any tokenization density.
+# (Before 2026-05-29 this was a flat 4000 "~1000 tokens" assuming ~4 chars/token;
+# dense transcript content is ~1.5 chars/token, so 4000-char chunks hit ~2700
+# tokens and 400'd against nomic's real 2048 ceiling — silently killing a month
+# of transcript vectorization. See project_scri_vectorization_failure_2026-05-21.)
+MAX_CHUNK_CHARS = _SAFE_INPUT_CHARS                          # hard cap (header + body)
+TARGET_CHUNK_CHARS = max(800, int(_SAFE_INPUT_CHARS * 0.6))  # soft packing target
+MIN_CHUNK_CHARS = 200                                        # below this, merge with neighbor
+
+
+def _hard_split(text: str, limit: int) -> list[str]:
+    """Split `text` into pieces each <= `limit` chars.
+
+    Prefers line boundaries; a single line longer than `limit` is cut into
+    fixed char windows. Guarantees every returned piece is <= limit regardless
+    of whether the text has paragraph/line structure — the failure mode that let
+    a 15.5K-char blank-line-free MEMORY.md index become one un-splittable chunk.
+    """
+    limit = max(1, limit)
+    if len(text) <= limit:
+        return [text]
+    pieces: list[str] = []
+    buf = ""
+    for line in text.split("\n"):
+        if len(line) > limit:
+            if buf:
+                pieces.append(buf)
+                buf = ""
+            for j in range(0, len(line), limit):
+                pieces.append(line[j:j + limit])
+            continue
+        candidate = (buf + "\n" + line) if buf else line
+        if len(candidate) > limit:
+            pieces.append(buf)
+            buf = line
+        else:
+            buf = candidate
+    if buf:
+        pieces.append(buf)
+    return pieces
 
 # ---------------------------------------------------------------------------
 # Markdown chunker
@@ -103,11 +146,14 @@ def chunk_markdown(text: str, source_path: str) -> list[Chunk]:
         else:
             merged.append((start, sect_lines))
 
-    # Split too-large sections by length within the section
+    # Split too-large sections by length within the section. The threshold
+    # accounts for the file_header prepended to every chunk, so the ASSEMBLED
+    # chunk text (header + body) stays <= MAX_CHUNK_CHARS.
+    section_body_limit = max(256, MAX_CHUNK_CHARS - len(file_header) - 2)
     chunks: list[Chunk] = []
     for start, sect_lines in merged:
         text_section = "\n".join(sect_lines)
-        if len(text_section) <= MAX_CHUNK_CHARS:
+        if len(text_section) <= section_body_limit:
             chunk_text = f"{file_header}\n\n{text_section}"
             chunks.append(Chunk(
                 source_type="memory",
@@ -122,8 +168,17 @@ def chunk_markdown(text: str, source_path: str) -> list[Chunk]:
     return chunks
 
 def _chunk_by_length(text: str, source_path: str, header: str, start_line: int = 1) -> list[Chunk]:
-    """Split by paragraphs, packing paragraphs into TARGET_CHUNK_CHARS-sized chunks."""
-    paragraphs = re.split(r"\n\s*\n", text)
+    """Split by paragraphs, packing into chunks whose assembled text (header +
+    body) stays <= MAX_CHUNK_CHARS. Paragraphs longer than the body budget are
+    hard-split (line, then char window) so no structureless block can produce an
+    over-ceiling chunk."""
+    body_limit = max(256, MAX_CHUNK_CHARS - len(header) - 2)
+    pack_target = min(TARGET_CHUNK_CHARS, body_limit)
+
+    paragraphs: list[str] = []
+    for p in re.split(r"\n\s*\n", text):
+        paragraphs.extend(_hard_split(p, body_limit) if len(p) > body_limit else [p])
+
     chunks: list[Chunk] = []
     buf: list[str] = []
     buf_len = 0
@@ -154,7 +209,7 @@ def _chunk_by_length(text: str, source_path: str, header: str, start_line: int =
 
     for p in paragraphs:
         p_len = len(p)
-        if buf_len + p_len > TARGET_CHUNK_CHARS and buf:
+        if buf and buf_len + p_len > pack_target:
             flush()
             buf_start_offset = offset
         buf.append(p)
@@ -198,19 +253,37 @@ def chunk_transcript(jsonl_text: str, source_path: str) -> list[Chunk]:
     if not turns:
         return []
 
+    # Reserve room for the per-chunk header so the ASSEMBLED chunk text (header +
+    # role-prefixed lines) stays <= MAX_CHUNK_CHARS. Long turns (tool dumps) are
+    # SPLIT across lines/chunks rather than truncated, so no texture is lost and
+    # no single dense chunk can exceed the embedder's token ceiling.
+    header_reserve = len(source_path) + 80
+    body_limit = max(256, MAX_CHUNK_CHARS - header_reserve)
+    pack_target = min(TARGET_CHUNK_CHARS, body_limit)
+
+    # Flatten turns into role-prefixed lines, hard-splitting any line that alone
+    # exceeds the body budget. Each line keeps its source line_num so the chunk
+    # still maps back to the transcript.
+    lines: list[tuple[int, str]] = []
+    for t in turns:
+        prefix = f"[{t['role']}]: "
+        avail = max(128, body_limit - len(prefix))
+        for k, piece in enumerate(_hard_split(t["content"], avail)):
+            tag = prefix if k == 0 else f"[{t['role']} cont.]: "
+            lines.append((t["line_num"], tag + piece))
+
     chunks: list[Chunk] = []
-    buf: list[dict] = []
+    buf: list[tuple[int, str]] = []
     buf_len = 0
 
     def flush():
         nonlocal buf, buf_len
         if not buf:
             return
-        first_line = buf[0]["line_num"]
-        last_line = buf[-1]["line_num"]
+        first_line = buf[0][0]
+        last_line = buf[-1][0]
         header = f"[Session transcript chunk — source: {source_path}, turns {first_line}-{last_line}]"
-        body_lines = [f"[{t['role']}]: {t['content']}" for t in buf]
-        chunk_text = header + "\n" + "\n".join(body_lines)
+        chunk_text = header + "\n" + "\n".join(x[1] for x in buf)
         chunks.append(Chunk(
             source_type="transcript",
             source_path=source_path,
@@ -222,17 +295,12 @@ def chunk_transcript(jsonl_text: str, source_path: str) -> list[Chunk]:
         buf = []
         buf_len = 0
 
-    for turn in turns:
-        t_len = len(turn["content"])
-        # Cap per-turn content length to avoid one monster turn eating everything
-        if t_len > MAX_CHUNK_CHARS:
-            turn["content"] = turn["content"][:MAX_CHUNK_CHARS] + "... [truncated]"
-            t_len = MAX_CHUNK_CHARS
-
-        if buf_len + t_len > TARGET_CHUNK_CHARS and buf:
+    for ln, txt in lines:
+        add = len(txt) + 1
+        if buf and buf_len + add > pack_target:
             flush()
-        buf.append(turn)
-        buf_len += t_len
+        buf.append((ln, txt))
+        buf_len += add
 
     flush()
     return chunks
