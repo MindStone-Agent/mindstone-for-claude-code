@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""Stop hook — fires when a Claude Code session ends.
+"""Stop hook — fires on each completed turn (Claude Code "Stop").
 
 Mechanical, non-LLM operations:
   1. Archive the current session's JSONL transcript into orchestrator/transcripts/
-  2. Vectorize the new transcript chunks into the vector store
-  3. Re-index any memory files whose mtime is newer than their stored vector
-     chunks (catches new + edited memories without a manual backfill)
-  4. Auto-increment `hits` counters on memory files that appear to have been
+  2. Auto-increment `hits` counters on memory files that appear to have been
      cited in this session (simple filename match against transcript content)
 
+Embedding (transcript vectorization + memory reindex) is DELIBERATELY NOT done
+here. `index_transcript` re-embeds the ENTIRE transcript on every run, so doing
+it on the per-turn Stop hook (and the intra-session watchdog) re-embedded ~15k
+chunks through the local embedder every single turn and ran the machine hot.
+Per Clint's 2026-05-31 directive, embedding happens ONLY at /checkpoint, which
+invokes this script with CAIRN_CHECKPOINT_MODE=1. (MS4CC agents only —
+MindStone-proper vectorizes via its own gateway/plugin path, not this hook.)
+
 None of this requires the orchestrator to be "awake" or running. Runs
-independently every session end. The reflective parts of /checkpoint
-(proposing new memories, drift detection, Option D confirmation) remain
-manual — those need the orchestrator's judgment.
+independently. The reflective parts of /checkpoint (proposing new memories,
+drift detection, Option D confirmation) remain manual — those need judgment.
 
 If the venv isn't set up yet (fresh clone before bootstrap), this hook
 logs a warning to stderr and exits cleanly.
@@ -39,11 +43,18 @@ DB_PATH = ORCHESTRATOR_DIR / "vectors.db"
 # Format: ~/.claude/projects/-<escaped-cwd>/<session-uuid>.jsonl
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
-# When invoked by the intra-session watchdog (from user_prompt_submit.py),
-# we still want to archive + vectorize, but we should NOT auto-increment
-# memory hit counters — the per-turn Stop hook already does that, and
-# repeating it every N turns from the watchdog would inflate counters.
+# When invoked by the intra-session watchdog (from user_prompt_submit.py), we
+# archive only and must NOT auto-increment memory hit counters — the per-turn
+# Stop hook already owns that, and repeating it from the watchdog would inflate
+# counters.
 WATCHDOG_MODE = os.environ.get("CAIRN_WATCHDOG_MODE") == "1"
+
+# Set by /checkpoint (step 7). This is the ONLY mode that embeds (transcript
+# vectorize + memory reindex). The per-turn Stop hook and the watchdog archive
+# only: index_transcript re-embeds the FULL transcript every run, so embedding
+# on every turn pegged the local embedder (ollama/nomic) and ran the machine
+# hot. Clint directive 2026-05-31: "embedding should ONLY happen in checkpoints."
+CHECKPOINT_MODE = os.environ.get("CAIRN_CHECKPOINT_MODE") == "1"
 
 # ---------------------------------------------------------------------------
 # Stop-hook input protocol
@@ -348,25 +359,48 @@ def main():
         # Already up-to-date
         return
 
-    vec = vectorize_transcript(archived)
-    n_chunks = vec["chunks"]
+    # Embedding (full-transcript vectorize + memory reindex) happens ONLY at
+    # /checkpoint (CAIRN_CHECKPOINT_MODE=1). The per-turn Stop hook and the
+    # intra-session watchdog archive only — index_transcript re-embeds the
+    # ENTIRE transcript on every run, so doing that per-turn pegged the local
+    # embedder and ran the machine hot. (Clint directive 2026-05-31.)
+    if CHECKPOINT_MODE:
+        vec = vectorize_transcript(archived)
+        n_chunks = vec["chunks"]
+        # Re-index memory files added/edited since last vectorization (mtime check).
+        mem_files, mem_chunks, mem_trunc, mem_fail = reindex_changed_memory()
+    else:
+        vec = {"chunks": -1, "truncated": 0, "failed": 0, "error": None}
+        n_chunks = None  # sentinel: deferred to /checkpoint (distinct from -1 "unavailable")
+        mem_files = mem_chunks = mem_trunc = mem_fail = 0
 
-    # Re-index any memory files that have been added or edited since their
-    # last vectorization. Cheap mtime check; only changed files are re-embedded.
-    mem_files, mem_chunks, mem_trunc, mem_fail = reindex_changed_memory()
-
-    # Watchdog runs hit-bumping risk inflated counters; let the per-turn
-    # Stop hook own that responsibility.
-    incremented = [] if WATCHDOG_MODE else auto_increment_hits(archived)
+    # Hit-counter bumping belongs to the plain per-turn Stop hook only. The
+    # watchdog (would inflate counters) and /checkpoint (the per-turn hook
+    # already owns it) both skip it.
+    incremented = [] if (WATCHDOG_MODE or CHECKPOINT_MODE) else auto_increment_hits(archived)
 
     # Append a brief note to LOG.md so the activity is visible next session.
-    header = "### Watchdog-archive" if WATCHDOG_MODE else "### Auto-archive"
+    if CHECKPOINT_MODE:
+        header = "### Checkpoint-archive"
+    elif WATCHDOG_MODE:
+        header = "### Watchdog-archive"
+    else:
+        header = "### Auto-archive"
+    if n_chunks is None:
+        vec_line = "- Transcript chunks vectorized: deferred to /checkpoint"
+        mem_line = "- Memory files re-indexed: deferred to /checkpoint"
+    else:
+        vec_line = (
+            f"- Transcript chunks vectorized: "
+            f"{n_chunks if n_chunks >= 0 else 'skipped (vectors unavailable)'}"
+        )
+        mem_line = f"- Memory files re-indexed: {mem_files} ({mem_chunks} chunks)"
     log_entry = [
-        f"",
+        "",
         f"{header} — {datetime.now(tz=timezone.utc).isoformat(timespec='seconds')}",
         f"- Archived: `{archived.name}`",
-        f"- Transcript chunks vectorized: {n_chunks if n_chunks >= 0 else 'skipped (vectors unavailable)'}",
-        f"- Memory files re-indexed: {mem_files} ({mem_chunks} chunks)",
+        vec_line,
+        mem_line,
     ]
 
     # Vector health — surface lossy/failed embeds so a silent drop is never
@@ -378,7 +412,7 @@ def main():
         if vec["error"]:
             line += f", error={vec['error']}"
         log_entry.append(line)
-    if not WATCHDOG_MODE:
+    if not WATCHDOG_MODE and not CHECKPOINT_MODE:
         log_entry.append(
             f"- Memory hits auto-incremented: {len(incremented)}"
             + (f" ({', '.join(incremented[:5])}{'...' if len(incremented) > 5 else ''})" if incremented else "")
