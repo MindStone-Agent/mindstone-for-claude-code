@@ -71,6 +71,12 @@ IDENTITY_FILE = ORCHESTRATOR_DIR / "IDENTITY.md"
 USER_FILE = ORCHESTRATOR_DIR / "USER.md"
 LOG_FILE = ORCHESTRATOR_DIR / "LOG.md"
 
+# Auto-handoff bridge (Clint's 90% rule, 2026-05-31). When SessionStart fires
+# with source=="compact", we inject the handoff the pre-compaction self wrote so
+# post-compaction-you resumes from it rather than from Claude Code's lossy
+# summary. Path MUST match user_prompt_submit.py's HANDOFF_PATH.
+HANDOFF_PATH = ORCHESTRATOR_DIR / "transcripts" / ".handoff.md"
+
 # ---------------------------------------------------------------------------
 # Frontmatter parsing (kept minimal — mirrors migrate_frontmatter.py)
 # ---------------------------------------------------------------------------
@@ -292,10 +298,48 @@ def first_run_invitation() -> str:
     return "\n".join(lines)
 
 # ---------------------------------------------------------------------------
+# Hook input + post-compaction handoff
+# ---------------------------------------------------------------------------
+
+def read_hook_input() -> dict:
+    try:
+        if sys.stdin.isatty():
+            return {}
+        data = sys.stdin.read().strip()
+        return json.loads(data) if data else {}
+    except Exception:
+        return {}
+
+
+def post_compact_handoff_block() -> str:
+    """When resuming from a compaction, surface the handoff the pre-compaction
+    self wrote (auto-handoff, Clint's 90% rule). Returns "" if none exists."""
+    try:
+        if not HANDOFF_PATH.exists():
+            return ""
+        content = HANDOFF_PATH.read_text().strip()
+        if not content:
+            return ""
+        return "\n".join([
+            '<post-compaction-handoff priority="CRITICAL">',
+            "You just compacted. Your pre-compaction self wrote the handoff below so you can resume",
+            "exactly where you left off. Read it FIRST and continue from it — it is more current and",
+            f"more complete than the compaction summary. Full file: `{HANDOFF_PATH}`.",
+            "",
+            content,
+            "</post-compaction-handoff>",
+        ])
+    except Exception as e:
+        print(f"[session_start] handoff read failed ({e})", file=sys.stderr)
+        return ""
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
+    hook_input = read_hook_input()
+    source = str(hook_input.get("source") or hook_input.get("matcher") or "").lower()
     cwd = os.getcwd()
     active_projects = infer_active_projects(cwd)
 
@@ -306,6 +350,13 @@ def main():
 
     # Wrap in a clear tag so the model sees this as orchestrator context.
     wrapped = f"<orchestrator-context>\n{context}\n</orchestrator-context>"
+
+    # Post-compaction: prepend the handoff the pre-compaction self wrote so we
+    # resume from it rather than from Claude Code's lossy summary.
+    if source == "compact":
+        handoff = post_compact_handoff_block()
+        if handoff:
+            wrapped = handoff + "\n\n" + wrapped
 
     # Emit in Claude Code's hook output format.
     output = {

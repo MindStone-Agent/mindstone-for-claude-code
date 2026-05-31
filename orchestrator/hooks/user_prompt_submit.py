@@ -52,6 +52,26 @@ WATCHDOG_TURN_THRESHOLD = int(os.environ.get("CAIRN_WATCHDOG_THRESHOLD", "10"))
 WATCHDOG_STATE_FILE = ORCHESTRATOR_DIR / "transcripts" / ".watchdog_state.json"
 SESSION_END_HOOK = HOOK_FILE.parent / "session_end.py"
 
+# ---------------------------------------------------------------------------
+# Context-capacity auto-handoff trigger (Clint's 90% rule, 2026-05-31)
+# ---------------------------------------------------------------------------
+# Removes the need for Clint to babysit the token count. Each turn we read the
+# latest `usage` record Claude Code writes into the transcript JSONL, compute
+# context-window occupancy (input + cache_creation + cache_read), and at
+# COMPACT_THRESHOLD inject a CRITICAL directive telling the orchestrator to run
+# the compaction-handoff sequence autonomously:
+#     /checkpoint  ->  write .handoff.md  ->  /compact
+# Post-compaction, session_start.py (source == "compact") points back to the
+# handoff file. Hysteresis: fires once on crossing up through COMPACT_THRESHOLD;
+# re-arms only after occupancy falls back below REARM_RATIO (which it does after
+# a compaction). CONTEXT_WINDOW defaults to the 1M-context model; tune via env if
+# the figure here diverges from the TUI %.
+CONTEXT_WINDOW = int(os.environ.get("CAIRN_CONTEXT_WINDOW", "1000000"))
+COMPACT_THRESHOLD = float(os.environ.get("CAIRN_COMPACT_THRESHOLD", "0.90"))
+REARM_RATIO = float(os.environ.get("CAIRN_COMPACT_REARM", "0.5"))
+HANDOFF_PATH = ORCHESTRATOR_DIR / "transcripts" / ".handoff.md"
+HANDOFF_STATE_FILE = ORCHESTRATOR_DIR / "transcripts" / ".handoff_state.json"
+
 def read_hook_input() -> dict:
     try:
         if sys.stdin.isatty():
@@ -180,6 +200,118 @@ def maybe_run_watchdog(hook_input: dict) -> None:
         print(f"[user_prompt_submit] watchdog error ({e})", file=sys.stderr)
 
 
+# ---------------------------------------------------------------------------
+# Auto-handoff trigger
+# ---------------------------------------------------------------------------
+
+def _resolve_transcript_path(hook_input: dict) -> Path | None:
+    tp = hook_input.get("transcript_path") or hook_input.get("transcriptPath")
+    if tp and Path(tp).exists():
+        return Path(tp)
+    cwd = hook_input.get("cwd") or os.getcwd()
+    escaped = "-" + str(cwd).strip("/").replace("/", "-")
+    projdir = Path.home() / ".claude" / "projects" / escaped
+    if projdir.is_dir():
+        jsonls = sorted(projdir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if jsonls:
+            return jsonls[0]
+    return None
+
+
+def _context_tokens_from_transcript(tp: Path) -> int | None:
+    """Sum the last usage record's prompt tokens = current context occupancy."""
+    last = None
+    try:
+        with tp.open() as f:
+            for line in f:
+                if '"usage"' not in line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                u = (o.get("message", {}) or {}).get("usage") or o.get("usage")
+                if isinstance(u, dict) and ("input_tokens" in u or "cache_read_input_tokens" in u):
+                    last = u
+    except Exception:
+        return None
+    if not last:
+        return None
+    return (int(last.get("input_tokens", 0) or 0)
+            + int(last.get("cache_creation_input_tokens", 0) or 0)
+            + int(last.get("cache_read_input_tokens", 0) or 0))
+
+
+def _build_handoff_directive(pct: float, ctx: int) -> str:
+    return "\n".join([
+        '<context-capacity-handoff priority="CRITICAL">',
+        f"⚠ CONTEXT AT ~{pct*100:.0f}% ({ctx:,} / {CONTEXT_WINDOW:,} tokens). Automatic compaction-handoff trigger (Clint's 90% rule, 2026-05-31).",
+        "",
+        "BEFORE responding to anything else this turn, run the compaction-handoff sequence — fully autonomously. Do NOT ask Clint to confirm any part of it; use your own judgment and proceed:",
+        "",
+        "1. Run `/checkpoint` — your judgment on everything (LOG entry, memory proposals, Option D, drift). Do not wait on Clint.",
+        f"2. Write your handoff to `{HANDOFF_PATH}` (overwrite). Post-compaction-you reads this to resume. Capture concisely:",
+        "   - What you're mid-task on + the exact next step",
+        "   - Open threads / gated work / what you're waiting on and from whom (include any in-flight request from THIS turn so you address it after compaction)",
+        "   - Key decisions + constraints established this session",
+        "   - Anything post-compaction-you would otherwise lose and regret",
+        "3. Run `/compact`.",
+        "",
+        "After compaction, SessionStart points you back to the handoff file. This is expected and correct — it replaces Clint manually watching your token count. Proceed without confirmation.",
+        "</context-capacity-handoff>",
+    ])
+
+
+def maybe_handoff_directive(hook_input: dict) -> str | None:
+    """Return the auto-handoff directive when context crosses COMPACT_THRESHOLD,
+    else None. Hysteresis (per-session state file): fires once per crossing, and
+    re-arms only after occupancy drops below REARM_RATIO (i.e. after a compaction).
+    All errors swallowed so this never blocks the turn."""
+    try:
+        tp = _resolve_transcript_path(hook_input)
+        if not tp:
+            return None
+        ctx = _context_tokens_from_transcript(tp)
+        if not ctx or CONTEXT_WINDOW <= 0:
+            return None
+        pct = ctx / CONTEXT_WINDOW
+        sid = _resolve_session_id(hook_input) or "default"
+
+        state: dict = {}
+        if HANDOFF_STATE_FILE.exists():
+            try:
+                state = json.loads(HANDOFF_STATE_FILE.read_text())
+                if not isinstance(state, dict):
+                    state = {}
+            except Exception:
+                state = {}
+        entry = state.get(sid) if isinstance(state.get(sid), dict) else {}
+        fired = bool(entry.get("fired"))
+
+        def _save():
+            try:
+                HANDOFF_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                HANDOFF_STATE_FILE.write_text(json.dumps(state))
+            except Exception as e:
+                print(f"[user_prompt_submit] handoff state write failed ({e})", file=sys.stderr)
+
+        # Re-arm once occupancy falls back down (e.g. right after a compaction).
+        if fired and pct < REARM_RATIO:
+            state[sid] = {"fired": False}
+            _save()
+            return None
+
+        if pct >= COMPACT_THRESHOLD and not fired:
+            state[sid] = {"fired": True}
+            _save()
+            print(f"[user_prompt_submit] auto-handoff fired at {pct*100:.0f}% ({ctx} tok)", file=sys.stderr)
+            return _build_handoff_directive(pct, ctx)
+        return None
+    except Exception as e:
+        print(f"[user_prompt_submit] handoff-trigger error ({e})", file=sys.stderr)
+        return None
+
+
 def main():
     hook_input = read_hook_input()
     prompt = extract_prompt(hook_input)
@@ -188,6 +320,19 @@ def main():
     # the archive + vector index fresh in case this session ends via /exit
     # or an error before the next Stop hook fires.
     maybe_run_watchdog(hook_input)
+
+    # Auto-handoff trigger (Clint's 90% rule): if context has crossed the
+    # threshold, inject the CRITICAL handoff directive and skip normal recall
+    # (we're about to checkpoint + compact anyway).
+    directive = maybe_handoff_directive(hook_input)
+    if directive:
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": directive,
+            }
+        }))
+        return
 
     # No prompt to work with, or too short to be worth embedding.
     if not prompt or len(prompt) < 8:
