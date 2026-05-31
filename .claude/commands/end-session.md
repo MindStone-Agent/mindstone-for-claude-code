@@ -1,10 +1,10 @@
 ---
-description: Wrap up the session before /exit. Composes the reflective dream-cycle (/checkpoint when warranted) with the mechanical archive (transcript vectorization + hit-counter updates) so both layers land before the session closes.
+description: Wrap up the session before /exit. Composes the reflective dream-cycle (/checkpoint when warranted) with the mechanical archive (transcript archival + hit-counter updates; embedding happens at /checkpoint, not per-turn) so both layers land before the session closes.
 ---
 
 # End-session — wrap up the session before /exit
 
-Final wrap-up before `/exit`. Composes the reflective dream-cycle (`/checkpoint`) and the mechanical archive (transcript vectorization + hit-counter updates) so both layers land before the session closes. After `/end-session` completes, you can `/exit` knowing the session texture is preserved and any session-shaped reflection is captured.
+Final wrap-up before `/exit`. Composes the reflective dream-cycle (`/checkpoint`) and the mechanical archive (transcript archival + hit-counter updates) so both layers land before the session closes. **As of 2026-05-31, embedding/vectorization happens at `/checkpoint` only** — the per-turn archive (and end-session's archive step) no longer embed (`index_transcript` re-embeds the whole transcript, which pegged the local embedder per-turn). So if you want this session *recallable*, run `/checkpoint` (which `/end-session` invokes when warranted), not just the bare archive.
 
 The mechanical archive matters because the Stop hook fires per-turn-completion, not on session end — so sessions that end without a final completed turn (`/exit` after an error, abrupt termination, image-dimension errors, etc.) skip the auto-archive. `/end-session` is the user-actionable workaround until the v3 watchdog ships (auto-archive every N turns from `UserPromptSubmit`).
 

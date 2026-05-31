@@ -101,10 +101,10 @@ Once the user approves the entry, append to the end of `orchestrator/LOG.md`. Pr
 
 ### 7. Archive + vectorize the session (mandatory, not skippable)
 
-Run the archive + vectorize pass explicitly. This is the same code path the Stop hook uses; we run it here so /checkpoint guarantees persistence regardless of whether the Stop hook fires later (it doesn't fire on `/exit`; it doesn't fire when image-dimension errors or other substrate-level errors block model calls; it can fail silently if the runtime is unhealthy).
+Run the archive + **embed** pass explicitly. As of 2026-05-31 (Cairn's MS4CC fix, testflight 87d82dc), the per-turn Stop hook archives ONLY — embedding (transcript vectorize + memory reindex) happens ONLY here, gated behind `CAIRN_CHECKPOINT_MODE=1`. (`index_transcript` re-embeds the entire transcript, so doing it every turn pegged the local embedder; per Clint's 2026-05-31 directive embedding is checkpoint-only.) This step also guarantees persistence when the Stop hook can't fire (`/exit`; image-dimension or other substrate errors block model calls; runtime crashes).
 
 ```bash
-CAIRN_WATCHDOG_MODE=1 orchestrator/.venv/bin/python orchestrator/hooks/session_end.py < /dev/null
+CAIRN_CHECKPOINT_MODE=1 orchestrator/.venv/bin/python orchestrator/hooks/session_end.py < /dev/null
 ```
 
 What this does:
@@ -112,7 +112,7 @@ What this does:
 - Chunks + embeds + stores any new transcript chunks in `orchestrator/vectors.db`.
 - Re-indexes any memory files whose mtime is newer than their stored vector chunks (catches new + edited memories without a manual backfill).
 
-Why `CAIRN_WATCHDOG_MODE=1`: the Stop hook fires per-turn-completion and is the canonical source of `hits` counter increments. Running session_end.py from /checkpoint with watchdog mode skips the hits-increment step so we don't double-count. Vectorization and archive still run.
+Why `CAIRN_CHECKPOINT_MODE=1`: this is the ONLY mode that embeds. The per-turn Stop hook and the intra-session watchdog archive only (no embed) — `/checkpoint` is where transcript vectorization + memory reindex actually happen. Checkpoint mode also skips the `hits` increment (the per-turn Stop hook is the canonical source of those, so we don't double-count).
 
 Why `< /dev/null`: the Stop hook normally reads JSON from stdin (session_id + cwd). When invoked manually it falls back to mtime-finding the most recent JSONL in the project dir, which is the right behavior for /checkpoint.
 
@@ -128,11 +128,11 @@ Verify: the script prints `Indexed N new chunks` (or similar) to stderr. If it p
 
 The session's mechanical persistence (transcript archive + vector indexing + `hits` counter increments) is handled by **two redundant code paths**:
 
-1. **The Stop hook** (`orchestrator/hooks/session_end.py`) — fires per-turn-completion automatically. Copies the session JSONL to `orchestrator/transcripts/`, chunks + embeds + stores in `orchestrator/vectors.db`, scans for memory citations and increments `hits`, appends an `### Auto-archive` note to `LOG.md`. This runs regardless of whether `/checkpoint` is invoked.
+1. **The Stop hook** (`orchestrator/hooks/session_end.py`) — fires per-turn-completion automatically. **As of 2026-05-31 it ARCHIVES ONLY** (copies the session JSONL to `orchestrator/transcripts/`, scans for memory citations + increments `hits`, appends `### Auto-archive` to `LOG.md`). It **no longer embeds** — `index_transcript` re-embeds the whole transcript, and doing that every turn pegged the local embedder (Clint directive: embedding is checkpoint-only). Archiving every turn is cheap and keeps the transcript safe on disk.
 
-2. **`/checkpoint` step 7** — invokes the same Stop-hook code path explicitly with `CAIRN_WATCHDOG_MODE=1` (skips the hits-increment to avoid double-counting since the per-turn Stop hook already handles those). Archive + vectorize still run. This guarantees persistence at checkpoint time even when the Stop hook can't fire — `/exit` skips it; image-dimension errors block model calls; runtime crashes leave dangling state.
+2. **`/checkpoint` step 7** — invokes the same script with `CAIRN_CHECKPOINT_MODE=1`, the ONLY mode that **embeds** (transcript vectorize + memory reindex). Skips the `hits` increment (the per-turn Stop hook owns that). This is now the single place embedding happens for MS4CC.
 
-Either path alone would be enough most of the time. Both together is the discipline.
+The per-turn archive is the safety net (transcript never lost); checkpoint embedding is what makes it recallable. (MindStone-proper embeds via its own gateway path — unaffected.)
 
 ## When NOT to run /checkpoint
 
