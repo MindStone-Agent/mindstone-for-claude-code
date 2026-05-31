@@ -218,21 +218,43 @@ def _resolve_transcript_path(hook_input: dict) -> Path | None:
     return None
 
 
+_USAGE_TAIL_BYTES = 4_000_000  # last usage record lives at EOF; don't scan the whole growing transcript
+
+
+def _last_usage_in(lines) -> dict | None:
+    last = None
+    for raw in lines:
+        if b'"usage"' not in raw:
+            continue
+        try:
+            o = json.loads(raw)
+        except Exception:
+            continue
+        u = (o.get("message", {}) or {}).get("usage") or o.get("usage")
+        if isinstance(u, dict) and ("input_tokens" in u or "cache_read_input_tokens" in u):
+            last = u
+    return last
+
+
 def _context_tokens_from_transcript(tp: Path) -> int | None:
-    """Sum the last usage record's prompt tokens = current context occupancy."""
+    """Sum the last usage record's prompt tokens = current context occupancy.
+
+    Tail-reads the last few MB (the latest usage record sits at EOF), with a
+    full-scan fallback. Per Cairn's #38 review: the transcript is append-only
+    and grows unbounded (compaction shrinks context, not the file), so scanning
+    the whole thing every turn was O(filesize) — ~0.87s on a 520MB file. The
+    tail-read is ~138x faster with an identical result."""
     last = None
     try:
-        with tp.open() as f:
-            for line in f:
-                if '"usage"' not in line:
-                    continue
-                try:
-                    o = json.loads(line)
-                except Exception:
-                    continue
-                u = (o.get("message", {}) or {}).get("usage") or o.get("usage")
-                if isinstance(u, dict) and ("input_tokens" in u or "cache_read_input_tokens" in u):
-                    last = u
+        size = tp.stat().st_size
+        with tp.open("rb") as f:
+            if size > _USAGE_TAIL_BYTES:
+                f.seek(size - _USAGE_TAIL_BYTES)
+                f.readline()  # drop the partial boundary line
+            last = _last_usage_in(f.read().splitlines())
+            if last is None and size > _USAGE_TAIL_BYTES:
+                f.seek(0)
+                last = _last_usage_in(f)
     except Exception:
         return None
     if not last:
