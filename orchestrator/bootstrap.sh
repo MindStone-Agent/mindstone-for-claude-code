@@ -147,9 +147,17 @@ else
 
   if [[ -f "$SETTINGS_FILE" ]]; then
     cp "$SETTINGS_FILE" "${SETTINGS_FILE}.backup.$(date +%s)"
-    # Overwrite `hooks` key entirely with fragment contents — prevents
-    # duplicate hook entries from accumulating across re-runs.
-    jq --slurpfile frag "$TEMP_FRAGMENT" '.hooks = $frag[0].hooks' "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp"
+    # Overwrite `hooks` entirely (prevents duplicate hook entries across re-runs),
+    # set autoCompactEnabled from the fragment, and deep-merge env (fragment wins).
+    # autoCompactEnabled=true + CLAUDE_AUTOCOMPACT_PCT_OVERRIDE are part of the
+    # MS4CC compaction-handoff design — harness auto-compact is the backstop,
+    # PreCompact is the handoff floor. MS4CC (Claude Code) substrate only, NOT
+    # MindStone-proper (its no-compaction rule does not apply). See docs/scri-38-cc-*.md.
+    jq --slurpfile frag "$TEMP_FRAGMENT" \
+       '.hooks = $frag[0].hooks
+        | (if $frag[0].autoCompactEnabled != null then .autoCompactEnabled = $frag[0].autoCompactEnabled else . end)
+        | .env = ((.env // {}) + ($frag[0].env // {}))' \
+       "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp"
     mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
     echo "  MERGED: $FRAGMENT_FILE → $SETTINGS_FILE"
     echo "          (backup at ${SETTINGS_FILE}.backup.*)"

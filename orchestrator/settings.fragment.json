@@ -1,4 +1,8 @@
 {
+  "autoCompactEnabled": true,
+  "env": {
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "92"
+  },
   "hooks": {
     "SessionStart": [
       {
