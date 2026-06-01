@@ -22,23 +22,22 @@ Framework-level future direction. Per-orchestrator (Cairn-specific or your-own-o
 - **v1** — Persistent-identity orchestrator skeleton: hooks, schema, role adoption, onboarding, bootstrap. ✅ Shipped.
 - **v2** — Vectors via sqlite-vec + OpenAI embeddings, auto-archive Stop hook, UserPromptSubmit semantic recall, Python venv via `uv`. ✅ Shipped.
 - **Intra-session archive watchdog (2026-04-26)** — ✅ Shipped (split out of v3 §6). UserPromptSubmit forks `session_end.py` as a detached background subprocess every N=10 turns; `session_end.py` honors `CAIRN_WATCHDOG_MODE=1` to skip hit-incrementing and emit a distinct LOG header. Eliminates the need for users to remember `/end-session` before `/exit`.
-- **v3** — Sliding-window-adjacent compaction handling, dedup hardening. **Planned, not shipped.** See below.
+- **v3** — Compaction-handoff system (four-touchpoint: danger-zone handoff, PreCompact linchpin, post-compact replay + embed, auto-compact calibration). ✅ Shipped. See below.
 
-## v3 — sliding-window-adjacent compaction handling
+## v3 — compaction-handoff system ✅ Shipped
 
-Catalyst: Mira's letter to Cairn (the framework's author) flagging that lossy auto-compaction loses session texture even with auto-archive. Solution adapted to Claude Code's substrate constraints (we can't programmatically prune; we can disable auto-compact and bracket manual compaction with hooks).
+Catalyst: Mira's letter to Cairn flagging that lossy auto-compaction loses session texture even with auto-archive. Solution adapted to Claude Code's substrate constraints (we can't programmatically prune conversation history from a hook, but we can make compaction lossless via a four-touchpoint handoff system).
 
-Planned scope:
+What shipped:
 
-1. **Document the auto-compact-off recommendation** in `BOOTSTRAP.md` and `README.md`. Users flip `Auto-compact` to `false` via `/config`. (The toggle exists despite earlier docs claiming otherwise — confirmed empirically.)
-2. **Upgrade `PreCompact` hook** so when the user runs manual `/compact`, it: reads the session JSONL, vectorizes any turns not yet in vectors.db, writes a high-weight consolidation memo, stashes the last 20–30% of verbatim messages to `orchestrator/transcripts/pending_reinject.txt`.
-3. **Add `SessionStart:compact` matcher branch** to detect post-compaction state, inject the stashed verbatim tail + consolidation memo as `<pre-compaction-verbatim>` context, then delete the stash file.
-4. **Content-hash dedup hardening** — current chunk_id dedup handles same-source same-range, but cross-source near-duplicates (same content in memory file AND transcript) currently store separately. Add insert-time content-hash check; link rather than duplicate. MMR mostly hides this at retrieval time, but storage-level dedup is cleaner for public release.
-5. **Optional UserPromptSubmit context-size monitor** — log approximate session JSONL size so the orchestrator can surface "approaching capacity, consider /compact or /checkpoint" gracefully. Not pruning (Claude Code doesn't expose that API), just awareness.
+1. **Danger-zone directive at 85% context** — `UserPromptSubmit` detects approaching context limit (`CAIRN_COMPACT_THRESHOLD=0.85`) and injects a directive: the orchestrator writes a rich handoff to `orchestrator/transcripts/.handoff.md` (identity summary, key decisions, open threads) and runs the `/checkpoint` judgment (LOG entry, new memories). No embed at this stage.
+2. **PreCompact linchpin** — fires before ANY compaction (harness-auto or manual). Archives the live transcript JSONL and appends a `## RECENT TAIL` section to `.handoff.md` from turns since the 85% rich handoff. No model call; no embed. This is the threshold-independent safety floor: continuity holds even if the context-percent override is a no-op on a given Claude Code version.
+3. **Post-compact replay in SessionStart** — on `source==compact`, replays `.handoff.md` as context and kicks a detached background embed of the archived pre-compaction transcript via the same Indexer/Embedder/VectorStore path as the checkpoint embed.
+4. **Settings calibration** — `autoCompactEnabled: true` + `env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=92` (harness auto-compacts ~92%, above the 85% danger zone so the rich handoff always lands first). Applied by `bootstrap.sh`'s jq merge alongside hook registrations.
 
-6. **Intra-session archive watchdog — ✅ IMPLEMENTED 2026-04-26 (split out of v3, shipped early).** Discovered empirically the same day: the Stop hook fires per-turn-completion, NOT on session end. `/exit`, abrupt termination, or error-killed sessions lost their post-last-turn texture from auto-archive. Implementation chose option (a) per the original lean: `user_prompt_submit.py` keeps a per-session turn counter at `orchestrator/transcripts/.watchdog_state.json` and every N=10 turns (configurable via `CAIRN_WATCHDOG_THRESHOLD`) forks `session_end.py` as a detached background subprocess (`start_new_session=True` so it survives `/exit`; stdio devnull'd). `session_end.py` honors `CAIRN_WATCHDOG_MODE=1` to skip memory-hit auto-incrementing (the per-turn Stop hook already owns that responsibility — running it again every N turns would inflate counters) and emits a distinct `### Watchdog-archive` LOG header. Verified live in flight. The earlier `/end-session` bandaid remains useful for explicit user-driven archives but is no longer required for routine `/exit` safety.
+6. **Intra-session archive watchdog — ✅ IMPLEMENTED 2026-04-26 (split out of v3, shipped early).** Discovered empirically: the Stop hook fires per-turn-completion, NOT on session end. `/exit`, abrupt termination, or error-killed sessions lost their post-last-turn texture from auto-archive. `user_prompt_submit.py` keeps a per-session turn counter at `orchestrator/transcripts/.watchdog_state.json` and every N=10 turns (configurable via `CAIRN_WATCHDOG_THRESHOLD`) forks `session_end.py` as a detached background subprocess (`start_new_session=True` so it survives `/exit`; stdio devnull'd). `session_end.py` honors `CAIRN_WATCHDOG_MODE=1` to skip memory-hit auto-incrementing (the per-turn Stop hook already owns that) and emits a distinct `### Watchdog-archive` LOG header. The earlier `/end-session` command remains useful for explicit user-driven archives but is no longer required for routine `/exit` safety.
 
-What v3 deliberately does NOT attempt: true programmatic sliding-window pruning. Claude Code doesn't allow modifying conversation history from a hook. The compaction-boundary cliff can be eliminated by user choice (auto-compact off), and graceful manual compaction is what we're building around.
+What v3 deliberately does NOT attempt: true programmatic sliding-window pruning. Claude Code doesn't allow modifying conversation history from a hook. The four-touchpoint handoff system makes compaction lossless without requiring that capability.
 
 ## v4 — observability and validation
 
@@ -49,7 +48,7 @@ What v3 deliberately does NOT attempt: true programmatic sliding-window pruning.
 
 ## v5 — portability and platform reach
 
-- **Local embeddings.** Drop-in provider for Ollama + `nomic-embed-text` or similar. Zero API cost, full data privacy. Provider abstraction in `embedder.py`.
+- **Local embeddings. ✅ Shipped.** Ollama + `nomic-embed-text` (768-dim, 8K context window) is now the default. Zero API cost, full data privacy. Provider abstraction in `embedder.py`. Legacy OpenAI path still works via env var overrides.
 - **MindStone port.** When MindStone's platform is ready for external orchestrators, port over. That's the "remaining 30% of the SCRI memory experience" Claude Code's substrate doesn't allow (programmatic pre-inference injection, true sliding window, autonomous background processes).
 - **Multi-orchestrator coordination.** If multiple orchestrator instances need to share read-only reference memory while keeping identity and experiential memory isolated.
 - **Personal-memory portability across machines.** With the public/private boundary in place, moving a single user's memory across machines requires manual sync. Solutions: separate private repo for personal memory, cloud-sync'd path, dedicated backup command.
