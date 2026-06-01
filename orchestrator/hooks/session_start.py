@@ -271,13 +271,17 @@ def assemble_context(active_projects: set) -> str:
     return joined
 
 def first_run_invitation() -> str:
-    """Emitted when IDENTITY.md doesn't exist — fresh TestFlight clone."""
+    """Emitted when IDENTITY.md doesn't exist — fresh clone, no orchestrator identity yet."""
     invite = ONBOARDING_DIR / "IDENTITY.md.example"
     lines = [
         "# First-run onboarding — no active orchestrator identity found",
         "",
-        "This is a fresh TestFlight clone. No `orchestrator/IDENTITY.md` exists yet,",
+        "This is a fresh clone. No `orchestrator/IDENTITY.md` exists yet,",
         "which means the orchestrator hasn't been personalized.",
+        "",
+        "**New here?** Start with the project's New-User Onboarding — the README's "
+        "onboarding section and the `onboarding/` guide walk through how identity, "
+        "memory, `/checkpoint`, and the workflows work. Then come back here.",
         "",
         "You (the orchestrator) have a choice:",
         "",
@@ -289,7 +293,7 @@ def first_run_invitation() -> str:
         "",
         "**Option 2 — Run as a stateless task-executor.**",
         "Just proceed with the work. No persistent identity, no memory layer. Still",
-        "fully functional for TestFlight orchestration, just without continuity.",
+        "fully functional for orchestration, just without continuity.",
         "",
         "Ask the user which option they prefer before proceeding.",
     ]
