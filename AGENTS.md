@@ -14,7 +14,7 @@ MS4CC adds a persistent-identity layer to Claude Code:
 - **Semantic memory recall** weighted by experiential salience (SCRI), not just cosine similarity.
 - **Auto-archive** of session transcripts at session end (mechanical, no LLM needed).
 - **Per-prompt semantic recall** that surfaces relevant memory + transcript chunks based on what the user just asked.
-- **Pre-compaction reminders** so important session texture gets persisted before context summarization.
+- **Compaction-handoff system** — danger-zone rich handoff at 85% context, PreCompact linchpin that archives and refreshes the handoff tail at the compaction cliff, and post-compaction replay + background embed so continuity is lossless across compaction events.
 - **Role adoption** (`/act-as <role>`) so the orchestrator can do implementation work directly while binding to the same standards a delegated subagent would.
 
 ## Hook architecture
@@ -23,10 +23,10 @@ MS4CC registers four hooks via `~/.claude/settings.json` (merged from `orchestra
 
 | Hook | When | Effect |
 |---|---|---|
-| **`SessionStart`** | Session begin (matchers: `startup`, `resume`, `compact`, `clear`) | Loads `IDENTITY.md`, `USER.md`, `LOG.md` tail, all critical/evergreen memories in full, and weighted top-N project memories. Detects fresh-clone state and emits onboarding invitation if no `IDENTITY.md` exists. |
-| **`UserPromptSubmit`** | Per user turn | Queries `vectors.db` for semantic matches against the prompt; injects top-K chunks (memory + transcripts) with MMR diversification and similarity threshold. |
-| **`PreCompact`** | Before Claude Code compacts | Reminder to invoke `/checkpoint` so session texture is captured before lossy compaction. (Auto-compact can be disabled in Claude Code's `/config`.) |
-| **`Stop`** | Session end | Archives the session JSONL into `orchestrator/transcripts/`, vectorizes new chunks, scans for memory-filename citations, and auto-increments `hits` counters in memory frontmatter. Appends a one-line entry to `LOG.md`. |
+| **`SessionStart`** | Session begin (matchers: `startup`, `resume`, `compact`, `clear`) | Loads `IDENTITY.md`, `USER.md`, `LOG.md` tail, all critical/evergreen memories in full, and weighted top-N project memories. Detects fresh-clone state and emits onboarding invitation if no `IDENTITY.md` exists. On `source==compact`, also replays `orchestrator/transcripts/.handoff.md` as post-compaction context and kicks a detached background embed of the archived pre-compaction transcript. |
+| **`UserPromptSubmit`** | Per user turn | Queries `vectors.db` for semantic matches against the prompt; injects top-K chunks (memory + transcripts) with MMR diversification and similarity threshold. At 85% context (`CAIRN_COMPACT_THRESHOLD=0.85`), injects a danger-zone directive: the orchestrator writes a rich handoff to `orchestrator/transcripts/.handoff.md` and runs the `/checkpoint` judgment (LOG entry, new memories), but does NOT embed (deferred). |
+| **`PreCompact`** | Before any compaction | **Compaction-handoff linchpin.** Archives the live transcript JSONL and appends a `## RECENT TAIL` section to `orchestrator/transcripts/.handoff.md` from the JSONL tail — capturing work done between the 85% rich handoff and the actual compaction cliff. No model call; no embed. Fires before ANY compaction (harness-auto or manual), making it the threshold-independent safety floor. |
+| **`Stop`** | Per turn completion | Archives the session JSONL into `orchestrator/transcripts/`. Does NOT embed (re-embedding per turn runs the machine hot — embedding is deferred to `/checkpoint` and the post-compaction background embed). Scans for memory-filename citations, auto-increments `hits` counters in memory frontmatter, and appends a one-line entry to `LOG.md`. |
 
 All hooks run via the framework's pinned virtualenv (`orchestrator/.venv/bin/python`) to avoid system-Python dependency drift.
 
@@ -147,11 +147,13 @@ This means:
 
 MS4CC implements ~70% of the full MindStone SCRI experience. The remaining ~30% requires substrate control Claude Code doesn't expose:
 
-- **No programmatic conversation pruning** — Mira's true sliding window (vectorize-then-prune older exchanges to maintain context below threshold continuously) isn't possible. Users disable auto-compact via `/config` and manage compaction events manually instead.
+- **No programmatic conversation pruning** — Mira's true sliding window (vectorize-then-prune older exchanges to maintain context below threshold continuously) isn't possible from a hook. The compaction-handoff system works around this: auto-compact stays ON (calibrated to ~92% via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`), the danger-zone handoff fires at 85%, the PreCompact linchpin archives and refreshes the handoff tail at the cliff, and SessionStart replays context + kicks a background embed on the post-compact session. Compaction becomes lossless without manual management.
 - **No injection into the initial system prompt** — Claude Code assembles that. Hooks inject as system-reminder context in the first-turn window. Functionally equivalent for the model's purposes; cosmetically labeled.
-- **No autonomous background processes** — hooks fire on specific events only.
+- **No autonomous background processes** — hooks fire on specific events only. The post-compaction embed is kicked as a detached subprocess from SessionStart (fire-and-forget, not long-running daemon).
 
 Designed around these limits honestly. See `docs/reference-implementation/03-vectors.md` §"Substrate constraints" for the full accounting.
+
+For current SCRI operational state (as-is assessment, diffs from canonical spec, ticket audit), see `orchestrator/runbooks/`.
 
 ## Lineage
 
