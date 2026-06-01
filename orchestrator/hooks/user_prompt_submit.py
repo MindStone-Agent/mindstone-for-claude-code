@@ -67,7 +67,12 @@ SESSION_END_HOOK = HOOK_FILE.parent / "session_end.py"
 # a compaction). CONTEXT_WINDOW defaults to the 1M-context model; tune via env if
 # the figure here diverges from the TUI %.
 CONTEXT_WINDOW = int(os.environ.get("CAIRN_CONTEXT_WINDOW", "1000000"))
-COMPACT_THRESHOLD = float(os.environ.get("CAIRN_COMPACT_THRESHOLD", "0.90"))
+# Danger-zone threshold. Fire BELOW the harness auto-compact threshold (set via
+# CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, target ~92%) so the rich, model-authored
+# handoff is written before the harness compacts. If a real fire is observed to
+# compact BELOW this (override ineffective on this CC version), lower this env.
+# PreCompact is the safety floor either way — see pre_compact.py / scri-38-cc.
+COMPACT_THRESHOLD = float(os.environ.get("CAIRN_COMPACT_THRESHOLD", "0.85"))
 REARM_RATIO = float(os.environ.get("CAIRN_COMPACT_REARM", "0.5"))
 HANDOFF_PATH = ORCHESTRATOR_DIR / "transcripts" / ".handoff.md"
 HANDOFF_STATE_FILE = ORCHESTRATOR_DIR / "transcripts" / ".handoff_state.json"
@@ -267,19 +272,19 @@ def _context_tokens_from_transcript(tp: Path) -> int | None:
 def _build_handoff_directive(pct: float, ctx: int) -> str:
     return "\n".join([
         '<context-capacity-handoff priority="CRITICAL">',
-        f"⚠ CONTEXT AT ~{pct*100:.0f}% ({ctx:,} / {CONTEXT_WINDOW:,} tokens). Automatic compaction-handoff trigger (Clint's 90% rule, 2026-05-31).",
+        f"⚠ CONTEXT AT ~{pct*100:.0f}% ({ctx:,} / {CONTEXT_WINDOW:,} tokens). Danger-zone handoff trigger (2026-05-31 design).",
         "",
-        "BEFORE responding to anything else this turn, run the compaction-handoff sequence — fully autonomously. Do NOT ask Clint to confirm any part of it; use your own judgment and proceed:",
+        "The harness will auto-compact on its own at its threshold (set above this one). You CANNOT trigger `/compact` yourself on Claude Code — do not try. Your job now is to make the handoff bullet-proof BEFORE the harness compacts. Do this autonomously; do NOT ask Clint to confirm any part of it:",
         "",
-        "1. Run `/checkpoint` — your judgment on everything (LOG entry, memory proposals, Option D, drift). Do not wait on Clint.",
-        f"2. Write your handoff to `{HANDOFF_PATH}` (overwrite). Post-compaction-you reads this to resume. Capture concisely:",
+        f"1. Write your RICH handoff to `{HANDOFF_PATH}` (overwrite the body; leave any existing `## RECENT TAIL` section — PreCompact manages it). Post-compaction-you reads this FIRST. Capture concisely:",
         "   - What you're mid-task on + the exact next step",
         "   - Open threads / gated work / what you're waiting on and from whom (include any in-flight request from THIS turn so you address it after compaction)",
         "   - Key decisions + constraints established this session",
         "   - Anything post-compaction-you would otherwise lose and regret",
-        "3. Run `/compact`.",
+        "2. Run the `/checkpoint` JUDGMENT while you still have full context — synthesize the LOG entry, propose + write new memories, drift check. But do NOT run the embed (step 7 / `CAIRN_CHECKPOINT_MODE`): the post-compaction hook embeds the archived transcript automatically, off the critical path, so the fans stay quiet until after cutover.",
+        "3. Do NOT run `/compact` and do NOT embed. Then just keep working normally.",
         "",
-        "After compaction, SessionStart points you back to the handoff file. This is expected and correct — it replaces Clint manually watching your token count. Proceed without confirmation.",
+        "What happens automatically from here: PreCompact tops up this handoff with the recent tail at the moment of compaction (so work between now and then isn't lost), the harness compacts, and SessionStart replays the handoff + kicks the deferred embed. This replaces Clint watching your token count. Proceed without confirmation.",
         "</context-capacity-handoff>",
     ])
 

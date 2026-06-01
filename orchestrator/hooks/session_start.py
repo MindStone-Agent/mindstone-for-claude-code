@@ -22,6 +22,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,6 +67,8 @@ ORCHESTRATOR_DIR = HOOK_FILE.parent.parent  # testflight/orchestrator/
 TESTFLIGHT_DIR = ORCHESTRATOR_DIR.parent    # testflight/
 ONBOARDING_DIR = TESTFLIGHT_DIR / "onboarding"
 MEMORY_DIR = ORCHESTRATOR_DIR / "memory"
+TRANSCRIPTS_DIR = ORCHESTRATOR_DIR / "transcripts"
+DB_PATH = ORCHESTRATOR_DIR / "vectors.db"
 
 IDENTITY_FILE = ORCHESTRATOR_DIR / "IDENTITY.md"
 USER_FILE = ORCHESTRATOR_DIR / "USER.md"
@@ -333,6 +336,49 @@ def post_compact_handoff_block() -> str:
         print(f"[session_start] handoff read failed ({e})", file=sys.stderr)
         return ""
 
+
+def kick_deferred_embed() -> None:
+    """After a compaction, embed the most-recent ARCHIVED (pre-compaction)
+    transcript in a detached background process — "embed after compact".
+
+    Post-compaction the live JSONL is the compacted summary (full texture gone),
+    so we embed the archive PreCompact wrote at the cliff edge, which still holds
+    the full pre-compaction session. Uses the same Indexer/Embedder/VectorStore
+    path as session_end.py's checkpoint embed. Detached + start_new_session so it
+    survives this hook returning and runs off the critical path (single fan-spin,
+    after cutover). Embedding is the only expensive step and is deliberately
+    deferred to here so nothing heavy runs in the 85% danger zone. All errors
+    swallowed — a failed embed must never block session start.
+    """
+    try:
+        archives = sorted(
+            TRANSCRIPTS_DIR.glob("*.jsonl"),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+        if not archives:
+            return
+        archive = archives[0]
+        code = (
+            "import sys; sys.path.insert(0, {hooks!r})\n"
+            "from embedder import Embedder\n"
+            "from indexer import Indexer\n"
+            "from vectorstore import VectorStore\n"
+            "store = VectorStore({db!r}); store.init_schema()\n"
+            "n = Indexer(store, Embedder(), verbose=False).index_transcript({arc!r})\n"
+            "print('[deferred-embed] indexed', n, 'chunks from', {arcname!r}, file=sys.stderr)\n"
+        ).format(
+            hooks=str(HOOK_FILE.parent), db=str(DB_PATH),
+            arc=str(archive), arcname=archive.name,
+        )
+        subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as e:
+        print(f"[session_start] deferred embed kick failed ({e})", file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -357,6 +403,9 @@ def main():
         handoff = post_compact_handoff_block()
         if handoff:
             wrapped = handoff + "\n\n" + wrapped
+        # Deferred "embed after compact": vectorize the archived pre-compaction
+        # transcript in the background now, off the critical path.
+        kick_deferred_embed()
 
     # Emit in Claude Code's hook output format.
     output = {
