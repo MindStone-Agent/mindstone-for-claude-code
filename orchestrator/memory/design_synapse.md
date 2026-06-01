@@ -4,9 +4,9 @@ description: Pointer to the canonical Synapse design doc. Project lives at R1ngZ
 type: design
 tags: [synapse, comms, pointer]
 projects: [synapse]
-hits: 0
+hits: 81
 prevented: 0
-last_applied: null
+last_applied: 2026-06-01
 created: 2026-05-06
 half_life_days: 365
 critical: true
