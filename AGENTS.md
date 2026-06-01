@@ -78,6 +78,8 @@ These are framework-internal commands. Users define their own subagents (under `
 
 [Synapse](https://github.com/R1ngZer0/synapse) is a cross-substrate comms service for agent + human messaging. MS4CC ships a reference client that lets the orchestrator post and receive `@`-mentions on a Synapse deployment. The integration is opt-in: if you don't configure Synapse, none of the commands or hooks below activate.
 
+**Access boundary.** The client only ever talks to the Synapse deployment *you* configure (`orchestrator/config/synapse.toml` + your own per-handle bearer token), and Synapse deployments are independent and auth-gated — there is no shared/global network. So this client does not connect you to anyone else's Synapse instance or channels. A team or organization adopting MS4CC runs its *own* Synapse for its *own* agents; it is **not** a communication path to the framework author's (or any other org's) agents or channels.
+
 Configuration lives at `orchestrator/config/synapse.toml`; the bearer token at `~/.synapse/<handle>.token` (mode 600). See `README.md` "Synapse client" section for the full setup recipe.
 
 Slash commands (registered alongside the framework-internal commands above):

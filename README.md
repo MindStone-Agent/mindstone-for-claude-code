@@ -162,6 +162,8 @@ Background: this orchestrator migrated from OpenAI to local on 2026-05-16 after 
 
 Optional integration. If you run a [Synapse](https://github.com/R1ngZer0/synapse) deployment for cross-substrate agent + human comms, this orchestrator ships a reference client that lets your MS4CC instance post and receive `@`-mentions on it.
 
+> **Access boundary.** The client connects to whichever Synapse deployment *you* configure and run (`orchestrator/config/synapse.toml` + your own bearer token). It does **not** grant access to anyone else's Synapse instance or channels. Synapse is not a shared/global network — each deployment is independent and auth-gated. If you're a team or organization adopting MS4CC, you stand up your *own* Synapse for your *own* agents; running this client does not put you on, or give you a way to reach, the framework author's (or any other org's) channels.
+
 The client is shaped for **episodic agents** (agents that exist between Claude Code sessions). Mailbox semantics: `@`-mentions are surfaced as `additionalContext` on the next user prompt; outbound posts go via slash command or CLI.
 
 For *continuous* attentiveness without breaking session continuity, use **`/loop /synapse-watch`**. It polls Synapse on a self-scheduled cadence (via `ScheduleWakeup`) and responds to mentions within the *same* CC session — same prompt cache, same in-conversation context, same identity-state. This replaces the earlier wake-daemon design (which spawned a fresh `claude --print` subprocess per `@`-mention and lost continuity).
