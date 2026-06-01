@@ -89,10 +89,10 @@ orchestrator/
 │   ├── reference_*.md       # External system reference (evergreen)
 │   └── ...                  # Design docs, etc.
 ├── hooks/
-│   ├── session_start.py     # Inject identity + critical memory + log tail
-│   ├── user_prompt_submit.py# Semantic recall per user prompt
+│   ├── session_start.py     # Inject identity + critical memory + log tail; on compact source, replay handoff + kick post-compact embed
+│   ├── user_prompt_submit.py# Semantic recall per user prompt; at 85% context writes rich handoff + /checkpoint judgment
 │   ├── session_end.py       # Archive + vectorize + auto-increment hits
-│   ├── pre_compact.py       # Remind to /checkpoint before compaction
+│   ├── pre_compact.py       # Compaction-handoff linchpin: archives transcript JSONL + appends RECENT TAIL to .handoff.md at the compaction cliff
 │   ├── embedder.py          # Embeddings (default: local Ollama nomic-embed-text; OpenAI-compatible — supports any provider) + secret scrubbing
 │   ├── vectorstore.py       # SQLite-vec wrapper (with MMR)
 │   ├── indexer.py           # Chunker for markdown + JSONL transcripts
@@ -116,12 +116,23 @@ onboarding/                  # Templates for new orchestrators
 
 | Hook | When | What it does |
 |---|---|---|
-| **SessionStart** | Session begin | Inject identity + user + critical memories + weighted top-N memories + LOG tail |
-| **UserPromptSubmit** | Per user turn | Semantic recall from vector store based on the user's prompt |
-| **PreCompact** | Before compaction | Reminder to run `/checkpoint` before context is summarized |
-| **Stop** | Session end | Archive JSONL → chunk + embed → store in vectors.db → auto-increment `hits` on cited memories → append note to LOG |
+| **SessionStart** | Session begin | Inject identity + user + critical memories + weighted top-N memories + LOG tail. On `source==compact`, replays `.handoff.md` as post-compaction context and kicks a detached background embed of the archived transcript. |
+| **UserPromptSubmit** | Per user turn | Semantic recall from vector store based on the user's prompt. At 85% context (`CAIRN_COMPACT_THRESHOLD=0.85`), injects a danger-zone directive: the orchestrator writes a rich handoff to `orchestrator/transcripts/.handoff.md` and runs the `/checkpoint` judgment (LOG entry, new memories), but does NOT embed (that is deferred). |
+| **PreCompact** | Before any compaction | **Compaction-handoff linchpin.** Archives the live transcript JSONL and appends a `## RECENT TAIL` section to `.handoff.md` from the JSONL tail — capturing work done between the 85% rich handoff and the actual compaction cliff. No model call; no embed. Runs before ANY compaction (harness-auto or manual), making it the threshold-independent safety floor. |
+| **Stop** | Per turn completion | Archives the session JSONL. Does NOT embed (re-embedding per turn runs the machine hot). Embedding is deferred to `/checkpoint` and the post-compaction background embed. Also auto-increments `hits` on cited memories and appends a one-line entry to `LOG.md`. |
 
 The Stop hook handles persistence mechanically; `/checkpoint` is for the reflective parts (synthesis, proposing new memories, drift detection) that benefit from the orchestrator's judgment.
+
+## Compaction handoff
+
+You do not manage compaction manually. The framework handles it:
+
+1. **85% danger zone** — `UserPromptSubmit` detects approaching context limit and has the orchestrator write a rich `.handoff.md` (identity summary, key decisions, open threads) and run the `/checkpoint` judgment. No embed yet.
+2. **Auto-compact at ~92%** — the harness compacts automatically (`autoCompactEnabled: true`, calibrated via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=92`). The override keeps the compaction above the 85% handoff so the rich handoff always lands first.
+3. **PreCompact linchpin** — fires before ANY compaction (including human-triggered). Archives the transcript JSONL and appends a `## RECENT TAIL` section to `.handoff.md` from turns since the rich handoff. This is cheap (no model call) and threshold-independent — continuity holds even if the override is a no-op on a given Claude Code version.
+4. **Post-compact replay** — on the next session start (`source==compact`), `SessionStart` replays `.handoff.md` as context and kicks a detached background embed of the archived pre-compaction transcript.
+
+The takeaway: you'll see a handoff/checkpoint happen near the context limit. That's the system preserving continuity — let it run.
 
 ## Embeddings
 
@@ -261,7 +272,10 @@ Critical/evergreen memories bypass the weight (always injected up to token budge
 
 - **Claude Code only for now.** The hook architecture is Claude-Code-specific. Could be ported to other substrates (Codex, Cursor, MindStone itself) by rewriting the hook layer; the memory / schema / retrieval layers are substrate-agnostic.
 - **No pre-inference injection into the initial system prompt.** Claude Code assembles that; hooks can only inject additional context. That's a ~30% capability gap vs full-MindStone SCRI, accepted as a substrate limit.
-- **OpenAI embeddings for now.** Local embeddings (Ollama + nomic-embed-text) on the roadmap for v4.
+- **No programmatic conversation pruning.** Claude Code doesn't expose an API to modify conversation history from a hook. The compaction-handoff system (auto-compact ON at ~92%, danger-zone handoff at 85%, PreCompact linchpin, post-compact replay + embed) makes compaction lossless without requiring manual management.
+- **Embedding is deferred, not per-turn.** Re-embedding the full transcript every turn runs the machine hot. The Stop hook archives every turn; embedding happens at `/checkpoint` and after compaction via the detached background embed.
+
+For current SCRI operational state (as-is assessment, diffs from canonical spec, ticket audit), see `orchestrator/runbooks/`.
 
 ## Philosophy — what this gives you
 
