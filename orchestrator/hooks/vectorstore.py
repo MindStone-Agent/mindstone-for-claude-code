@@ -190,6 +190,19 @@ class VectorStore:
             r = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
         return r[0] if r else 0
 
+    def max_end_line_for_source(self, source_path: str) -> int:
+        """Highest end_line already stored for a source path (0 if none).
+
+        Used for incremental transcript indexing: the next index pass embeds only
+        the lines after this point. Append-only transcripts never rewrite earlier
+        lines, so resuming from max(end_line) is exact — no overlap, no gap.
+        """
+        conn = self._conn_or_init()
+        r = conn.execute(
+            "SELECT MAX(end_line) FROM chunks WHERE source_path = ?", (source_path,)
+        ).fetchone()
+        return (r[0] or 0) if r else 0
+
     def search(
         self,
         query_vec: list[float],

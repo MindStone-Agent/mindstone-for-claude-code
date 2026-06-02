@@ -222,7 +222,7 @@ def _chunk_by_length(text: str, source_path: str, header: str, start_line: int =
 # Transcript chunker (JSONL from Claude Code sessions)
 # ---------------------------------------------------------------------------
 
-def chunk_transcript(jsonl_text: str, source_path: str) -> list[Chunk]:
+def chunk_transcript(jsonl_text: str, source_path: str, start_line_offset: int = 0) -> list[Chunk]:
     """Split a Claude Code session JSONL into conversational chunks.
 
     Each line in the JSONL is a message with a role (user/assistant/system).
@@ -236,6 +236,13 @@ def chunk_transcript(jsonl_text: str, source_path: str) -> list[Chunk]:
 
     Tool calls/results are included but summarized (the raw JSON bodies
     can get huge and aren't always useful for semantic recall).
+
+    `start_line_offset` lets the caller chunk only the *tail* of a transcript
+    (the lines after an already-embedded prefix) while keeping the recorded
+    start_line/end_line ABSOLUTE within the full file. When chunking the tail,
+    pass the tail text plus the number of lines that precede it; line numbers
+    become `start_line_offset + i + 1`. This is the basis for incremental
+    transcript indexing (only new turns get embedded each checkpoint).
     """
     turns: list[dict] = []
     for i, line in enumerate(jsonl_text.split("\n")):
@@ -246,7 +253,7 @@ def chunk_transcript(jsonl_text: str, source_path: str) -> list[Chunk]:
             obj = json.loads(line)
         except Exception:
             continue
-        turn = _extract_turn(obj, line_num=i + 1)
+        turn = _extract_turn(obj, line_num=start_line_offset + i + 1)
         if turn:
             turns.append(turn)
 
@@ -382,17 +389,52 @@ class Indexer:
         return n
 
     def index_transcript(self, path: Path) -> int:
-        """Chunk + embed + store a single transcript JSONL. Returns new chunks."""
+        """Chunk + embed + store a transcript JSONL INCREMENTALLY. Returns new chunks.
+
+        Session transcripts are append-only and a single resumed session can grow
+        to hundreds of MB over many days. The old behaviour (delete all chunks for
+        this path, then re-embed the whole file every checkpoint) was O(filesize)
+        per checkpoint — it re-embedded the entire cumulative session each time and
+        ran for many minutes once the file got large. Instead, we embed ONLY the
+        turns added since the last index: look up the highest end_line already
+        stored for this source_path, chunk just the tail beyond it (with absolute
+        line numbers via start_line_offset), and append. No delete, no re-embed.
+
+        Fallbacks: if nothing is stored yet, embed the whole file once (baseline).
+        If the file is SHORTER than what we've stored (truncated/replaced — should
+        never happen for an append-only transcript), rebuild from scratch.
+        """
         if not path.exists():
             return 0
         text = path.read_text()
+        total_lines = text.count("\n") + 1
+        last_embedded = self.store.max_end_line_for_source(str(path))
+
+        # Incremental: embed only the tail past the last-embedded line.
+        if last_embedded and last_embedded < total_lines:
+            tail = "\n".join(text.split("\n")[last_embedded:])  # lines (last_embedded+1)..end
+            chunks = chunk_transcript(tail, str(path), start_line_offset=last_embedded)
+            if not chunks:
+                return 0
+            vectors = self.embedder.embed_batch([c.text for c in chunks])
+            n = self.store.upsert(chunks, vectors)
+            self._log(f"  indexed transcript (incremental): {path.name} +{n} chunks "
+                      f"(from line {last_embedded + 1})")
+            return n
+
+        # Nothing new to add (already embedded up to the current end of file).
+        if last_embedded and last_embedded == total_lines:
+            return 0
+
+        # Baseline (nothing stored yet) OR rebuild (last_embedded > total_lines,
+        # i.e. the file shrank/was replaced → stale chunks must be cleared first).
         chunks = chunk_transcript(text, str(path))
         if not chunks:
             return 0
         self.store.delete_by_source_path(str(path))
         vectors = self.embedder.embed_batch([c.text for c in chunks])
         n = self.store.upsert(chunks, vectors)
-        self._log(f"  indexed transcript: {path.name} → {n} chunks")
+        self._log(f"  indexed transcript (full baseline): {path.name} → {n} chunks")
         return n
 
     def backfill(self, memory_dir: Path | None, transcripts_dir: Path | None) -> dict:
