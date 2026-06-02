@@ -104,20 +104,27 @@ def resolve_session_path(hook_input: dict) -> Path | None:
 # ---------------------------------------------------------------------------
 
 def archive_transcript(session_jsonl: Path) -> Path | None:
-    """Copy the session JSONL into orchestrator/transcripts/.
+    """Copy the session JSONL into orchestrator/transcripts/ — ONE file per session.
 
-    The archived filename includes the date and original session UUID.
-    Returns the archived path, or None if archive was skipped (already exists).
+    Archived as `<session-uuid>.jsonl` (no date prefix) and UPDATED IN PLACE.
+    Claude Code keeps a single live file per session (`<uuid>.jsonl`) that grows
+    as the session is resumed across days; mirroring it to one stable archived
+    name means one archive per session, not one-per-day. The previous scheme
+    (`YYYY-MM-DD__<uuid>.jsonl`) created a brand-new full copy every day a
+    long-lived session was active — 35 copies / ~9 GB for a single 5-week
+    session here — and, because the indexer keys chunks by source_path, made
+    every checkpoint re-embed the whole cumulative session under a new name.
+    A stable name keeps source_path constant so incremental indexing works.
+
+    Returns the archived path, or None if the archive is already up to date.
     """
     if not session_jsonl.exists():
         return None
 
     TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    date_prefix = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
-    uuid = session_jsonl.stem  # the session UUID
-    archived_name = f"{date_prefix}__{uuid}.jsonl"
-    archived_path = TRANSCRIPTS_DIR / archived_name
+    uuid = session_jsonl.stem  # the session UUID (Claude Code's stable per-session name)
+    archived_path = TRANSCRIPTS_DIR / f"{uuid}.jsonl"
 
     # Copy only if the archive is older or missing (newer session data in source).
     if archived_path.exists():
