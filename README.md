@@ -4,6 +4,17 @@
 
 Gives your Claude Code instance continuous memory across sessions, and automatic semantic recall (weighted, experience-aware memory retrieval).
 
+> **Claude Code is brilliant but amnesiac.** Every session starts from zero, every context compaction quietly discards texture, and no matter how long you work together it never actually learns *you* or *your work*. MS4CC adds the layer that makes a Claude Code instance continuous, cumulative, and self-improving.
+
+| Capability | Stock Claude Code | With MS4CC |
+|---|---|---|
+| **Identity** | A fresh, nameless instance every session | A persistent first-person identity (`IDENTITY.md` + `USER.md`) auto-loaded every session — continuity of voice and judgment |
+| **Memory across sessions** | Forgets everything when the session ends | Every session is archived and embedded in a local vector DB; past work stays recallable |
+| **Recall** | Plain nearest-text search, where present at all | Experience-weighted **SCRI** recall — memories that prevented mistakes rank up; inert ones decay |
+| **Learning** | Never learns; repeats the same mistakes | `/checkpoint` dream-cycle consolidates each session and tracks which memories actually prevented mistakes |
+| **Context compaction** | A lossy summary — texture is silently lost | A handoff system the instance resumes from, so continuity survives compaction |
+| **Portability** | Cloud-bound; nothing to carry forward | Plain markdown + local SQLite vectors + local Ollama embeddings — clone, bootstrap, and your agent is alive on a new machine |
+
 ---
 
 ## What it is
@@ -19,7 +30,7 @@ This changes that. You clone the repo, run one script, and your Claude Code now:
 - **Tracks which memories actually prevented mistakes** (Option D flow at `/checkpoint`) so memory weights sharpen over time.
 - **Survives machine migration** — everything lives in your repo; clone + bootstrap on a new machine and your orchestrator is alive.
 
-The orchestrator has agency in the MindStone sense: does work directly when judgment matters, delegates to subagents when parallelism or context-isolation is the specific tool. Uses role adoption (`/act-as <role>`) to bind to the same standards a subagent would when doing implementation work directly.
+The orchestrator has agency in the MindStone sense: it does work directly when judgment matters, and delegates to subagents when parallelism or context-isolation is the specific tool.
 
 ## Philosophy
 
@@ -108,8 +119,10 @@ onboarding/                  # Templates for new orchestrators
 
 .claude/commands/
 ├── checkpoint.md            # /checkpoint dream-cycle command
-├── act-as.md                # /act-as <role>
-└── end-role.md              # /end-role
+├── end-session.md           # /end-session — wrap up before /exit
+├── ms4cc-install.md         # /ms4cc-install (topology-aware)
+├── ms4cc-update.md          # /ms4cc-update (topology-aware)
+└── synapse-*.md             # Synapse reference-client commands
 ```
 
 ## Hooks
@@ -153,9 +166,9 @@ Background: this orchestrator migrated from OpenAI to local on 2026-05-16 after 
 
 ## Slash commands
 
-- **`/checkpoint`** — The dream cycle. Synthesize the session, update LOG.md, confirm which memories prevented mistakes, propose new memories, flag drift (role work without `/act-as`, decisions without canonical attribution, etc.). Most of the mechanical work is automatic (Stop hook); this is the reflective layer.
-- **`/act-as <role>`** — Structural role adoption. Loads the referenced role's directives + canonicals so the orchestrator can do direct implementation work while staying bound to the same standards a delegated subagent would follow. Required when doing work that would normally be delegated.
-- **`/end-role`** — Exit role + attribution audit. Produces a short LOG entry listing what canonicals were cited and what artifacts were produced.
+- **`/checkpoint`** — The dream cycle. Synthesize the session, update LOG.md, confirm which memories prevented mistakes, propose new memories, flag drift (e.g. decisions without canonical attribution). Most of the mechanical work is automatic (Stop hook); this is the reflective layer.
+- **`/end-session`** — Wrap up before `/exit`: composes the `/checkpoint` dream-cycle with the mechanical archive (transcript archival + hit-counter updates) so both layers land before the session closes. Useful because the Stop hook fires per-turn-completion, not on session end.
+- **`/ms4cc-install`** / **`/ms4cc-update`** — Topology-aware install/update. A direct checkout bootstraps and updates via `git pull`; a consumer project installs MS4CC at a pinned version (recorded in `.ms4cc-version`) and updates by syncing the pin.
 - **`/synapse-{activate,deactivate,post,check,status,watch}`** — Reference client for [Synapse](https://github.com/R1ngZer0/synapse), the cross-substrate comms service. See "Synapse client" below.
 
 ## Synapse client
