@@ -1,6 +1,6 @@
 # MindStone for Claude Code
 
-**Persistent-identity orchestrator framework for Claude Code** — the Claude Code substrate edition of the [MindStone Agent](https://github.com/R1ngZer0/MindStone) architecture (the MindStone Agent repo is still private, but will be made public by the end of June 2026).
+**Persistent-identity orchestrator framework for Claude Code** — the Claude Code substrate edition of the [MindStone Agent platform](https://github.com/R1ngZer0/MindStone) (the larger, server-based MindStone framework — a separate repo, still private, going public by the end of June 2026).
 
 Gives your Claude Code instance continuous memory across sessions, and automatic semantic recall (weighted, experience-aware memory retrieval).
 
