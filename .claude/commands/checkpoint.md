@@ -14,7 +14,7 @@ The Stop hook still fires per-turn-completion and still does the same archive + 
 
 ### 1. Synthesize the session
 
-Draft an entry for `testflight/orchestrator/LOG.md` in this format:
+Draft an entry for `orchestrator/LOG.md` in this format:
 
 ```markdown
 ## YYYY-MM-DD — short title
@@ -66,7 +66,7 @@ orchestrator/.venv/bin/python orchestrator/hooks/recall.py "<concept to check>" 
 
 If a similar memory exists (similarity > ~0.55), propose *updating* the existing one rather than creating a duplicate. If nothing matches, draft the new memory:
 
-- File at `testflight/orchestrator/memory/<type>_<short_name>.md`
+- File at `orchestrator/memory/<type>_<short_name>.md`
 - v0.2 frontmatter schema (see `CAIRN_DESIGN_v0.2.md` §6)
 - `type` ∈ {feedback, project, reference, design}
 - `tags` and `projects` — **infer from content and filename; do NOT ask Clint** (he doesn't tag)
@@ -101,7 +101,7 @@ Once the user approves the entry, append to the end of `orchestrator/LOG.md`. Pr
 
 ### 7. Archive + vectorize the session (mandatory, not skippable)
 
-Run the archive + **embed** pass explicitly. As of 2026-05-31 (Cairn's MS4CC fix, testflight 87d82dc), the per-turn Stop hook archives ONLY — embedding (transcript vectorize + memory reindex) happens ONLY here, gated behind `CAIRN_CHECKPOINT_MODE=1`. (`index_transcript` re-embeds the entire transcript, so doing it every turn pegged the local embedder; per Clint's 2026-05-31 directive embedding is checkpoint-only.) This step also guarantees persistence when the Stop hook can't fire (`/exit`; image-dimension or other substrate errors block model calls; runtime crashes).
+Run the archive + **embed** pass explicitly. As of 2026-05-31 (Cairn's MS4CC fix), the per-turn Stop hook archives ONLY — embedding (transcript vectorize + memory reindex) happens ONLY here, gated behind `CAIRN_CHECKPOINT_MODE=1`. (`index_transcript` re-embeds the entire transcript, so doing it every turn pegged the local embedder; per Clint's 2026-05-31 directive embedding is checkpoint-only.) This step also guarantees persistence when the Stop hook can't fire (`/exit`; image-dimension or other substrate errors block model calls; runtime crashes).
 
 ```bash
 CAIRN_CHECKPOINT_MODE=1 orchestrator/.venv/bin/python orchestrator/hooks/session_end.py < /dev/null

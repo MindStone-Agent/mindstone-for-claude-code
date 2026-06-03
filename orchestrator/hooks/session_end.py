@@ -351,7 +351,7 @@ def _bump_memory_hits(path: Path, today: str) -> bool:
 def main():
     hook_input = read_hook_input()
 
-    # Skip entirely if we're not in a TestFlight/orchestrator context
+    # Skip entirely if we're not in an MS4CC/orchestrator context
     # (sanity check — the orchestrator dir should exist if we're running).
     if not ORCHESTRATOR_DIR.exists():
         return

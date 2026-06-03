@@ -106,7 +106,7 @@ echo ""
 # 4. Symlink memory dir so Claude Code auto-loads memories
 # ---------------------------------------------------------------------------
 
-echo "[3/5] Symlinking memory directory..."
+echo "[3/5] Symlinking memory directory + slash commands..."
 ESCAPED_PATH=$(echo "$PROJECT_DIR" | sed 's|/|-|g')
 MEM_LINK="$CLAUDE_DIR/projects/${ESCAPED_PATH}/memory"
 MEM_TARGET="$ORCHESTRATOR_DIR/memory"
@@ -128,6 +128,31 @@ elif [[ -e "$MEM_LINK" ]]; then
 else
   ln -s "$MEM_TARGET" "$MEM_LINK"
   echo "  LINK: $MEM_LINK → $MEM_TARGET"
+fi
+
+# Slash commands: symlink the project's .claude/commands/*.md into ~/.claude/commands/
+# so they are available no matter which directory Claude Code is launched from. A
+# $HOME launch reads ~/.claude/commands (user scope), NOT the project's project-scope
+# commands dir — without this, an operator who doesn't cd into the project before
+# launching gets zero commands. The project/repo stays the single source of truth;
+# re-running bootstrap (or a git pull on a direct checkout) keeps the symlinks current.
+CMD_SRC_DIR="$PROJECT_DIR/.claude/commands"
+CMD_LINK_DIR="$CLAUDE_DIR/commands"
+if [[ -d "$CMD_SRC_DIR" ]] && compgen -G "$CMD_SRC_DIR/*.md" >/dev/null; then
+  mkdir -p "$CMD_LINK_DIR"
+  linked=0
+  for cmd in "$CMD_SRC_DIR"/*.md; do
+    link="$CMD_LINK_DIR/$(basename "$cmd")"
+    if [[ -L "$link" ]]; then
+      if [[ "$(readlink "$link")" == "$cmd" ]]; then linked=$((linked+1)); continue; fi
+      rm "$link"
+    elif [[ -e "$link" ]]; then
+      mv "$link" "${link}.backup"
+    fi
+    ln -s "$cmd" "$link"
+    linked=$((linked+1))
+  done
+  echo "  LINK: $CMD_LINK_DIR/*.md → $CMD_SRC_DIR/ ($linked commands)"
 fi
 echo ""
 

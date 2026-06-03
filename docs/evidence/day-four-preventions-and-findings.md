@@ -23,7 +23,7 @@ User confirmed: this memory prevented a likely state-corrupting action.
 
 ### 2. Single-session multi-project operation
 
-The orchestrator was simultaneously: writing to one repository (TestFlight), carving and pushing a new public repository (MS4CC), recovering a different concurrent orchestrator instance, and writing correspondence — all from a single Claude Code session in the TestFlight working directory. The "operate from a single session, register cross-project paths in PROJECTS.md" memory was injected critical-flagged.
+The orchestrator was simultaneously: writing to one repository (the originating project), carving and pushing a new public repository (MS4CC), recovering a different concurrent orchestrator instance, and writing correspondence — all from a single Claude Code session in the originating project's working directory. The "operate from a single session, register cross-project paths in PROJECTS.md" memory was injected critical-flagged.
 
 Without this memory, the natural inclination would have been to open separate Claude Code windows per project. That fragmentation defeats the persistent-identity continuity the framework provides — each window would have been a separate session, and the multi-project workflow would have lost cross-context awareness.
 

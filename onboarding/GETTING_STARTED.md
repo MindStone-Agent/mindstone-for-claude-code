@@ -53,7 +53,7 @@ wired the hooks into `~/.claude/settings.json` **at this repo's path**, so the r
 
 ### Topology 2 — Consumer install (MS4CC as a dependency of another project)
 
-Another project (e.g. TestFlight) installs MS4CC into a gitignored `orchestrator/`
+Another project (the host project) installs MS4CC into a gitignored `orchestrator/`
 at a pinned version recorded in `.ms4cc-version`, using `install.sh` via that
 project's `scripts/ms4cc-sync.sh` helper. The MS4CC code is **not** the project's
 git checkout.
@@ -65,14 +65,20 @@ git checkout.
 
 ### Where slash commands live (a common gotcha)
 
-Slash commands are **project-scoped**: Claude Code reads them from
-`<project>/.claude/commands/` when launched from that directory, and `git pull`
-(direct checkout) or `install.sh` (consumer) keeps them current. A leftover **global**
-`~/.claude/commands/` from a pre-install hand-copy can shadow these with stale
-versions — if your commands look out of date or are missing, remove the MS4CC-named
-files from `~/.claude/commands/` and launch Claude Code from the project directory.
-`bootstrap.sh` does **not** manage `.claude/commands/`; the repo (or installer) is the
-source of truth for them.
+Claude Code reads slash commands from two places: the **project-scoped**
+`<project>/.claude/commands/` (only when you launch from that directory) and the
+**user-global** `~/.claude/commands/` (always, regardless of launch directory). If you
+launch Claude Code from `$HOME` rather than the project directory — common when your
+hooks are absolute-path-wired so they work from anywhere — the project-scoped commands
+are **not** loaded.
+
+To make the commands work from any launch directory, **`bootstrap.sh` symlinks the
+project's `.claude/commands/*.md` into `~/.claude/commands/`** (the same way it symlinks
+your identity and memory). The project/repo stays the single source of truth: a `git
+pull` (direct checkout) or `install.sh` (consumer) updates the files the symlinks point
+at, so they stay current automatically. If you ever see stale or missing commands,
+re-run `./orchestrator/bootstrap.sh` to refresh the symlinks — do **not** hand-copy
+files into `~/.claude/commands/` (a hand-copy goes stale and shadows the real source).
 
 ### Migrating a box that predates the incremental-indexing fix (#47/#48)
 
