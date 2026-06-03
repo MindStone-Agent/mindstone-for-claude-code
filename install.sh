@@ -21,18 +21,17 @@
 #                    from GitHub (offline use / testing). Overrides --ref.
 #   --no-bootstrap   Lay down files but don't run orchestrator/bootstrap.sh.
 #
-# Access: the MS4CC repo is currently PRIVATE. You need read access to it plus
-# either configured git credentials or `gh auth login` (the installer falls back
-# to `gh repo clone`, which uses your gh token). Once the repo is public, the
-# curl one-liner below also works:
-#   curl -fsSL https://raw.githubusercontent.com/R1ngZer0/mindstone-for-claude-code/main/install.sh | bash -s -- --project .
+# Access: the MS4CC repo is PUBLIC, so a plain `git clone` works with no auth.
+# (If you've made your own fork private, the installer falls back to
+# `gh repo clone`, which uses your gh token.) The curl one-liner also works:
+#   curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/mindstone-for-claude-code/main/install.sh | bash -s -- --project .
 #
-# Requirements: git, rsync, and (for the private-repo fetch) the gh CLI.
+# Requirements: git and rsync. (The gh CLI is only needed to fetch a private fork.)
 # bootstrap.sh additionally needs python3, and jq for the settings merge.
 
 set -euo pipefail
 
-REPO_URL="https://github.com/R1ngZer0/mindstone-for-claude-code.git"
+REPO_URL="https://github.com/MindStone-Agent/mindstone-for-claude-code.git"
 REF="main"
 PROJECT_DIR="$PWD"
 SOURCE_DIR=""
@@ -90,15 +89,15 @@ if [[ -n "$SOURCE_DIR" ]]; then
 else
   section 1 "Fetching MS4CC ($REF) from $REPO_URL"
   CLEANUP_TMP="$(mktemp -d)"
-  # Try a plain clone first; if it fails (e.g. the repo is private and git has no
-  # creds), fall back to `gh repo clone`, which authenticates via the gh token.
+  # Try a plain clone first (works for the public repo). If it fails (e.g. a
+  # private fork with no git creds), fall back to `gh repo clone` (gh token auth).
   if ! git clone --quiet "$REPO_URL" "$CLEANUP_TMP/ms4cc" 2>/dev/null; then
-    if command -v gh >/dev/null 2>&1 && gh repo clone R1ngZer0/mindstone-for-claude-code "$CLEANUP_TMP/ms4cc" -- --quiet 2>/dev/null; then
-      log "fetched via gh (private-repo auth)"
+    if command -v gh >/dev/null 2>&1 && gh repo clone MindStone-Agent/mindstone-for-claude-code "$CLEANUP_TMP/ms4cc" -- --quiet 2>/dev/null; then
+      log "fetched via gh"
     else
       echo "ERROR: couldn't fetch MS4CC from $REPO_URL." >&2
-      echo "       The repo is private — ensure you have access and either git" >&2
-      echo "       credentials or 'gh auth login'. Or use --source <local checkout>." >&2
+      echo "       Check your network and the URL. If you're using a PRIVATE fork," >&2
+      echo "       ensure git credentials or 'gh auth login'. Or use --source <local checkout>." >&2
       exit 1
     fi
   fi
