@@ -22,6 +22,68 @@ cd ~/path/to/your/project/orchestrator
 
 Prerequisites: Claude Code, Python 3.10+, `jq`, and Ollama with `nomic-embed-text` pulled (`ollama pull nomic-embed-text`). See `BOOTSTRAP.md` for details and troubleshooting.
 
+There is also a `/ms4cc-install` slash command that runs this for you (and the
+right thing for the consumer topology below) once you're in a Claude Code session.
+
+---
+
+## Updating MS4CC
+
+MS4CC runs in one of **two topologies**, and the update process is different for
+each. Get this right and the "how do I get the latest code?" confusion goes away.
+There is an `/ms4cc-update` slash command that detects the topology and does the
+right thing; the manual steps are below.
+
+### Topology 1 — Direct checkout (the normal case)
+
+You cloned `mindstone-for-claude-code` and run Claude Code from it. `bootstrap.sh`
+wired the hooks into `~/.claude/settings.json` **at this repo's path**, so the repo
+*is* your live install.
+
+- **Update:** `git pull` in the repo. Because the hooks point at the repo path, a
+  pull updates the live hook code in place — there is no separate copy step.
+- **Re-run `./orchestrator/bootstrap.sh` only when** the pull added/removed a hook
+  file or changed `orchestrator/settings.fragment.json` (those change which hooks are
+  *registered* in `settings.json`, which a code pull alone won't update). `bootstrap.sh`
+  is idempotent and never touches your identity or memory — when unsure, run it.
+  Check with: `git diff --name-status <old>..HEAD -- orchestrator/hooks orchestrator/settings.fragment.json`.
+- **Restart Claude Code** after the pull — the running session loaded the old hook
+  code at startup. (Hook *code* is picked up by new sessions automatically; only the
+  hook *registration* in `settings.json` needs bootstrap.)
+
+### Topology 2 — Consumer install (MS4CC as a dependency of another project)
+
+Another project (e.g. TestFlight) installs MS4CC into a gitignored `orchestrator/`
+at a pinned version recorded in `.ms4cc-version`, using `install.sh` via that
+project's `scripts/ms4cc-sync.sh` helper. The MS4CC code is **not** the project's
+git checkout.
+
+- **Update:** `bash scripts/ms4cc-sync.sh update [REF]` (or `/ms4cc-update`), then
+  commit the bumped `.ms4cc-version`. This re-runs the installer at the new version.
+- The consumer project owns the pin and updates deliberately, so installs are
+  reproducible across machines.
+
+### Where slash commands live (a common gotcha)
+
+Slash commands are **project-scoped**: Claude Code reads them from
+`<project>/.claude/commands/` when launched from that directory, and `git pull`
+(direct checkout) or `install.sh` (consumer) keeps them current. A leftover **global**
+`~/.claude/commands/` from a pre-install hand-copy can shadow these with stale
+versions — if your commands look out of date or are missing, remove the MS4CC-named
+files from `~/.claude/commands/` and launch Claude Code from the project directory.
+`bootstrap.sh` does **not** manage `.claude/commands/`; the repo (or installer) is the
+source of truth for them.
+
+### Migrating a box that predates the incremental-indexing fix (#47/#48)
+
+If `orchestrator/transcripts/` has legacy **dated** archives
+(`YYYY-MM-DD__<uuid>.jsonl`), the post-#47 incremental indexer won't auto-migrate
+them. One time, after updating: back up `orchestrator/vectors.db`, collapse each
+session's dated copies into a single stable `<uuid>.jsonl` (keep the largest /
+highest-line copy, delete the rest), then run
+`orchestrator/hooks/indexer.py backfill` to embed the tails. Verify recent content
+returns from recall before deleting the backup.
+
 ---
 
 ## Your first session — what you will see
