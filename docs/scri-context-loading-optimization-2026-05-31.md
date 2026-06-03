@@ -74,7 +74,7 @@ Starting nomination — the irreversible-harm / hard-directive rules:
 - `feedback_show_the_green_run_not_indirect_proof` — show the artifact the user checks, don't declare victory on indirect proof
 - `feedback_stop_guessing` — verify the mechanism; never guess
 - `feedback_mindstone_no_compaction` — MindStone-proper: sliding window or fail loud, never reintroduce compaction
-- `feedback_fcm_no_ai_attribution` — FCM: no AI attribution (voice is Clint)
+- `feedback_client_no_ai_attribution` — a client engagement: no AI attribution (voice is the user)
 - `feedback_synapse_devops_no_mira_lux_mentions` — #devops @-mention restriction
 - `feedback_diagnose_via_api_not_human_relay` — ask for API/SSH access, don't make Clint the human debugger
 

@@ -89,7 +89,7 @@ name: feedback_never_destructive_git
 description: Never run git stash/reset/rebase/checkout when Unity scene files have uncommitted changes.
 type: feedback          # user | feedback | project | reference | identity | design
 tags: [git, unity, destructive-actions]
-projects: [att-unity]   # empty list = global
+projects: [example-project]   # empty list = global
 hits: 0                 # incremented when referenced in a session
 prevented: 0            # incremented when Clint confirms it saved a mistake
 last_applied: null      # ISO date of last reference
