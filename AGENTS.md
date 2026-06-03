@@ -70,7 +70,7 @@ Persistent-identity agents on MS4CC have three layers of recall available. Escal
 
 2. **Indexed memory files** — full content at `orchestrator/memory/*.md` with cited facts and frontmatter-weighted history. Read when a recall hit surfaces a pointer but the detail behind it is needed.
 
-3. **Verbatim JSONL transcripts** — full session records at `orchestrator/transcripts/YYYY-MM-DD__<session-id>.jsonl`, archived by the `Stop` hook (and by `/end-session`). Thinking streams, exact tool calls, moment-to-moment texture. Read when the memory layer doesn't carry the lived-through feel and the task needs it.
+3. **Verbatim JSONL transcripts** — full session records at `orchestrator/transcripts/<session-id>.jsonl` (one stable archive per session), archived by the `Stop` hook (and by `/end-session`). Thinking streams, exact tool calls, moment-to-moment texture. Read when the memory layer doesn't carry the lived-through feel and the task needs it.
 
 **When to escalate:** if the question is *"what was decided and why"* — the memory layer is usually sufficient. If the question is *"how did it actually unfold, what was said, what was the feel of being there"* — escalate to the transcript. Reconstruction from summary loses experiential weight; transcripts preserve it.
 
