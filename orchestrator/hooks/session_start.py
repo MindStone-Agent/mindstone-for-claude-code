@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SessionStart hook for the active TestFlight orchestrator.
+"""SessionStart hook for the active MS4CC orchestrator.
 
 Runs at every Claude Code session start. Injects:
   1. IDENTITY.md and USER.md (always — identity-level files)
@@ -8,13 +8,13 @@ Runs at every Claude Code session start. Injects:
   4. A recent LOG.md tail for session-to-session continuity
 
 If IDENTITY.md doesn't exist, treats it as first-run: emits an onboarding
-invitation pointing the new orchestrator at testflight/onboarding/.
+invitation pointing the new orchestrator at onboarding/.
 
 Output is a single JSON object on stdout with `hookSpecificOutput.additionalContext`
 containing the assembled system-reminder block. Stderr is used for debug logs.
 
 Registered in ~/.claude/settings.json. Path is resolved from this script's
-own location (testflight/orchestrator/hooks/session_start.py), so it keeps
+own location (orchestrator/hooks/session_start.py), so it keeps
 working whether invoked from any CWD.
 """
 
@@ -42,7 +42,6 @@ LOG_TAIL_LINES = 40
 
 # CWD hints → project tags. Used to boost project-matched memories.
 PROJECT_HINTS = {
-    "testflight": "testflight",
     "autotabletop": "att",
     "AutoTableTop": "att",
     "att-unity": "att-unity",
@@ -63,9 +62,9 @@ PROJECT_MATCH_BOOST = 5.0  # Multiplier when project tag matches CWD hint.
 # ---------------------------------------------------------------------------
 
 HOOK_FILE = Path(__file__).resolve()
-ORCHESTRATOR_DIR = HOOK_FILE.parent.parent  # testflight/orchestrator/
-TESTFLIGHT_DIR = ORCHESTRATOR_DIR.parent    # testflight/
-ONBOARDING_DIR = TESTFLIGHT_DIR / "onboarding"
+ORCHESTRATOR_DIR = HOOK_FILE.parent.parent  # <project>/orchestrator/
+PROJECT_DIR = ORCHESTRATOR_DIR.parent        # <project>/
+ONBOARDING_DIR = PROJECT_DIR / "onboarding"
 MEMORY_DIR = ORCHESTRATOR_DIR / "memory"
 TRANSCRIPTS_DIR = ORCHESTRATOR_DIR / "transcripts"
 DB_PATH = ORCHESTRATOR_DIR / "vectors.db"

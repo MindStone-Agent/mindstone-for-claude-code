@@ -8,7 +8,7 @@ purpose: Fix the MS4CC always-loaded context path. Today a 50KB head-cut silentl
 
 # SCRI context-loading optimization
 
-> **Scope.** MS4CC (Claude Code + TestFlight orchestrator hooks). Two loaders feed my always-on context: (1) Claude Code **native auto-memory** (loads `CLAUDE.md` + `MEMORY.md`, hard-caps MEMORY.md at ~24.4KB), and (2) the orchestrator's **`session_start.py`** hook (`TOKEN_BUDGET_CHARS = 50000` head-cut). This note fixes both. Framework-wide — Hearth runs the same hooks.
+> **Scope.** MS4CC (Claude Code + orchestrator hooks). Two loaders feed my always-on context: (1) Claude Code **native auto-memory** (loads `CLAUDE.md` + `MEMORY.md`, hard-caps MEMORY.md at ~24.4KB), and (2) the orchestrator's **`session_start.py`** hook (`TOKEN_BUDGET_CHARS = 50000` head-cut). This note fixes both. Framework-wide — Hearth runs the same hooks.
 
 ---
 

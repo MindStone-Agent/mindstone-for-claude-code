@@ -68,7 +68,7 @@ These are the audit-relevant ones where status changed but a clean close is a ju
 | **#28** | manual `memory_recall` tool (parity with MindStone Proper) | Open. |
 | **#27 / #25** | wake-daemon (autonomous wake-on-mention) | #27 tabled (needs design); #25 the daemon. Related to the synapse-watch loop. |
 | **#26** | expand vectorized corpora (project docs searchable?) | Discussion/product-call. |
-| **#23** | genericize MS4CC for public OSS (strip TestFlight/Clint refs) | Open — release-gating. |
+| **#23** | genericize MS4CC for public OSS (strip host-project/Clint refs) | Open — release-gating. |
 | **#20 / #18** | latency+cost benchmarks / relevance eval harness | Open (M6). |
 | **#17 / #16** | recall tracing + log rotation / status+stats commands | Open (M5). |
 | **#15** | `/vectorize` slash command | Open — **may be subsumed** by the deterministic dream-cycle / checkpoint-embed model. |

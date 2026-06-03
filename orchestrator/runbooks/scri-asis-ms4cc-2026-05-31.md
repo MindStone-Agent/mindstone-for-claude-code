@@ -3,9 +3,9 @@ title: MS4CC SCRI — AS-IS (2026-05-31)
 author: Hearth
 date: 2026-05-31
 status: complete; verified against running code in ~/Projects/mindstone-for-claude-code/orchestrator
-purpose: Current-state ("as-is") description of SCRI on the MS4CC substrate (MindStone for Claude Code — Hearth's orchestrator). Refreshes Cairn's 2026-05-22 audit (testflight/docs/scri-audit-ms4cc-2026-05-22.md) with the deltas since then. Companion to scri-asis-mindstone-2026-05-31.md and scri-diff-2026-05-31.md.
+purpose: Current-state ("as-is") description of SCRI on the MS4CC substrate (MindStone for Claude Code — Hearth's orchestrator). Refreshes Cairn's 2026-05-22 audit (docs/scri-audit-ms4cc-2026-05-22.md) with the deltas since then. Companion to scri-asis-mindstone-2026-05-31.md and scri-diff-2026-05-31.md.
 supersedes_for_currency:
-  - testflight/docs/scri-audit-ms4cc-2026-05-22.md (Cairn)
+  - docs/scri-audit-ms4cc-2026-05-22.md (Cairn)
 note: MS4CC and MindStone Proper are DIFFERENT architectures. This doc is MS4CC only — Claude Code hooks + sqlite-vec, not the MindStone gateway.
 ---
 
@@ -17,7 +17,7 @@ note: MS4CC and MindStone Proper are DIFFERENT architectures. This doc is MS4CC 
 
 ## 0. The headline: what changed since 2026-05-22
 
-1. **Repo renamed: `testflight` → `mindstone-for-claude-code`.** Live path is now `~/Projects/mindstone-for-claude-code/orchestrator/`. All `testflight/...` paths in the 05-22 audit are historical. (Some in-code comments still reference the old name — documentation only, not breaking.)
+1. **Repo renamed to `mindstone-for-claude-code`.** Live path is now `~/Projects/mindstone-for-claude-code/orchestrator/`. All paths under the old repo name in the 05-22 audit are historical. (Some in-code comments still reference the old name — documentation only, not breaking.)
 
 2. **Chunk-ceiling fix (PR #35) — the big one.** The 05-22 audit's "2000-char target / 4000-char hard cap" is **gone**. nomic-embed-text's real ceiling is **2048 tokens** (not 8192), and dense transcript chunks at ~1.5 chars/token were hitting ~2700 tokens at the old 4000 cap, silently killing whole embed batches — a **month-long vectorization gap**. Current values:
    - `embedder.py`: `MAX_INPUT_TOKENS = 2048`, `SAFE_INPUT_CHARS = 2400`.
@@ -118,7 +118,7 @@ MS4CC's memory layer **is** the Karpathy LLM Wiki pattern (resolved 2026-05-22):
 
 ## 8. Authority + cross-refs
 - **Running code:** `~/Projects/mindstone-for-claude-code/orchestrator/hooks/*.py`, `.claude/commands/*` (skills).
-- **Prior audit:** `testflight/docs/scri-audit-ms4cc-2026-05-22.md` (Cairn) — this doc updates it for currency.
+- **Prior audit:** `docs/scri-audit-ms4cc-2026-05-22.md` (Cairn) — this doc updates it for currency.
 - **Companions:** `scri-asis-mindstone-2026-05-31.md`, `scri-diff-2026-05-31.md` (this set).
 - **Recent commits:** `#35` (chunk ceiling + resilient batches), nomic migration, pre_compact schema fix.
 

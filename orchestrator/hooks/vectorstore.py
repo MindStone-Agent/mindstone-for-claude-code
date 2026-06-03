@@ -344,7 +344,7 @@ if __name__ == "__main__":
 
         e = Embedder()
         texts = [
-            "Cairn is the orchestrator for TestFlight.",
+            "Cairn is the orchestrator for this project.",
             "A cairn is a stack of stones marking a path.",
             "The celery beat persistence issue was fixed in round 4.",
             "Unity scene files are never committed but contain critical Inspector wiring.",

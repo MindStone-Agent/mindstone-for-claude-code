@@ -15,7 +15,6 @@ MS4CC adds a persistent-identity layer to Claude Code:
 - **Auto-archive** of session transcripts at session end (mechanical, no LLM needed).
 - **Per-prompt semantic recall** that surfaces relevant memory + transcript chunks based on what the user just asked.
 - **Compaction-handoff system** — danger-zone rich handoff at 85% context, PreCompact linchpin that archives and refreshes the handoff tail at the compaction cliff, and post-compaction replay + background embed so continuity is lossless across compaction events.
-- **Role adoption** (`/act-as <role>`) so the orchestrator can do implementation work directly while binding to the same standards a delegated subagent would.
 
 ## Hook architecture
 
@@ -65,14 +64,12 @@ Memory files live in `orchestrator/memory/`. The included `MEMORY.md` is an inde
 
 ## Slash commands
 
-Three orchestrator commands ship with the framework:
+Two orchestrator commands ship with the framework:
 
-- **`/checkpoint`** — Dream-cycle session synthesis. Updates `LOG.md`, asks the user which cited memories prevented a mistake, proposes new memories, flags drift (role-shaped work without `/act-as`, decisions without canonical attribution).
+- **`/checkpoint`** — Dream-cycle session synthesis. Updates `LOG.md`, asks the user which cited memories prevented a mistake, proposes new memories, flags drift (decisions without canonical attribution, shipped work without a status update).
 - **`/end-session`** — Wrap-up before `/exit`. Composes `/checkpoint` (when warranted) and the mechanical archive (vectorize transcript + auto-increment hits) into a single command. Use before `/exit` so reflection and persistence both land. Workaround for the Stop hook firing per-turn-completion rather than on session end.
-- **`/act-as <role>`** — Structural role adoption. Loads `.claude/agents/<role>.md` directives + referenced canonicals so the orchestrator can do implementation work directly while staying bound to the same standards.
-- **`/end-role`** — Exit role adoption. Runs an attribution audit (what canonicals were cited, what artifacts were produced) and logs the role span to `LOG.md`.
 
-These are framework-internal commands. Users define their own subagents (under `.claude/agents/`) and workflow commands per their use case.
+These are framework-internal commands. Users define their own subagents (under `.claude/agents/`), any role-adoption commands, and workflow commands per their use case.
 
 ## Synapse integration (optional)
 
@@ -118,11 +115,11 @@ This rule applies to the persistent-identity orchestrator and to any subagent th
 When `orchestrator/IDENTITY.md` exists, the orchestrator has agency:
 
 - **Delegate to subagents** when parallelism, context isolation, bounded iterative tool-use, tool-restriction sandboxing, or scale make delegation genuinely the better tool.
-- **Do work directly under role adoption** when judgment, continuity, or collaborative back-and-forth dominate.
+- **Do work directly** when judgment, continuity, or collaborative back-and-forth dominate.
 
 The in-the-moment test: *Would the work be better if I did it, or faster if I delegated?* Better-if-me wins for judgment work. Faster-if-delegated wins for mechanical or parallel work.
 
-When doing role-adoption direct work, the orchestrator invokes `/act-as <role>` to load the subagent's directives. They then produce the same artifacts a subagent would and cite canonical sources inline for non-trivial decisions. `/end-role` runs the attribution audit on close.
+When doing direct (non-delegated) work, the orchestrator still binds to the same standards a delegated subagent would — producing the same artifacts and citing canonical sources inline for non-trivial decisions. A consumer project can formalize this with its own role-adoption command that loads a subagent's directives + canonicals; MS4CC itself ships none, since that depends on the consumer's `.claude/agents/` definitions.
 
 ### Stateless task-executor mode
 

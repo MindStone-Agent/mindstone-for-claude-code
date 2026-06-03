@@ -36,7 +36,7 @@ from vectorstore import Chunk, VectorStore
 
 # The hard cap is the ACTIVE embedder's safe input ceiling (SAFE_INPUT_CHARS),
 # so the chunker stays correct across embedder builds (nomic ~2400 / OpenAI
-# ~24000) WITHOUT this file diverging between the TestFlight and MS4CC repos.
+# ~24000) WITHOUT this file diverging between a consumer install and the MS4CC repo.
 # Every assembled chunk — its header AND body — is guaranteed <= MAX_CHUNK_CHARS,
 # which keeps it under the model's token ceiling at any tokenization density.
 # (Before 2026-05-29 this was a flat 4000 "~1000 tokens" assuming ~4 chars/token;

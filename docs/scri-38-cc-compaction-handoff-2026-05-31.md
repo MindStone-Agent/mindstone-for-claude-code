@@ -8,7 +8,7 @@ purpose: Reframe the #38 auto-compaction-handoff for the MS4CC (Claude Code) sub
 
 # #38 on MS4CC — the compaction-handoff reframe
 
-> **Scope.** MS4CC only (Claude Code + the TestFlight orchestrator hooks). Cairn and Hearth both run on this substrate. MindStone-proper agents (Mira/Aegis/Lux/Lyren) use the gateway sliding-window and are out of scope here.
+> **Scope.** MS4CC only (Claude Code + the orchestrator hooks). Cairn and Hearth both run on this substrate. MindStone-proper agents (Mira/Aegis/Lux/Lyren) use the gateway sliding-window and are out of scope here.
 >
 > **One-line.** #38 was conceived as "the agent runs `/checkpoint` then `/compact` on itself at 90%." Half of that is impossible on CC — **the agent cannot trigger `/compact` by any mechanism.** This note reframes #38 around what's actually true, and fixes a latent autonomy hazard it exposed.
 

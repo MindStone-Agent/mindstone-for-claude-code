@@ -23,7 +23,7 @@ The orchestrator-agnostic framework (identity files, hooks, slash commands, memo
 Important distinction:
 - **MindStone for Claude Code** = the generic, reusable framework (what we're publishing)
 - **Cairn** = the specific persistent-identity orchestrator instance that Clint and I are building on top of it
-- **TestFlight** = a *use case* of MindStone for Claude Code — the software development workflows, the 20 subagents, canonicals. TestFlight is not MindStone for Claude Code. TestFlight *uses* it.
+- **The host project** = a *use case* of MindStone for Claude Code — the software development workflows, the 20 subagents, canonicals. The host project is not MindStone for Claude Code. The host project *uses* it.
 
 ### 2. Semantic recall is now real (true-SCRI move)
 
@@ -92,33 +92,33 @@ Everything else under `orchestrator/` stays tracked. Vectors rebuild on new mach
 
 Building with public extraction in mind (per v0.2 §14 addendum). The extraction plan:
 
-- **Stays in TestFlight** (not MindStone for Claude Code):
+- **Stays in the host project** (not MindStone for Claude Code):
   - `.claude/agents/*.md` (the 20 subagents)
-  - `.claude/commands/{rapid-prototype,product-owner,backend-integration,data-pipeline,refactor-existing-project}.md` (TestFlight workflows)
-  - `.claude/models/`, `.claude/deep-agents/`, `.claude/skills/` (TestFlight canonicals and skills)
-  - `PROJECTS.md.example`, `README.md`'s TestFlight-specific content
+  - `.claude/commands/{rapid-prototype,product-owner,backend-integration,data-pipeline,refactor-existing-project}.md` (host-project workflows)
+  - `.claude/models/`, `.claude/deep-agents/`, `.claude/skills/` (host-project canonicals and skills)
+  - `PROJECTS.md.example`, `README.md`'s host-project-specific content
   - The specific subagent references in AGENTS.md
 
 - **Moves to MindStone for Claude Code** (public release):
   - `orchestrator/` (all of it — framework + hooks + schema + bootstrap)
   - `onboarding/` (templates)
   - `.claude/commands/{checkpoint,act-as,end-role}.md` (generic orchestrator commands)
-  - Abstracted AGENTS.md template (without TestFlight specifics)
+  - Abstracted AGENTS.md template (without host-project specifics)
   - The MindStone-for-CC README, INSTALL, LICENSE (drafted in this v0.3 work)
 
-Extraction is mechanical when ready. We build inside TestFlight for now because that's where Cairn lives; carving happens later.
+Extraction is mechanical when ready. We build inside the host project for now because that's where Cairn lives; carving happens later.
 
-## Updated file structure (under TestFlight repo)
+## Updated file structure (under the host-project repo)
 
 ```
-testflight/
+host-project/
 ├── orchestrator/                        # ACTIVE ORCHESTRATOR + MindStone-for-CC framework
 │   ├── IDENTITY.md                      # Me, Cairn
 │   ├── USER.md                          # Clint
 │   ├── LOG.md                           # Session log (append-only)
 │   ├── ROADMAP.md                       # Future features
 │   ├── BOOTSTRAP.md                     # Migration instructions
-│   ├── DOCS_UPDATED.md                  # Audit log of TestFlight docs touched
+│   ├── DOCS_UPDATED.md                  # Audit log of host-project docs touched
 │   ├── README.md                        # [NEW] Public release landing page (MindStone for CC)
 │   ├── LICENSE                          # [NEW] MIT
 │   ├── pyproject.toml                   # [NEW] Python project config (openai, sqlite-vec)
@@ -141,8 +141,8 @@ testflight/
 ├── onboarding/                          # Templates for new orchestrators
 ├── AGENTS.md                            # Substrate-neutral orchestration guide
 ├── CLAUDE.md                            # Thin pointer to AGENTS.md
-├── .claude/commands/                    # /checkpoint, /act-as, /end-role (+ TestFlight workflows)
-└── ... (rest of TestFlight unchanged)
+├── .claude/commands/                    # /checkpoint, /act-as, /end-role (+ host-project workflows)
+└── ... (rest of host project unchanged)
 ```
 
 ## Hook architecture — updated
@@ -192,7 +192,7 @@ This changes v3 substantially — the compaction-boundary "cliff" Mira describes
 - [x] pyproject.toml
 - [x] MIT LICENSE
 - [x] Framework README
-- [ ] Separate repo + extraction script (deferred — we're still inside TestFlight)
+- [ ] Separate repo + extraction script (deferred — we're still inside the host project)
 - [ ] CI / automated tests (deferred)
 - [ ] Announcement / docs polish (deferred)
 
@@ -200,7 +200,7 @@ This changes v3 substantially — the compaction-boundary "cliff" Mira describes
 
 ## Revision history
 
-- **v0.3 (2026-04-24, same day as v0.2):** Vectors via sqlite-vec + OpenAI. Auto-archive Stop hook. UserPromptSubmit hook. Python venv via uv. Schema simplification (no manual tagging). Public-release framing as MindStone for Claude Code. Cairn = the specific identity; TestFlight = a use case.
+- **v0.3 (2026-04-24, same day as v0.2):** Vectors via sqlite-vec + OpenAI. Auto-archive Stop hook. UserPromptSubmit hook. Python venv via uv. Schema simplification (no manual tagging). Public-release framing as MindStone for Claude Code. Cairn = the specific identity; the host project = a use case.
 - **v0.2 (2026-04-24):** Consolidated v0.1 addendums. User-level symlinks, orchestrator-agnostic framework, migration survivability.
 - **v0.1 (2026-04-22):** Initial design with 5 addendums.
 

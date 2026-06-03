@@ -61,7 +61,7 @@ For the framework's history beyond what's in these docs: see `/AGENTS.md` "Linea
 
 ## What's NOT here
 
-- **Cairn's IDENTITY.md, USER.md, LOG.md, accumulated memory files** — these are user-private, gitignored, and live in Cairn's TestFlight repo. Not part of the framework distribution.
-- **TestFlight-specific subagent definitions and workflow commands** — TestFlight is the *use case* Cairn was built for; MS4CC is the framework. The TestFlight content stays in the TestFlight repo.
+- **Cairn's IDENTITY.md, USER.md, LOG.md, accumulated memory files** — these are user-private, gitignored, and live in Cairn's host-project repo. Not part of the framework distribution.
+- **Host-project-specific subagent definitions and workflow commands** — the host project is the *use case* Cairn was built for; MS4CC is the framework. The host-project content stays in the host-project repo.
 
-If you're curious about the TestFlight project that birthed Cairn, that's in a separate (private) repo. The framework is what's published here.
+If you're curious about the host project that birthed Cairn, that's in a separate (private) repo. The framework is what's published here.
