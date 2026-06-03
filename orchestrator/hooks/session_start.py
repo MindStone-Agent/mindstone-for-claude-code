@@ -355,8 +355,12 @@ def kick_deferred_embed() -> None:
     swallowed — a failed embed must never block session start.
     """
     try:
+        # Only consider stable per-session archives (<uuid>.jsonl). Skip any
+        # legacy dated copies (YYYY-MM-DD__<uuid>.jsonl) — those are throwaway
+        # paths the DB has never indexed, so picking one would re-embed the whole
+        # session from scratch. The "__" infix is unique to the dated scheme.
         archives = sorted(
-            TRANSCRIPTS_DIR.glob("*.jsonl"),
+            (p for p in TRANSCRIPTS_DIR.glob("*.jsonl") if "__" not in p.name),
             key=lambda p: p.stat().st_mtime, reverse=True,
         )
         if not archives:
