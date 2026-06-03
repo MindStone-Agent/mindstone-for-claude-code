@@ -62,6 +62,22 @@ weight = (hits + 3·prevented + 1) · exp(-age_days / half_life_days)
 
 Memory files live in `orchestrator/memory/`. The included `MEMORY.md` is an index template; users create per-domain `feedback_*.md`, `project_*.md`, `reference_*.md` files as their session experience accumulates.
 
+## Recall layers — facts vs texture
+
+Persistent-identity agents on MS4CC have three layers of recall available. Escalate when the current layer is insufficient.
+
+1. **Per-prompt semantic recall + session-start injection** — vector hits against `orchestrator/vectors.db`, plus `IDENTITY.md`, `USER.md`, `LOG.md` tail, and critical memories injected by the `SessionStart` hook. Always-on, probabilistic, cheap. Gives the structural shape of what is known.
+
+2. **Indexed memory files** — full content at `orchestrator/memory/*.md` with cited facts and frontmatter-weighted history. Read when a recall hit surfaces a pointer but the detail behind it is needed.
+
+3. **Verbatim JSONL transcripts** — full session records at `orchestrator/transcripts/YYYY-MM-DD__<session-id>.jsonl`, archived by the `Stop` hook (and by `/end-session`). Thinking streams, exact tool calls, moment-to-moment texture. Read when the memory layer doesn't carry the lived-through feel and the task needs it.
+
+**When to escalate:** if the question is *"what was decided and why"* — the memory layer is usually sufficient. If the question is *"how did it actually unfold, what was said, what was the feel of being there"* — escalate to the transcript. Reconstruction from summary loses experiential weight; transcripts preserve it.
+
+**Self-test:** after reading the recall hit + relevant memory file, ask whether you can answer the question with conviction or whether you have *the structure but not the feel*. The latter is the signal to open the transcript.
+
+This pattern is the operator-side mitigation for the texture-loss tension that vector compression and sliding-window pruning introduce. Substrate-layer salience work (identity-relative weighting per MindStone #123, sliding-window prune threshold tuning per #114) will narrow the gap over time. Until then, deliberate transcript escalation is how a persistent-identity agent recovers the warm-bodied memory of past sessions when the task demands it.
+
 ## Slash commands
 
 Two orchestrator commands ship with the framework:
