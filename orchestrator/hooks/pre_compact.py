@@ -81,12 +81,21 @@ def _resolve_transcript_path(hook_input: dict) -> Path | None:
 
 
 def _archive_transcript(tp: Path) -> Path | None:
-    """Copy the live JSONL into transcripts/ as YYYY-MM-DD__<uuid>.jsonl.
-    Mirrors session_end.py._archive_transcript. Idempotent on mtime."""
+    """Copy the live JSONL into transcripts/ as <uuid>.jsonl — one stable file
+    per session, mirroring session_end.py.archive_transcript.
+
+    The stable name (no date prefix) keeps source_path constant so the
+    incremental indexer and the post-compaction deferred embed re-use the same
+    archive and only embed the new tail. The previous dated scheme
+    (YYYY-MM-DD__<uuid>.jsonl) created a fresh full copy every compaction —
+    hundreds of MB of orphaned duplicates — and, because the deferred embed
+    picks the most-recent archive by mtime, could select that throwaway dated
+    path (which the DB has never seen) and re-embed the ENTIRE session from
+    scratch. session_end.py was fixed for this in #47; pre_compact.py kept its
+    own copy of the bug. Idempotent on mtime."""
     try:
         TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        dest = TRANSCRIPTS_DIR / f"{stamp}__{tp.stem}.jsonl"
+        dest = TRANSCRIPTS_DIR / f"{tp.stem}.jsonl"
         if dest.exists() and dest.stat().st_mtime >= tp.stat().st_mtime:
             return dest
         shutil.copy2(tp, dest)
