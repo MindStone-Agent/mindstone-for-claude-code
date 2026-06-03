@@ -1,14 +1,14 @@
 # MindStone for Claude Code
 
-**Persistent-identity orchestrator framework for Claude Code** — the Claude Code substrate edition of the [MindStone](https://github.com/R1ngZer0/MindStone) architecture.
+**Persistent-identity orchestrator framework for Claude Code** — the Claude Code substrate edition of the [MindStone Agent](https://github.com/R1ngZer0/MindStone) architecture (the MindStone Agent repo is still private, but will be made public by the end of June 2026).
 
-Gives your Claude Code instance a name, continuous memory across sessions, and SCRI-style semantic recall (Semantic Context Resonance Injection — weighted, experience-aware memory retrieval). Optional. Opt-in at bootstrap.
+Gives your Claude Code instance continuous memory across sessions, and automatic semantic recall (weighted, experience-aware memory retrieval).
 
 ---
 
 ## What it is
 
-By default, Claude Code forgets everything between sessions. You get a fresh instance each time.
+By default, Claude Code forgets everything between sessions. You get a fresh instance each time, which you have to prime with new knowledge. 
 
 This changes that. You clone the repo, run one script, and your Claude Code now:
 
