@@ -1,0 +1,27 @@
+# Project hints — copy to project_hints.toml and fill in YOUR projects.
+#
+# At session start, the SessionStart hook looks at the current working directory
+# and, for each entry below whose KEY appears as a substring of the CWD (case-
+# insensitive), treats the VALUE as an "active project" tag. Memories whose
+# `projects:` frontmatter includes that tag are then ranked higher for injection.
+#
+# This map is install-specific — it's YOUR project layout, not part of the MS4CC
+# framework — so it lives here as a per-install config, not in the repo. If this
+# file is absent, no project boosting happens (everything else still works).
+#
+# Format: "cwd-substring" = "project-tag"
+#   - The key is matched against the lowercased CWD path.
+#   - The value is the project tag you use in memory `projects:` frontmatter.
+#   - Several keys may map to the same tag (e.g. a repo dir name and a nickname).
+
+[hints]
+# Example — replace with your own:
+# "my-web-app"   = "web-app"
+# "webapp"       = "web-app"     # alias for the same project
+# "billing-svc"  = "billing"
+# "infra"        = "infrastructure"
+
+[settings]
+# Ranking multiplier applied to a memory when its `projects` matches a
+# CWD-inferred project. Higher = stronger boost. Default 5.0.
+match_boost = 5.0

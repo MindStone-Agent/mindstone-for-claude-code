@@ -40,22 +40,10 @@ TOP_N_PROJECT_MEMORIES = 10
 # How many tail lines from LOG.md to include for continuity.
 LOG_TAIL_LINES = 40
 
-# CWD hints → project tags. Used to boost project-matched memories.
-PROJECT_HINTS = {
-    "autotabletop": "att",
-    "AutoTableTop": "att",
-    "att-unity": "att-unity",
-    "aegis": "aegis-dashboard",
-    "scryforge": "scryforge",
-    "ozh": "operation-zero-hour",
-    "operation_zero_hour": "operation-zero-hour",
-    "fcm": "fcm",
-    "tprm": "tprm",
-    "mindstone": "mindstone",
-    "MindStone": "mindstone",
-}
-
-PROJECT_MATCH_BOOST = 5.0  # Multiplier when project tag matches CWD hint.
+# CWD-hint → project-tag mapping (PROJECT_HINTS) and the match-boost multiplier
+# are loaded from the per-install config orchestrator/config/project_hints.toml —
+# see the "Project hints" loader just below the Paths section. They are
+# install-specific (your projects, not the framework's), so canon ships none.
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -68,6 +56,42 @@ ONBOARDING_DIR = PROJECT_DIR / "onboarding"
 MEMORY_DIR = ORCHESTRATOR_DIR / "memory"
 TRANSCRIPTS_DIR = ORCHESTRATOR_DIR / "transcripts"
 DB_PATH = ORCHESTRATOR_DIR / "vectors.db"
+
+# ---------------------------------------------------------------------------
+# Project hints (config-driven, install-specific)
+# ---------------------------------------------------------------------------
+# PROJECT_HINTS maps a CWD substring → a project tag, used to boost memories whose
+# `projects` frontmatter matches the project inferred from the current working
+# directory. This map is install-specific (your projects), so canon ships none —
+# it's loaded from orchestrator/config/project_hints.toml. Copy
+# project_hints.example.toml to project_hints.toml and fill in your projects.
+# Absent or unparseable config → empty map (no project boosting; graceful).
+PROJECT_HINTS_CONFIG = ORCHESTRATOR_DIR / "config" / "project_hints.toml"
+
+
+def _load_project_hints() -> tuple[dict, float]:
+    """Return (hints, match_boost) from project_hints.toml; ({}, 5.0) if absent/bad."""
+    default_boost = 5.0
+    if not PROJECT_HINTS_CONFIG.exists():
+        return {}, default_boost
+    try:
+        import tomllib
+        with PROJECT_HINTS_CONFIG.open("rb") as f:
+            data = tomllib.load(f)
+    except Exception as e:
+        print(f"[session_start] project_hints.toml unparseable ({e}); no hints.", file=sys.stderr)
+        return {}, default_boost
+    raw = data.get("hints")
+    hints = {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+    settings = data.get("settings") if isinstance(data.get("settings"), dict) else {}
+    try:
+        boost = float(settings.get("match_boost", default_boost))
+    except (TypeError, ValueError):
+        boost = default_boost
+    return hints, boost
+
+
+PROJECT_HINTS, PROJECT_MATCH_BOOST = _load_project_hints()
 
 IDENTITY_FILE = ORCHESTRATOR_DIR / "IDENTITY.md"
 USER_FILE = ORCHESTRATOR_DIR / "USER.md"

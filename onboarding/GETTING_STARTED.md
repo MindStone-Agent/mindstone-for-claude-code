@@ -154,6 +154,17 @@ The `/checkpoint` command manages memory: it proposes new files, increments `pre
 
 **Do not hand-edit memory files** unless you know what you are changing and why. They are the orchestrator's long-term knowledge base and the weight values matter. If you want to understand why the orchestrator did something or what it currently knows, read `orchestrator/LOG.md` — the append-only session log is the narrative record.
 
+### Project hints (optional — tunes recall to your projects)
+
+At session start the framework can boost memories that belong to the project you're
+currently working in. It infers the "active project" from your current working
+directory using a map you provide in `orchestrator/config/project_hints.toml`. The
+map is **install-specific** (your projects, not the framework's), so it isn't shipped
+— copy `orchestrator/config/project_hints.example.toml` to `project_hints.toml` and
+fill in your own `"cwd-substring" = "project-tag"` entries (the tag matches the
+`projects:` frontmatter on your memories). If you skip this, nothing breaks —
+project boosting is simply off and recall still works via semantic match.
+
 ---
 
 ## Where to go next

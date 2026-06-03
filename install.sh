@@ -143,6 +143,7 @@ FRAMEWORK_FILES=(
   "orchestrator/BOOTSTRAP.md"
   "orchestrator/ROADMAP.md"
   "orchestrator/config/synapse.example.toml"
+  "orchestrator/config/project_hints.example.toml"
   "orchestrator/memory/.migrate_frontmatter.py"
   "AGENTS.md"
 )
