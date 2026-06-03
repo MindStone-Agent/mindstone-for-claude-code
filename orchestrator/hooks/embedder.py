@@ -114,11 +114,15 @@ class Embedder:
     ):
         self.model = model or os.environ.get("EMBEDDER_MODEL", DEFAULT_MODEL)
         self.base_url = base_url or os.environ.get("EMBEDDER_BASE_URL", DEFAULT_BASE_URL)
-        # Ollama ignores the key but the openai client requires a non-empty string.
+        # The openai client constructor requires a non-empty key string, but the
+        # default local Ollama endpoint ignores it. Use an explicit key if given,
+        # else a harmless "ollama" placeholder. OPENAI_API_KEY is consulted ONLY
+        # when base_url points at a cloud OpenAI host — so a local-embedding install
+        # never appears to "need an OpenAI API key".
         self.api_key = (
             api_key
             or os.environ.get("EMBEDDER_API_KEY")
-            or os.environ.get("OPENAI_API_KEY")
+            or (os.environ.get("OPENAI_API_KEY") if "openai.com" in self.base_url else None)
             or "ollama"
         )
         self._client = None
