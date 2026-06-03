@@ -53,17 +53,13 @@ def infer_tags(name: str) -> list[str]:
     return [t for t in stem.split("_") if len(t) > 2]
 
 # Project inference — which projects does this memory apply to?
+# Example install-specific map — replace the keys/values with your own
+# project keywords and tags.
 PROJECT_HINTS = {
-    "att": "att",
-    "autotabletop": "att",
-    "aegis": "aegis-dashboard",
-    "scryforge": "scryforge",
-    "ozh": "operation-zero-hour",
-    "operation_zero_hour": "operation-zero-hour",
-    "fcm": "fcm",
-    "tprm": "tprm",
-    "unity": "att-unity",
-    "apple": "apple-codesign",
+    "webapp": "web-app",
+    "my-web-app": "web-app",
+    "billing": "billing",
+    "infra": "infrastructure",
 }
 
 def infer_projects(name: str, tags: list[str]) -> list[str]:

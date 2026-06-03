@@ -8,7 +8,7 @@ Usage:
     idx = Indexer(store, embedder)
 
     # Memory file
-    n = idx.index_memory_file(Path("orchestrator/memory/project_scryforge.md"))
+    n = idx.index_memory_file(Path("orchestrator/memory/project_example.md"))
 
     # Transcript
     n = idx.index_transcript(Path("orchestrator/transcripts/<uuid>.jsonl"))

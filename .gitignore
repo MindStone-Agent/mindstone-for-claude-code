@@ -60,8 +60,6 @@ orchestrator/DOCS_UPDATED.md
 orchestrator/memory/feedback_*.md
 orchestrator/memory/project_*.md
 orchestrator/memory/reference_*.md
-orchestrator/memory/autotabletop-*.md
-orchestrator/memory/ozh_*.md
 orchestrator/memory/lineage_*.md
 # User-private skills (project-specific scripts referencing private infra,
 # IPs, credentials, keys). Substrate-mechanic skills can be opted in by
