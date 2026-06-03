@@ -10,7 +10,7 @@ neither matches cleanly, ask the user rather than guessing.
 
 ## Detect the topology
 
-- **Consumer install** — MS4CC is a dependency of another project (e.g. TestFlight):
+- **Consumer install** — MS4CC is a dependency of another project:
   the project root has a `.ms4cc-version` pin file **and** a `scripts/ms4cc-sync.sh`
   helper, and `orchestrator/` is gitignored (the engine is installed, not checked
   out). → section A.

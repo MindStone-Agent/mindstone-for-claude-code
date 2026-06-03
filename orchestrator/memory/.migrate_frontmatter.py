@@ -63,7 +63,6 @@ PROJECT_HINTS = {
     "fcm": "fcm",
     "tprm": "tprm",
     "unity": "att-unity",
-    "testflight": "testflight",
     "apple": "apple-codesign",
 }
 

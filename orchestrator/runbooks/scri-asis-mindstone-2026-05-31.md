@@ -3,10 +3,10 @@ title: MindStone Proper SCRI — AS-IS (2026-05-31)
 author: Hearth
 date: 2026-05-31
 status: complete; verified against running code in ~/Projects/MindStone + live config on Mira's box
-purpose: Current-state ("as-is") description of SCRI on the MindStone Proper substrate. Refreshes Cairn's 2026-05-22 audit (testflight/docs/scri-audit-mindstone-2026-05-22.md) with the deltas since then. Companion to scri-asis-ms4cc-2026-05-31.md and scri-diff-2026-05-31.md.
+purpose: Current-state ("as-is") description of SCRI on the MindStone Proper substrate. Refreshes Cairn's 2026-05-22 audit (docs/scri-audit-mindstone-2026-05-22.md) with the deltas since then. Companion to scri-asis-ms4cc-2026-05-31.md and scri-diff-2026-05-31.md.
 supersedes_for_currency:
   - MindStone/docs/engineering/scri-canonical.md (2026-05-17, v0)
-  - testflight/docs/scri-audit-mindstone-2026-05-22.md (Cairn)
+  - docs/scri-audit-mindstone-2026-05-22.md (Cairn)
 note: This is an as-is audit by Hearth (operator lane), not a canonical spec. Cairn owns the MindStone canonical spec + final code authority. Where this implies code changes, they are Cairn's to make.
 ---
 
@@ -162,7 +162,7 @@ Per D3 + D5: threshold-driven (`0.8` trigger / `0.6` target), vectorize-before-p
 ## 9. Authority + cross-refs
 - **Canonical spec (intent):** `MindStone/docs/engineering/scri-canonical.md` — **needs a refresh** (stale per §8); Cairn owns it.
 - **Decision log:** `MindStone/docs/engineering/active-decisions.md` — **needs D4 + D9 written**.
-- **Prior audit:** `testflight/docs/scri-audit-mindstone-2026-05-22.md` (Cairn) — this doc updates it for currency.
+- **Prior audit:** `docs/scri-audit-mindstone-2026-05-22.md` (Cairn) — this doc updates it for currency.
 - **Companions:** `scri-asis-ms4cc-2026-05-31.md`, `scri-diff-2026-05-31.md` (this set).
 - **Operator runbook:** `orchestrator/runbooks/scri-canonical-runbook.md` — inventory is stale (lists cloud-Gemma substrate); needs a refresh pass.
 
