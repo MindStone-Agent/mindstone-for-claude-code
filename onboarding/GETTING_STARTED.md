@@ -15,7 +15,7 @@ MindStone for Claude Code (MS4CC) is a persistent-identity and semantic-memory f
 The full prerequisites and procedure live in `orchestrator/BOOTSTRAP.md`. The short version:
 
 ```bash
-git clone https://github.com/R1ngZer0/mindstone-for-claude-code.git ~/path/to/your/project
+git clone https://github.com/MindStone-Agent/mindstone-for-claude-code.git ~/path/to/your/project
 cd ~/path/to/your/project/orchestrator
 ./bootstrap.sh
 ```
@@ -125,7 +125,7 @@ You can switch to persistent-identity mode at any time by following the onboardi
 1. Synthesizes the session into a new `LOG.md` entry
 2. Reviews which cited memories actually prevented mistakes (Option D — increments `prevented` counts)
 3. Proposes new memory files for things learned this session
-4. Flags drift (e.g., implementation work done without `/act-as`, decisions without canonical attribution)
+4. Flags drift (e.g., decisions without canonical attribution, shipped work without a status update)
 5. Embeds the session transcript into the vector store so it is searchable in future sessions
 
 Run `/checkpoint` at natural breaks in your work session — at a milestone, before a long pause, or when context is getting deep. The embedding step is the `/checkpoint`'s job; the Stop hook that fires after each turn handles archiving only, not embedding.

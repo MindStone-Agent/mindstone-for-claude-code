@@ -27,7 +27,7 @@ This is how you install MindStone for Claude Code (MS4CC) on a new machine — f
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/R1ngZer0/mindstone-for-claude-code.git ~/path/to/your/project
+git clone https://github.com/MindStone-Agent/mindstone-for-claude-code.git ~/path/to/your/project
 cd ~/path/to/your/project
 ```
 

@@ -186,7 +186,7 @@ See `docs/reference-implementation/` for the design history (Cairn's three-versi
 ## Bootstrap
 
 ```bash
-git clone https://github.com/R1ngZer0/mindstone-for-claude-code.git ~/path/to/your/project
+git clone https://github.com/MindStone-Agent/mindstone-for-claude-code.git ~/path/to/your/project
 cd ~/path/to/your/project/orchestrator
 ./bootstrap.sh
 ```
