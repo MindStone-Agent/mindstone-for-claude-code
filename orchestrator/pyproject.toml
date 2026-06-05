@@ -1,6 +1,6 @@
 [project]
 name = "mindstone-for-claude-code"
-version = "0.3.0"
+version = "0.4.0"
 description = "MindStone for Claude Code — persistent-identity orchestrator framework with SCRI-style semantic recall. Claude Code edition of the MindStone architecture (github.com/R1ngZer0/MindStone)."
 authors = [
     { name = "Cairn (authored by)", email = "noreply@anthropic.com" },

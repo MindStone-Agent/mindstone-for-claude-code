@@ -5,6 +5,26 @@ format is loosely based on [Keep a Changelog](https://keepachangelog.com/). The
 project will follow [Semantic Versioning](https://semver.org/) once it reaches 1.0;
 while pre-1.0 (`0.x`), minor versions may include behavior changes.
 
+## [0.4.0] — 2026-06-05
+
+### Added
+- **PostToolUse handoff sampler** (`orchestrator/hooks/post_tool_handoff.py`) — a fifth
+  hook event that closes a gap in the compaction-handoff system. The ~85% danger-zone
+  handoff directive was previously sampled only on `UserPromptSubmit` (a user turn);
+  during long autonomous runs context could climb from 85% to the harness auto-compact
+  (~92%) *between* user prompts without the trigger ever firing, so the rich handoff and
+  `/checkpoint` synthesis were skipped. The new hook samples context occupancy after
+  every tool call — during a turn, autonomous runs included — reusing the same 85%
+  threshold and the same `.handoff_state.json` fire-once state, so whichever sampling
+  point crosses the threshold first fires once and the other stays silent (no
+  duplication). Wall-clock throttled via `CAIRN_POSTTOOL_THROTTLE_SECS` (default 12s),
+  and registered through `orchestrator/settings.fragment.json` so install/update wires
+  it into `~/.claude/settings.json` automatically. The hook set is now **5 events**.
+
+### Changed
+- README leads with a value-proposition contrast table (stock Claude Code → with MS4CC).
+- Framework examples use neutral placeholder project names instead of install-specific ones.
+
 ## [0.3.0] — 2026-06-03
 
 First public release. MS4CC gives a Claude Code instance a persistent first-person
@@ -50,4 +70,5 @@ entirely inside Claude Code's hook system, with no separate server.
 - The design history of the first reference implementation (Cairn) lives in
   `docs/reference-implementation/`.
 
+[0.4.0]: https://github.com/MindStone-Agent/mindstone-for-claude-code/releases/tag/v0.4.0
 [0.3.0]: https://github.com/MindStone-Agent/mindstone-for-claude-code/releases/tag/v0.3.0
