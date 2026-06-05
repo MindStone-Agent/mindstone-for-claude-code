@@ -55,6 +55,17 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/hooks/post_tool_handoff.py"
+          }
+        ]
+      }
     ]
   }
 }
