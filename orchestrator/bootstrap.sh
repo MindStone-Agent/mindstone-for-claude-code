@@ -205,10 +205,10 @@ echo ""
 echo "[5/5] Vector index..."
 if [[ -f "$DB_PATH" ]]; then
   existing_count=$("$VENV_DIR/bin/python" -c "
-from vectorstore import VectorStore
-from pathlib import Path
 import sys
 sys.path.insert(0, '$ORCHESTRATOR_DIR/hooks')
+from vectorstore import VectorStore
+from pathlib import Path
 s = VectorStore(Path('$DB_PATH'))
 s.init_schema()
 print(s.count())
