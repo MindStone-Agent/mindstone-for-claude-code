@@ -393,23 +393,45 @@ def kick_deferred_embed() -> None:
         if not archives:
             return
         archive = archives[0]
+        # index_transcript() takes a Path (it calls path.exists()/path.read_text());
+        # passing a bare str crashes with AttributeError. Wrap in Path(). Errors are
+        # caught and printed so a failed embed leaves a trace in the log below — a
+        # silent embed failure must never look like success (this exact str-vs-Path
+        # bug hid for weeks behind stderr=DEVNULL).
         code = (
-            "import sys; sys.path.insert(0, {hooks!r})\n"
-            "from embedder import Embedder\n"
-            "from indexer import Indexer\n"
-            "from vectorstore import VectorStore\n"
-            "store = VectorStore({db!r}); store.init_schema()\n"
-            "n = Indexer(store, Embedder(), verbose=False).index_transcript({arc!r})\n"
-            "print('[deferred-embed] indexed', n, 'chunks from', {arcname!r}, file=sys.stderr)\n"
+            "import sys, traceback\n"
+            "from pathlib import Path\n"
+            "from datetime import datetime, timezone\n"
+            "sys.path.insert(0, {hooks!r})\n"
+            "ts = datetime.now(timezone.utc).isoformat()\n"
+            "try:\n"
+            "    from embedder import Embedder\n"
+            "    from indexer import Indexer\n"
+            "    from vectorstore import VectorStore\n"
+            "    store = VectorStore({db!r}); store.init_schema()\n"
+            "    n = Indexer(store, Embedder(), verbose=False).index_transcript(Path({arc!r}))\n"
+            "    print('[deferred-embed] ' + ts + ' OK: indexed ' + str(n) + ' chunks from ' + {arcname!r}, file=sys.stderr)\n"
+            "except Exception:\n"
+            "    print('[deferred-embed] ' + ts + ' FAILED for ' + {arcname!r} + ':', file=sys.stderr)\n"
+            "    traceback.print_exc()\n"
+            "    sys.exit(1)\n"
         ).format(
             hooks=str(HOOK_FILE.parent), db=str(DB_PATH),
             arc=str(archive), arcname=archive.name,
         )
-        subprocess.Popen(
-            [sys.executable, "-c", code],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        # Route the detached child's stderr to a log file (not DEVNULL) so both the
+        # success line and any traceback are visible after the fact. The parent
+        # closes its handle right after Popen; the child keeps the inherited fd.
+        log_path = TRANSCRIPTS_DIR / ".deferred-embed.log"
+        logf = open(log_path, "a")
+        try:
+            subprocess.Popen(
+                [sys.executable, "-c", code],
+                stdout=subprocess.DEVNULL, stderr=logf,
+                start_new_session=True,
+            )
+        finally:
+            logf.close()
     except Exception as e:
         print(f"[session_start] deferred embed kick failed ({e})", file=sys.stderr)
 

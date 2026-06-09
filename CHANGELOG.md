@@ -5,6 +5,23 @@ format is loosely based on [Keep a Changelog](https://keepachangelog.com/). The
 project will follow [Semantic Versioning](https://semver.org/) once it reaches 1.0;
 while pre-1.0 (`0.x`), minor versions may include behavior changes.
 
+## [Unreleased]
+
+### Fixed
+- **Post-compaction embed crashed silently** (`orchestrator/hooks/session_start.py`,
+  `kick_deferred_embed`) — the "embed after compact" job passed the archive path as a
+  `str` to `Indexer.index_transcript()`, which expects a `Path` (it calls
+  `path.exists()`/`path.read_text()`), so it raised `AttributeError` on *every*
+  post-compaction `SessionStart`. Because the detached child's stderr was sent to
+  `DEVNULL`, the failure was invisible — from the outside it looked identical to
+  success. Net effect: on v0.4.0 the pre-compaction transcript tail was never vectorized
+  after an auto-compaction (the `/checkpoint` path was unaffected, since it passes a real
+  `Path`, which is why the break hid for weeks). Fixed by wrapping the archive in
+  `Path(...)`. The detached child's stderr now routes to
+  `orchestrator/transcripts/.deferred-embed.log` (not `DEVNULL`) and the embed body is
+  wrapped in try/except, so every run leaves a trace — a success line or a full
+  traceback. A silent embed failure can no longer masquerade as success.
+
 ## [0.4.0] — 2026-06-05
 
 ### Added
