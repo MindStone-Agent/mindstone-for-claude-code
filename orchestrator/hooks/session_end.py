@@ -24,11 +24,14 @@ logs a warning to stderr and exits cleanly.
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -72,30 +75,47 @@ def read_hook_input() -> dict:
     except Exception:
         return {}
 
-def resolve_session_path(hook_input: dict) -> Path | None:
-    """Figure out which JSONL file corresponds to this session."""
-    # Try common shapes in order
-    session_id = hook_input.get("session_id") or hook_input.get("sessionId")
+def resolve_session_path(hook_input: dict, args: argparse.Namespace | None = None) -> Path | None:
+    """Figure out which JSONL file corresponds to this session.
+
+    Resolution order for the session id: --session-id flag → hook stdin JSON.
+    Resolution order for the project dir: --cwd flag → hook stdin JSON →
+    process cwd → the install root derived from THIS SCRIPT's location
+    (orchestrator/..). The last one kills the wrong-cwd failure class: a
+    /checkpoint step 7 (or any manual invocation) run from some other
+    directory used to look in the wrong ~/.claude/projects/<escaped> dir and
+    silently find nothing (Hearth, #devops 2026-06-10).
+    """
+    session_id = (args.session_id if args else None) or \
+        hook_input.get("session_id") or hook_input.get("sessionId")
     if not session_id:
         sess = hook_input.get("session")
         if isinstance(sess, dict):
             session_id = sess.get("id")
-    cwd = hook_input.get("cwd") or os.getcwd()
 
-    # Derive the project dir name (Claude Code escapes slashes to dashes)
-    escaped = cwd.replace("/", "-")
-    project_dir = CLAUDE_PROJECTS_DIR / escaped
+    cwd_candidates = []
+    if args and args.cwd:
+        cwd_candidates.append(args.cwd)
+    if hook_input.get("cwd"):
+        cwd_candidates.append(hook_input["cwd"])
+    cwd_candidates.append(os.getcwd())
+    cwd_candidates.append(str(ORCHESTRATOR_DIR.parent))  # script-relative install root
 
-    if session_id:
-        candidate = project_dir / f"{session_id}.jsonl"
-        if candidate.exists():
-            return candidate
+    for cwd in cwd_candidates:
+        # Derive the project dir name (Claude Code escapes slashes to dashes)
+        escaped = cwd.replace("/", "-")
+        project_dir = CLAUDE_PROJECTS_DIR / escaped
 
-    # Fallback: find the most recent .jsonl in the project dir
-    if project_dir.exists():
-        jsonls = sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if jsonls:
-            return jsonls[0]
+        if session_id:
+            candidate = project_dir / f"{session_id}.jsonl"
+            if candidate.exists():
+                return candidate
+
+        # Fallback: most recent .jsonl in this candidate's project dir
+        if project_dir.exists():
+            jsonls = sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if jsonls:
+                return jsonls[0]
 
     return None
 
@@ -116,10 +136,14 @@ def archive_transcript(session_jsonl: Path) -> Path | None:
     every checkpoint re-embed the whole cumulative session under a new name.
     A stable name keeps source_path constant so incremental indexing works.
 
-    Returns the archived path, or None if the archive is already up to date.
+    Returns (archived_path, copied). `copied` is False when the archive was
+    already up to date — callers in CHECKPOINT_MODE must still embed against
+    the returned path (the old None-return made /checkpoint silently skip the
+    ENTIRE embed, memory reindex included, whenever the per-turn Stop hook had
+    archived seconds earlier — Hearth, #devops 2026-06-10).
     """
     if not session_jsonl.exists():
-        return None
+        return None, False
 
     TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -131,10 +155,10 @@ def archive_transcript(session_jsonl: Path) -> Path | None:
         src_mtime = session_jsonl.stat().st_mtime
         dst_mtime = archived_path.stat().st_mtime
         if dst_mtime >= src_mtime:
-            return None
+            return archived_path, False
 
     shutil.copy2(session_jsonl, archived_path)
-    return archived_path
+    return archived_path, True
 
 # ---------------------------------------------------------------------------
 # Vectorize
@@ -178,16 +202,65 @@ def vectorize_transcript(archived_path: Path) -> dict:
     return result
 
 # ---------------------------------------------------------------------------
-# Re-index changed memory files (mtime-delta against vector store)
+# Re-index changed memory files (content-hash gate + mtime seed)
 # ---------------------------------------------------------------------------
 
-def reindex_changed_memory() -> tuple[int, int, int, int]:
-    """Re-index any memory files whose mtime is newer than their stored chunks.
+# Frontmatter keys the hooks themselves mutate. Bumping these must NOT count
+# as a content change: the per-turn hits tracking touches most cited memory
+# files every day, so an mtime-only gate degraded to "re-embed the whole
+# corpus at every checkpoint" (observed 2026-06-10: 1,161 chunks recreated,
+# nearly all byte-identical).
+VOLATILE_FM_KEYS = ("hits:", "last_applied:", "prevented:")
 
-    Returns (files_reindexed, chunks_added, truncated, failed). New files (no
-    chunks yet) and edited files (mtime > stored last_seen_at) are both picked
-    up. Unchanged files are skipped — no embedding cost. truncated/failed
-    surface lossy embeds so an oversized memory file can't fail silently.
+STATE_PATH = ORCHESTRATOR_DIR / ".memory-index-state.json"
+
+
+def _memory_body_hash(path: Path) -> str | None:
+    """Hash the file with volatile frontmatter counter lines stripped."""
+    try:
+        text = path.read_text()
+    except Exception:
+        return None
+    m = re.match(r"---\n(.*?)\n---\n(.*)", text, re.DOTALL)
+    if m:
+        fm = "\n".join(
+            ln for ln in m.group(1).split("\n")
+            if not ln.strip().startswith(VOLATILE_FM_KEYS)
+        )
+        text = f"{fm}\n---\n{m.group(2)}"
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _load_index_state() -> dict:
+    try:
+        return json.loads(STATE_PATH.read_text())
+    except Exception:
+        return {}
+
+
+def _save_index_state(state: dict) -> None:
+    try:
+        tmp = STATE_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(state, indent=0, sort_keys=True))
+        tmp.replace(STATE_PATH)
+    except Exception as e:
+        print(f"[session_end] Could not save memory-index state: {e}", file=sys.stderr)
+
+
+def reindex_changed_memory() -> tuple[int, int, int, int]:
+    """Re-index memory files whose CONTENT changed since their stored chunks.
+
+    Change detection is a body hash that ignores the volatile frontmatter
+    counters (hits / last_applied / prevented) the hooks themselves bump —
+    only real edits trigger an embed. Hashes live in a sidecar state file
+    (orchestrator/.memory-index-state.json, per-install like vectors.db).
+    On first run after this upgrade the sidecar is seeded from the old mtime
+    rule, so files already considered indexed adopt their hash WITHOUT a
+    one-time full re-embed.
+
+    Returns (files_reindexed, chunks_added, truncated, failed). truncated/
+    failed surface lossy embeds so an oversized memory file can't fail
+    silently.
     """
     if not MEMORY_DIR.exists():
         return 0, 0, 0, 0
@@ -225,24 +298,43 @@ def reindex_changed_memory() -> tuple[int, int, int, int]:
         return 0, 0, 0, 0
 
     idx = Indexer(store, embedder, verbose=False)
+    state = _load_index_state()
     files_reindexed = 0
     chunks_added = 0
     for p in sorted(MEMORY_DIR.glob("*.md")):
-        try:
-            mtime = int(p.stat().st_mtime)
-        except Exception:
+        body_hash = _memory_body_hash(p)
+        if body_hash is None:
             continue
-        last_seen = stored.get(str(p), 0)
-        # 2-second slack to avoid re-embedding files we just indexed.
-        if mtime <= last_seen + 2:
-            continue
+        key = str(p)
+        if state.get(key) == body_hash:
+            continue  # counters may have bumped, but the content is unchanged
+
+        if key not in state:
+            # No hash recorded yet. Seed from the legacy mtime rule: if the
+            # store already considers this file indexed, adopt the hash
+            # without re-embedding (keeps the sidecar upgrade free).
+            try:
+                mtime = int(p.stat().st_mtime)
+            except Exception:
+                continue
+            last_seen = stored.get(key, 0)
+            if mtime <= last_seen + 2:
+                state[key] = body_hash
+                continue
+
         try:
             n = idx.index_memory_file(p)
+            state[key] = body_hash
             if n > 0:
                 files_reindexed += 1
                 chunks_added += n
         except Exception as e:
             print(f"[session_end] Failed to re-index {p.name}: {e}", file=sys.stderr)
+
+    # Drop state entries for deleted memory files.
+    live = {str(p) for p in MEMORY_DIR.glob("*.md")}
+    state = {k: v for k, v in state.items() if k in live}
+    _save_index_state(state)
 
     return (
         files_reindexed,
@@ -349,6 +441,14 @@ def _bump_memory_hits(path: Path, today: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def main():
+    parser = argparse.ArgumentParser(description="MS4CC archive/embed hook (Stop hook + /checkpoint step 7)")
+    parser.add_argument("--session-id", default=None,
+                        help="Explicit session UUID (overrides hook stdin JSON)")
+    parser.add_argument("--cwd", default=None,
+                        help="Explicit project cwd for ~/.claude/projects resolution (overrides stdin/process cwd)")
+    args = parser.parse_args()
+
+    started = time.monotonic()
     hook_input = read_hook_input()
 
     # Skip entirely if we're not in an MS4CC/orchestrator context
@@ -356,15 +456,23 @@ def main():
     if not ORCHESTRATOR_DIR.exists():
         return
 
-    session_jsonl = resolve_session_path(hook_input)
+    session_jsonl = resolve_session_path(hook_input, args)
     if not session_jsonl:
-        print("[session_end] No session JSONL found; nothing to archive.", file=sys.stderr)
-        return
+        print("[session_end] FAILED — no session JSONL found (checked --cwd/stdin/process-cwd/"
+              f"install-root candidates under {CLAUDE_PROJECTS_DIR}). Nothing archived or embedded.",
+              file=sys.stderr)
+        sys.exit(1 if CHECKPOINT_MODE else 0)
 
-    archived = archive_transcript(session_jsonl)
+    archived, copied = archive_transcript(session_jsonl)
     if archived is None:
-        # Already up-to-date
+        print(f"[session_end] FAILED — session JSONL vanished during archive: {session_jsonl}",
+              file=sys.stderr)
+        sys.exit(1 if CHECKPOINT_MODE else 0)
+    if not copied and not CHECKPOINT_MODE:
+        # Per-turn / watchdog with an up-to-date archive: genuinely nothing to do.
         return
+    # CHECKPOINT_MODE continues even when the archive was already current —
+    # embedding (transcript vectorize + memory reindex) must still run.
 
     # Embedding (full-transcript vectorize + memory reindex) happens ONLY at
     # /checkpoint (CAIRN_CHECKPOINT_MODE=1). The per-turn Stop hook and the
@@ -431,6 +539,26 @@ def main():
                 f.write("\n".join(log_entry) + "\n")
         except Exception as e:
             print(f"[session_end] Could not write LOG.md entry: {e}", file=sys.stderr)
+
+    # Success summary to stderr — /checkpoint step 7's verification reads this.
+    # Silence on success made real failures indistinguishable from "fine"
+    # (Hearth, #devops 2026-06-10): a checkpoint that embedded 1,161 chunks and
+    # one that crashed both printed nothing.
+    if CHECKPOINT_MODE:
+        elapsed = time.monotonic() - started
+        vec_ok = n_chunks is not None and n_chunks >= 0
+        print(
+            f"[checkpoint] {'OK' if vec_ok else 'DEGRADED'} in {elapsed:.1f}s — "
+            f"archived {archived.name} ({'copied' if copied else 'already current'}); "
+            f"transcript chunks +{n_chunks if vec_ok else 0}"
+            f"{'' if vec_ok else ' (VECTOR STACK UNAVAILABLE — embed did NOT run)'}; "
+            f"memory files re-embedded {mem_files} (+{mem_chunks} chunks); "
+            f"vector health: truncated={trunc}, failed={fail}"
+            + (f", error={vec['error']}" if vec["error"] else ""),
+            file=sys.stderr,
+        )
+        if not vec_ok:
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()
