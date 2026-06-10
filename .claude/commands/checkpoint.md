@@ -116,7 +116,7 @@ Why `CAIRN_CHECKPOINT_MODE=1`: this is the ONLY mode that embeds. The per-turn S
 
 Why `< /dev/null`: the Stop hook normally reads JSON from stdin (session_id + cwd). When invoked manually it falls back to mtime-finding the most recent JSONL in the project dir, which is the right behavior for /checkpoint.
 
-Verify: the script prints `Indexed N new chunks` (or similar) to stderr. If it prints `Vector stack unavailable`, the venv isn't bootstrapped — the checkpoint did NOT fully succeed; surface that to the user before claiming done.
+Verify: the script ALWAYS prints a `[checkpoint] OK …` summary line to stderr on success (archived file, transcript chunks added, memory files re-embedded, vector health, duration) and exits non-zero on failure (`[checkpoint] DEGRADED … VECTOR STACK UNAVAILABLE`, or `[session_end] FAILED — no session JSONL found`). **No output at all = the run failed before reaching the summary** — do NOT claim the checkpoint done; surface it to the user. Optional flags for unusual contexts: `--session-id <uuid>` and `--cwd <project-root>` (by default the script self-locates via its own install root, so running from the wrong directory is no longer a silent no-op).
 
 **This step is never skipped.** Even if steps 2-5 had nothing to confirm, step 7 still runs. /checkpoint without step 7 is not a checkpoint.
 
