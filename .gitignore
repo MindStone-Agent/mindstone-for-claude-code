@@ -42,6 +42,7 @@ build/
 orchestrator/.venv/
 orchestrator/vectors.db
 orchestrator/vectors.db-journal
+orchestrator/.memory-index-state.json
 orchestrator/transcripts/
 # Synapse client config is per-machine (base_url, handle, channels for *this* user).
 # The example templates (*.example.toml) ARE committed; copy them locally.
