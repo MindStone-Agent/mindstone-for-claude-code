@@ -377,6 +377,24 @@ def cmd_deactivate(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _scope_grants(scopes: list[str], want: str) -> bool:
+    """Mirror the server's wildcard scope match (api/auth/dependency.py).
+
+    Segment-wise: each ':'-segment of a granted scope matches if it's '*' or
+    equals the requested segment; 'admin:*' grants everything.
+    """
+    wseg = want.split(":")
+    for granted in scopes:
+        if granted == "admin:*":
+            return True
+        gseg = granted.split(":")
+        if len(gseg) == len(wseg) and all(
+            g == "*" or g == w for g, w in zip(gseg, wseg)
+        ):
+            return True
+    return False
+
+
 def cmd_status(_args: argparse.Namespace) -> int:
     cfg = load_config()
     if cfg is None:
@@ -397,8 +415,26 @@ def cmd_status(_args: argparse.Namespace) -> int:
         try:
             client = SynapseClient(cfg.base_url, token, timeout=cfg.http_timeout)
             me = client.me()
+            scopes = me.get("scopes") or []
             print(f"  reachable      : yes")
             print(f"  authenticated  : {me.get('handle')} ({me.get('kind')})")
+            print(f"  token scopes   : {scopes if scopes else '(none)'}")
+            # Per-channel reachability: scope is derivable from the token, but a
+            # real read probe reflects BOTH gates (membership + scope), so it's
+            # the honest "can I actually use this channel" signal — and the 403
+            # detail tells the operator which gate to fix.
+            print(f"  channels:")
+            for ch in cfg.channels:
+                can_read_scope = _scope_grants(scopes, f"channel:{ch}:read")
+                can_post_scope = _scope_grants(scopes, f"channel:{ch}:post")
+                try:
+                    client.list_messages(ch, limit=1)
+                    reach = "reachable"
+                except SynapseError as e:
+                    reach = f"{e.status} {e.detail}"
+                post = "post" if can_post_scope else "no-post"
+                read = "read" if can_read_scope else "no-read"
+                print(f"    - {ch:<16} {reach}  [scope: {read}/{post}]")
         except SynapseError as e:
             print(f"  reachable      : no ({e})")
     return 0
