@@ -215,14 +215,54 @@ print(s.count())
 " 2>/dev/null || echo "0")
   echo "  OK: vectors.db exists with $existing_count chunks"
 else
-  echo "  Building initial index (this may take a minute)..."
-  if [[ -n "$(ls "$ORCHESTRATOR_DIR/memory"/*.md 2>/dev/null)" ]] && [[ -f "$HOME/.config/openai-api-key" || -n "$OPENAI_API_KEY" ]]; then
-    (cd "$ORCHESTRATOR_DIR/hooks" && "$VENV_DIR/bin/python" indexer.py backfill) || {
-      echo "  WARN: Initial indexing failed. Check your OpenAI API key."
-    }
+  if [[ -z "$(ls "$ORCHESTRATOR_DIR/memory"/*.md 2>/dev/null)" ]]; then
+    echo "  SKIP: no memory files yet. Index will build on first /checkpoint."
   else
-    echo "  SKIP: no memory files yet OR no OPENAI_API_KEY / ~/.config/openai-api-key."
-    echo "        Index will build on first /checkpoint or first Stop hook fire."
+    # Preflight the CONFIGURED embedder before the initial index. The embedder is
+    # LOCAL-FIRST (hooks/embedder.py: Ollama at 127.0.0.1:11434/v1, model
+    # nomic-embed-text; EMBEDDER_BASE_URL / EMBEDDER_MODEL / EMBEDDER_API_KEY
+    # override; OPENAI_API_KEY is consulted ONLY for openai.com endpoints). Probe
+    # with a real 1-chunk embed — proves the endpoint is reachable AND the model is
+    # pulled. A fresh default install needs Ollama + the embed model, NOT an OpenAI
+    # key — the old gate here skipped silently whenever OPENAI_API_KEY was absent.
+    if preflight=$(cd "$ORCHESTRATOR_DIR/hooks" && "$VENV_DIR/bin/python" - <<'PY' 2>&1
+import sys
+sys.path.insert(0, ".")
+from embedder import Embedder
+e = Embedder()
+try:
+    v = e.embed("bootstrap preflight")
+    # embed() degrades to a ZERO VECTOR on failure (and warns on stderr) rather than
+    # raising — so the truthful health signal is a non-zero vector, not "no exception".
+    if not any(v):
+        raise RuntimeError("embedder returned a zero vector (endpoint unreachable or model missing — see warning above)")
+    print(f"{e.base_url} model={e.model}")
+except Exception as exc:
+    print(f"{e.base_url} model={e.model} :: {type(exc).__name__}: {exc}")
+    sys.exit(1)
+PY
+    ); then
+      echo "  Embedder reachable ($preflight). Building initial index (this may take a minute)..."
+      (cd "$ORCHESTRATOR_DIR/hooks" && "$VENV_DIR/bin/python" indexer.py backfill) || {
+        echo "  WARN: Initial indexing failed. The embedder preflight succeeded, so this is"
+        echo "        likely a chunking/db issue, not credentials — inspect the output above,"
+        echo "        then re-run: orchestrator/hooks/indexer.py backfill"
+      }
+    else
+      echo "  ERROR: embedding endpoint NOT usable — initial index NOT built."
+      echo "         $preflight"
+      if [[ "$preflight" == *"127.0.0.1:11434"* ]]; then
+        echo "         The default embedder is LOCAL Ollama — no OpenAI key is involved. Fix:"
+        echo "           1) start Ollama (open the app, or run: ollama serve)"
+        echo "           2) pull the embed model shown above:  ollama pull nomic-embed-text"
+      elif [[ "$preflight" == *"openai.com"* ]]; then
+        echo "         Cloud OpenAI endpoint configured — set OPENAI_API_KEY (or EMBEDDER_API_KEY)."
+      else
+        echo "         Check EMBEDDER_BASE_URL / EMBEDDER_MODEL / EMBEDDER_API_KEY."
+      fi
+      echo "         Then re-run orchestrator/bootstrap.sh — or run /checkpoint inside a session;"
+      echo "         the index builds there too once the embedder is reachable."
+    fi
   fi
 fi
 echo ""

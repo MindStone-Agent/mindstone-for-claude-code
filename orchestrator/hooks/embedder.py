@@ -102,7 +102,7 @@ def scrub(text: str) -> str:
 class Embedder:
     """OpenAI-compatible embedding client.
 
-    Defaults to local Ollama at 127.0.0.1:11434 with mxbai-embed-large.
+    Defaults to local Ollama at 127.0.0.1:11434 with nomic-embed-text.
     Set EMBEDDER_BASE_URL / EMBEDDER_API_KEY / EMBEDDER_MODEL to override.
     """
 
