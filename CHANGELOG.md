@@ -7,6 +7,25 @@ while pre-1.0 (`0.x`), minor versions may include behavior changes.
 
 ## [Unreleased]
 
+### Changed
+- **Session handoff now injects on resume/startup, not just after a compaction**
+  (`orchestrator/hooks/session_start.py`). The pre-boundary handoff
+  (`orchestrator/transcripts/.handoff.md`) is continuity *for the model* — "here is what
+  I was doing" — so it is equally needed after a deliberate fresh relaunch
+  (`source="startup"`) or a `--resume` (`source="resume"`), not only at the compaction
+  cliff (`source="compact"`). It was previously gated to `compact` alone, which silently
+  dropped the handoff on exit→resume and on fresh launches (the session came up with
+  identity + LOG tail but *without* the "first action on resume" pointer). Generalized
+  `post_compact_handoff_block()` → `handoff_block(source)` with source-adaptive framing
+  (compaction: "read this first, the summary is lossy"; startup/resume: "resume if you're
+  continuing this thread, otherwise register where things stood and proceed"); the wrapper
+  tag is renamed `<post-compaction-handoff>` → `<session-handoff>`. `main()` now injects
+  for `source in {compact, resume, startup}`; `clear` is intentionally excluded (a
+  deliberate clean slate). The deferred post-compaction embed (`kick_deferred_embed`) stays
+  **compaction-only** — it recovers the pre-compaction transcript (once the live JSONL is
+  the lossy summary, the archive is the only full copy); on startup/resume the `/checkpoint`
+  path already embedded it, so re-embedding there would be redundant work.
+
 ### Fixed
 - **Post-compaction embed crashed silently** (`orchestrator/hooks/session_start.py`,
   `kick_deferred_embed`) — the "embed after compact" job passed the archive path as a

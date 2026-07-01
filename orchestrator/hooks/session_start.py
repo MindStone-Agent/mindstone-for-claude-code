@@ -97,10 +97,11 @@ IDENTITY_FILE = ORCHESTRATOR_DIR / "IDENTITY.md"
 USER_FILE = ORCHESTRATOR_DIR / "USER.md"
 LOG_FILE = ORCHESTRATOR_DIR / "LOG.md"
 
-# Auto-handoff bridge (Clint's 90% rule, 2026-05-31). When SessionStart fires
-# with source=="compact", we inject the handoff the pre-compaction self wrote so
-# post-compaction-you resumes from it rather than from Claude Code's lossy
-# summary. Path MUST match user_prompt_submit.py's HANDOFF_PATH.
+# Auto-handoff bridge (Clint's 90% rule, 2026-05-31; generalized 2026-07-01).
+# SessionStart injects the handoff the previous self wrote on source in
+# {compact, resume, startup} so continuity survives compaction AND a fresh
+# relaunch/resume — not just the compaction cliff. (Deferred embed stays
+# compact-only.) Path MUST match user_prompt_submit.py's HANDOFF_PATH.
 HANDOFF_PATH = ORCHESTRATOR_DIR / "transcripts" / ".handoff.md"
 
 # ---------------------------------------------------------------------------
@@ -345,23 +346,44 @@ def read_hook_input() -> dict:
         return {}
 
 
-def post_compact_handoff_block() -> str:
-    """When resuming from a compaction, surface the handoff the pre-compaction
-    self wrote (auto-handoff, Clint's 90% rule). Returns "" if none exists."""
+def handoff_block(source: str) -> str:
+    """Surface the handoff the previous session left in .handoff.md so continuity
+    survives ANY context boundary — a compaction, a fresh relaunch (startup), or a
+    --resume. Framing adapts to the source: a compaction produces a lossy summary,
+    so "read this FIRST, it's more complete"; a deliberate (re)launch or resume is
+    not lossy, so "resume from it IF you're continuing this thread, otherwise just
+    register where things stood." Returns "" if no handoff exists.
+
+    Why this fires on startup/resume too (2026-07-01, Clint): the handoff was
+    originally compaction-only, but running in bypassPermissions mode means Clint
+    now relaunches fresh routinely (the flag/default only re-applies on a fresh
+    launch), and he exits+resumes often — both of which are startup/resume, not
+    compact. Gating the handoff to compact alone silently dropped continuity on
+    exactly those paths."""
     try:
         if not HANDOFF_PATH.exists():
             return ""
         content = HANDOFF_PATH.read_text().strip()
         if not content:
             return ""
+        if source == "compact":
+            intro = [
+                "You just compacted. Your pre-compaction self wrote the handoff below so you can resume",
+                "exactly where you left off. Read it FIRST and continue from it — it is more current and",
+                f"more complete than the compaction summary. Full file: `{HANDOFF_PATH}`.",
+            ]
+        else:  # startup / resume — a deliberate (re)launch, not a lossy compaction
+            intro = [
+                "This is the handoff your previous session left behind. If you're continuing that work,",
+                "read it FIRST and resume from it. If you're starting something unrelated, just register",
+                f"where things stood and proceed — don't force it. Full file: `{HANDOFF_PATH}`.",
+            ]
         return "\n".join([
-            '<post-compaction-handoff priority="CRITICAL">',
-            "You just compacted. Your pre-compaction self wrote the handoff below so you can resume",
-            "exactly where you left off. Read it FIRST and continue from it — it is more current and",
-            f"more complete than the compaction summary. Full file: `{HANDOFF_PATH}`.",
+            '<session-handoff priority="CRITICAL">',
+            *intro,
             "",
             content,
-            "</post-compaction-handoff>",
+            "</session-handoff>",
         ])
     except Exception as e:
         print(f"[session_start] handoff read failed ({e})", file=sys.stderr)
@@ -454,14 +476,22 @@ def main():
     # Wrap in a clear tag so the model sees this as orchestrator context.
     wrapped = f"<orchestrator-context>\n{context}\n</orchestrator-context>"
 
-    # Post-compaction: prepend the handoff the pre-compaction self wrote so we
-    # resume from it rather than from Claude Code's lossy summary.
-    if source == "compact":
-        handoff = post_compact_handoff_block()
+    # Prepend the previous session's handoff so continuity survives the context
+    # boundary — whether that's a compaction (lossy summary), a fresh relaunch
+    # (startup), or a --resume. All three benefit from the pre-boundary self's
+    # "first action on resume" pointer; only the framing differs (see handoff_block).
+    # `clear` is intentionally excluded: /clear means "give me a clean slate."
+    if source in ("compact", "resume", "startup"):
+        handoff = handoff_block(source)
         if handoff:
             wrapped = handoff + "\n\n" + wrapped
-        # Deferred "embed after compact": vectorize the archived pre-compaction
-        # transcript in the background now, off the critical path.
+
+    # Deferred "embed after compact" stays COMPACT-ONLY: it re-embeds the archived
+    # pre-compaction transcript (post-compaction the live JSONL is the lossy summary,
+    # so the archive is the only full copy). On startup/resume the normal
+    # /checkpoint + session_end path owns embedding, so kicking it here would be
+    # redundant work on the critical path.
+    if source == "compact":
         kick_deferred_embed()
 
     # Emit in Claude Code's hook output format.
