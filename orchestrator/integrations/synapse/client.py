@@ -150,7 +150,10 @@ class SynapseClient:
     # --- API surface ------------------------------------------------
 
     def me(self) -> dict[str, Any]:
-        return self._request("GET", "/v1/auth/me")
+        data = self._request("GET", "/v1/auth/me")
+        if not isinstance(data, dict):
+            raise SynapseError(0, "auth/me returned an empty or non-object body")
+        return data
 
     def list_channels(self) -> list[dict[str, Any]]:
         data = self._request("GET", "/v1/channels")
