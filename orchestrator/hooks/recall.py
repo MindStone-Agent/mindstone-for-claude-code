@@ -93,3 +93,25 @@ if __name__ == "__main__":
         mmr_lambda=args.mmr_lambda,
     )
     print(format_results(results))
+
+    # Usage logging (manual path) — MS4CC #63. The CLI stays RAW-ranked (Clint's
+    # 2026-06-10 ruling that experiential weighting is auto-recall-only); we log it
+    # only so manual search is comparable to the auto per-turn path. This runs on the
+    # CLI entry point ONLY — the library recall() used by /checkpoint stays silent, so
+    # judgment queries don't pollute the usage signal. Fail-open.
+    try:
+        import recall_usage
+        recall_usage.log("manual", args.query, [
+            {
+                "source_type": r.get("source_type"),
+                "source_path": r.get("source_path"),
+                "chunk_id": r.get("chunk_id"),
+                "similarity": r.get("similarity"),
+                "rank": i,
+                "authority_factor": None,
+                "injected": True,
+            }
+            for i, r in enumerate(results)
+        ])
+    except Exception:
+        pass

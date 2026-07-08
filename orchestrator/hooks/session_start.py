@@ -27,6 +27,14 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Canonical authority base (log1p(hits) + 3*prevented) lives in memory_weight.py so
+# every substrate shares ONE hardened formula. Guarded: if the import fails we fall
+# back to a safe inline copy in weight(), so session start never hard-depends on it.
+try:
+    from memory_weight import base as _authority_base
+except Exception:
+    _authority_base = None
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -146,19 +154,41 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
 # Weighting
 # ---------------------------------------------------------------------------
 
+def _safe_num(v):
+    """Finite-float coercion for the inline weight() fallback (mirrors memory_weight._num)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return f if math.isfinite(f) else 0.0
+
+
 def weight(fm: dict, now: datetime, active_projects: set) -> float:
     """Compute injection-ranking weight for a memory.
 
     Infinity for critical/evergreen (always inject up to budget).
-    Otherwise: (hits + 3*prevented + 1) * exp(-age/half_life), boosted if
+    Otherwise: (log1p(hits) + 3*prevented + 1) * exp(-age/half_life), boosted if
     the memory's `projects` field matches the CWD-inferred project.
     """
     if fm.get("critical") or fm.get("evergreen"):
         return float("inf")
 
-    hits = fm.get("hits", 0) or 0
-    prevented = fm.get("prevented", 0) or 0
-    base = hits + 3 * prevented + 1
+    # Authority-forward base: `hits` is an age-odometer (accumulates with a memory's
+    # presence, not its usefulness), so it enters ranking only as log1p — dampened so
+    # the human-confirmed `prevented` signal isn't numerically swamped (MS4CC #63).
+    # Prefer the shared canonical formula (memory_weight.base); fall back to a safe
+    # inline copy. BOTH clamp hits/prevented >=0 and coerce garbage/inf to finite, so a
+    # corrupt frontmatter value can never crash this SessionStart critical path
+    # (log1p domain error / overflow). Wrapped so it degrades to recency-only, never raises.
+    try:
+        if _authority_base is not None:
+            base = _authority_base(fm) + 1.0
+        else:
+            hits = max(0.0, _safe_num(fm.get("hits")))
+            prevented = max(0.0, _safe_num(fm.get("prevented")))
+            base = math.log1p(hits) + 3 * prevented + 1.0
+    except Exception:
+        base = 1.0
 
     last_applied = fm.get("last_applied")
     created = fm.get("created")
@@ -173,7 +203,13 @@ def weight(fm: dict, now: datetime, active_projects: set) -> float:
         except Exception:
             age_days = 0.0
 
-    half_life = fm.get("half_life_days", 30) or 30
+    # Clamp half-life to a positive value: a corrupt non-positive half_life_days would
+    # flip the exponent positive and blow decay up to ~10^100+ (or OverflowError at
+    # extreme age), letting one bad frontmatter value dominate the whole ranking.
+    # Mirrors memory_weight.decay() — keep the two in sync.
+    half_life = _safe_num(fm.get("half_life_days")) or 30
+    if half_life <= 0:
+        half_life = 30
     decay = math.exp(-age_days / half_life)
 
     w = base * decay
@@ -256,12 +292,20 @@ def assemble_context(active_projects: set) -> str:
         parts.append("\n".join(lines))
 
     # --- Weighted project memories (top-N) ---
-    ranked = [
-        (path, fm, weight(fm, now, active_projects))
-        for path, fm in rankable
-    ]
-    ranked.sort(key=lambda t: t[2], reverse=True)
-    selected = ranked[:TOP_N_PROJECT_MEMORIES]
+    # Belt-and-suspenders: weight() is itself crash-proof now, but the whole ranking is
+    # still wrapped so any unforeseen raise degrades to "skip the weighted section"
+    # (identity/critical/evergreen/index/log still inject) rather than aborting the
+    # entire SessionStart context.
+    try:
+        ranked = [
+            (path, fm, weight(fm, now, active_projects))
+            for path, fm in rankable
+        ]
+        ranked.sort(key=lambda t: t[2], reverse=True)
+        selected = ranked[:TOP_N_PROJECT_MEMORIES]
+    except Exception as e:
+        print(f"[session_start] weighted-memory ranking skipped ({e})", file=sys.stderr)
+        selected = []
 
     if selected:
         lines = ["## CONTEXT MEMORIES (weighted for current CWD)"]

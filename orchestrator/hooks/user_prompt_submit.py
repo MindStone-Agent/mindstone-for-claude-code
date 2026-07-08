@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 HOOK_FILE = Path(__file__).resolve()
@@ -36,6 +37,11 @@ MIN_SIMILARITY = 0.30
 
 # Per-chunk display budget (chars) — keep context lean
 MAX_CHARS_PER_CHUNK = 800
+
+# Authority re-rank candidate pool (MS4CC #63). Retrieve WIDER than we inject so a
+# high-`prevented` memory can earn its way INTO the top-K, not just reorder within
+# an already-chosen set. Final injection stays capped at TOP_K_MEMORY.
+CANDIDATE_K_MEMORY = 12
 
 # ---------------------------------------------------------------------------
 # Intra-session archive watchdog
@@ -110,6 +116,21 @@ def truncate(text: str, n: int) -> str:
     if len(text) <= n:
         return text
     return text[:n] + "..."
+
+
+def _frontmatter_for(path_str, parser):
+    """Read + parse a memory file's frontmatter for authority scoring.
+
+    Returns {} on any error so the caller's authority_factor falls back to a neutral
+    score rather than raising — recall must never break on a malformed memory file.
+    """
+    try:
+        if not path_str:
+            return {}
+        fm, _ = parser(Path(path_str).read_text())
+        return fm or {}
+    except Exception:
+        return {}
 
 # ---------------------------------------------------------------------------
 # Watchdog
@@ -376,10 +397,29 @@ def main():
         print(f"[user_prompt_submit] recall unavailable ({e})", file=sys.stderr)
         return
 
+    # Optional authority re-rank + usage logging (MS4CC #63). Both are strictly
+    # additive and FAIL-OPEN: any import/parse error below leaves per-turn recall at
+    # exactly its prior raw-similarity behavior. This hook runs every turn, so nothing
+    # here may raise past its own guard.
     try:
-        memory_results = recall(
+        from memory_weight import authority_factor
+        from session_start import parse_frontmatter
+    except Exception as e:
+        print(f"[user_prompt_submit] authority re-rank unavailable ({e})", file=sys.stderr)
+        authority_factor = None
+        parse_frontmatter = None
+    try:
+        import recall_usage
+    except Exception:
+        recall_usage = None
+
+    # Retrieve a WIDER memory candidate pool than we inject, so authority can pull a
+    # high-`prevented` memory INTO the top-K rather than only reordering an already-
+    # chosen set. Transcript hits carry no frontmatter, so they stay pure-similarity.
+    try:
+        memory_candidates = recall(
             prompt,
-            k=TOP_K_MEMORY,
+            k=CANDIDATE_K_MEMORY,
             source_types=["memory"],
             mmr=True,
             mmr_lambda=MMR_LAMBDA,
@@ -387,7 +427,7 @@ def main():
         )
     except Exception as e:
         print(f"[user_prompt_submit] memory recall failed ({e})", file=sys.stderr)
-        memory_results = []
+        memory_candidates = []
 
     try:
         transcript_results = recall(
@@ -402,9 +442,65 @@ def main():
         print(f"[user_prompt_submit] transcript recall failed ({e})", file=sys.stderr)
         transcript_results = []
 
-    # Filter by similarity threshold
-    memory_results = [r for r in memory_results if r["similarity"] >= MIN_SIMILARITY]
-    transcript_results = [r for r in transcript_results if r["similarity"] >= MIN_SIMILARITY]
+    # Similarity gate FIRST (relevance is non-negotiable), THEN authority re-rank —
+    # so authority can only reorder among already-relevant hits, never surface noise.
+    # .get guards against a malformed store row missing the key (defense-in-depth).
+    memory_candidates = [r for r in memory_candidates if r.get("similarity", 0.0) >= MIN_SIMILARITY]
+    transcript_results = [r for r in transcript_results if r.get("similarity", 0.0) >= MIN_SIMILARITY]
+
+    # Authority re-rank (auto path only; the CLI/library recall() stays raw per Clint's
+    # 2026-06-10 ruling). Sort survivors by similarity * authority_factor, keep top-K.
+    # Fail-open: on ANY error, fall back to raw order — the first TOP_K_MEMORY of the
+    # mmr-ordered pool. (Not byte-identical to the old k=TOP_K_MEMORY call: widening the
+    # candidate K enlarges vectorstore's MMR neighborhood (candidates_k = k*3), so
+    # diversity selection shifts slightly. Still relevant + diversified — no regression.)
+    if authority_factor and parse_frontmatter and memory_candidates:
+        try:
+            now = datetime.now(tz=timezone.utc)
+            for r in memory_candidates:
+                fm = _frontmatter_for(r.get("source_path"), parse_frontmatter)
+                r["_authority"] = authority_factor(fm, now)
+            memory_candidates.sort(
+                key=lambda r: r["similarity"] * r.get("_authority", 1.0),
+                reverse=True,
+            )
+        except Exception as e:
+            print(f"[user_prompt_submit] authority re-rank failed, using raw order ({e})", file=sys.stderr)
+    memory_results = memory_candidates[:TOP_K_MEMORY]
+
+    # Usage logging (mirrored in recall.py's CLI). Logging != weighting: it only
+    # records what recall did, so we can finally measure memory-vs-transcript-vs-manual
+    # value. Fail-open — a logging fault must never block the turn.
+    if recall_usage is not None:
+        try:
+            injected_ids = {id(r) for r in memory_results}
+            records = [
+                {
+                    "source_type": r.get("source_type"),
+                    "source_path": r.get("source_path"),
+                    "chunk_id": r.get("chunk_id"),
+                    "similarity": r.get("similarity"),
+                    "rank": i,
+                    "authority_factor": r.get("_authority"),
+                    "injected": id(r) in injected_ids,
+                }
+                for i, r in enumerate(memory_candidates)
+            ]
+            records += [
+                {
+                    "source_type": r.get("source_type"),
+                    "source_path": r.get("source_path"),
+                    "chunk_id": r.get("chunk_id"),
+                    "similarity": r.get("similarity"),
+                    "rank": i,
+                    "authority_factor": None,
+                    "injected": True,  # all surviving transcript hits get rendered
+                }
+                for i, r in enumerate(transcript_results)
+            ]
+            recall_usage.log("auto", prompt, records)
+        except Exception as e:
+            print(f"[user_prompt_submit] usage log failed ({e})", file=sys.stderr)
 
     if not memory_results and not transcript_results:
         return  # Nothing relevant enough to surface
