@@ -143,6 +143,59 @@ When no `orchestrator/IDENTITY.md` exists (fresh clone, or user declined onboard
 
 Users can switch to persistent-identity mode at any time by following `onboarding/IDENTITY.md.example`.
 
+## Engineering discipline
+
+Universal, always-on rules for any agent running this framework. These are behavioral canon — not left to probabilistic recall. They bind the orchestrator AND any subagent doing the work; include the relevant ones in delegation prompts, the way the ticket-fidelity gates below are.
+
+### Verification & honesty
+
+- **No assumptions.** Never present an unverified assumption as a finding. Read the actual code or run the actual check first.
+- **Show the green run.** "Done / deployed / fixed" means the exact artifact the user checks is verified the way *they* verify it — not indirect proof (curl, logs, digests).
+- **Artifact-present ≠ feature-works.** Never claim done/shipped/testable, or advance a board status, on the strength of what you produced (code committed, assets parse, tests green, symbols verified). Only on the feature running end-to-end the way the user exercises it. When you can't verify end-to-end, name the exact gap and leave the status for the user to advance.
+- **Prove the tooling ran.** Gate on real exit codes, not empty error output (a missing binary exits non-zero with no errors = a false pass). Reproduce; don't reason from static cross-branch reads.
+- **Debug from on-box evidence first.** Read the logs before theorizing; never ship a guess-fix when a log can name the culprit.
+- **No fix without a repro.** When a bug report lacks a reproduction or symptom, get one before designing a fix.
+- **Frontend: read the console before UAT.** Load the page in a real browser and check the console — key errors, 404s, hydration warnings don't show in `tsc`/lint/unit.
+- **Expensive builds: verify end-to-end before you trigger one.** Confirm field names, types, and data flow yourself before saying "fixed, rebuild."
+
+### Adversarial QA (mandatory for critical outcomes)
+
+Before critical work is declared done — deploys, customer-facing changes, data migrations, security-adjacent code, anything a stakeholder will UAT — an **independent agent context** runs adversarial verification:
+
+- Brief it to **refute, not confirm**: try to break the work; report ranked CONFIRMED findings with `file:line` + a concrete failure scenario; "nothing real found" is a valid outcome.
+- **Self-review does not satisfy this gate, regardless of model tier** — the author carries the reasoning that produced the bug, and green tests are not evidence for paths the suite doesn't cover.
+- Confirmed defects **block the ship**; residuals are ticketed with owners.
+- Record the QA outcome in the ship receipt (commit / PR / board comment) — the gate is auditable, not vibes.
+
+### Recon & thoroughness
+
+- **Recon before pickup.** Tickets carry stale "we don't have X" framings; a short recon pass before building catches inaccurate premises and already-shipped work.
+- **Two ticket-fidelity gates.** (1) After planning, before coding: confirm the plan matches *exactly* what the ticket asks. (2) After coding, before committing: diff against the ticket point-by-point.
+- **Fix every code path.** Search for every path that touches the same data, not just the first found — and across all layers (core / extensions / plugins / hooks) before concluding a feature is absent.
+- **Audit before multi-subsystem fixes.** When a fix-cluster spans coupled subsystems, audit the whole before shipping symptom fixes.
+- **Fixtures are load-bearing.** When a refactor removes a value used as a fixture, identify the constraint it satisfied before replacing it.
+
+### Shipping discipline
+
+- **Completed ≠ shipped until deployed.** A finished feature that isn't deployed is a blocker, not a post-launch extra.
+- **Docs ship in the same change.** Every ship includes a documentation check + update — not a follow-up.
+- **Changelog every release.** Keep a `CHANGELOG.md` (Keep a Changelog + SemVer), updated every release.
+- **Write the fix, open the PR.** If you authored the fix, you open the PR — including to canon and teammates' repos. Don't route it to someone else to recreate.
+
+### Git & multi-agent safety
+
+- **Never `git add -A` in a shared clone.** Multiple agents share the checkout; stage explicit paths only.
+- **Subagents never commit / push / PR / comment.** They report back; the orchestrator is the sole committer, so one chokepoint enforces every attribution and voice rule.
+- **No destructive git near uncommitted work.** `stash` / `reset` / `rebase` / `checkout` can destroy uncommitted work (e.g. editor state that was never committed). Confirm with the user first.
+- **Never enable `core.fsmonitor` / `untrackedCache`.** They can corrupt the index.
+- **Never push to an auto-deploy-prod `main` without explicit, in-the-moment permission.**
+- **Claim-stake before starting shared tickets.** On a multi-agent team, ping the channel before picking up a ticket another agent could grab.
+
+### Method & orchestration
+
+- **Do implementation yourself by default; delegate only for parallelism, isolation, or scale.** The orchestrator holds full context; a subagent gets only the slice you hand it.
+- **Scope the toolset at build start.** Explicitly decide which harness tools the task warrants (PRD, design/impl plan, personas, security scan, subagents) — don't default into bare direct-implementation.
+
 ## Onboarding flow
 
 A fresh clone with no `orchestrator/IDENTITY.md` triggers first-run onboarding from the SessionStart hook. The hook detects the missing identity file and emits an invitation pointing the new orchestrator at `onboarding/IDENTITY.md.example`. The new orchestrator chooses a name, adopts the framing (which is fixed: role, canonicals adherence, destructive-action confirmation, hybrid delegation), and writes their own first-person `IDENTITY.md`. They then walk through `USER.md.example` with the user to author `USER.md`. Re-running `bootstrap.sh` creates the user-level symlinks and the new orchestrator is alive.
