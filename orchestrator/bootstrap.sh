@@ -175,16 +175,18 @@ else
 
   if [[ -f "$SETTINGS_FILE" ]]; then
     cp "$SETTINGS_FILE" "${SETTINGS_FILE}.backup.$(date +%s)"
-    # Overwrite `hooks` entirely (prevents duplicate hook entries across re-runs),
-    # set autoCompactEnabled from the fragment, and deep-merge env (fragment wins).
-    # autoCompactEnabled=true + CLAUDE_AUTOCOMPACT_PCT_OVERRIDE are part of the
-    # MS4CC compaction-handoff design — harness auto-compact is the backstop,
+    # Merge hooks PER-EVENT (orchestrator/lib/merge-settings.jq): re-add the
+    # MS4CC-managed entries (command path under $ORCHESTRATOR_DIR) fresh from the
+    # fragment so re-runs stay idempotent and don't stack duplicates, while
+    # PRESERVING any hook the operator added on top of the framework. The old
+    # `.hooks = $frag[0].hooks` overwrite dropped those foreign hooks (#68).
+    # Also set autoCompactEnabled from the fragment and deep-merge env (fragment
+    # wins). autoCompactEnabled=true + CLAUDE_AUTOCOMPACT_PCT_OVERRIDE are part of
+    # the MS4CC compaction-handoff design — harness auto-compact is the backstop,
     # PreCompact is the handoff floor. MS4CC (Claude Code) substrate only, NOT
     # MindStone-proper (its no-compaction rule does not apply). See docs/scri-38-cc-*.md.
-    jq --slurpfile frag "$TEMP_FRAGMENT" \
-       '.hooks = $frag[0].hooks
-        | (if $frag[0].autoCompactEnabled != null then .autoCompactEnabled = $frag[0].autoCompactEnabled else . end)
-        | .env = ((.env // {}) + ($frag[0].env // {}))' \
+    jq --arg orch "$ORCHESTRATOR_DIR" --slurpfile frag "$TEMP_FRAGMENT" \
+       -f "$ORCHESTRATOR_DIR/lib/merge-settings.jq" \
        "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp"
     mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
     echo "  MERGED: $FRAGMENT_FILE → $SETTINGS_FILE"
