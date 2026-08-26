@@ -37,6 +37,8 @@ Every memory file uses this frontmatter schema:
 ---
 name: unique_name
 description: one-line description
+invariant: >               # REQUIRED when critical: true — see below
+  The binding rule, stated so it can be obeyed without the story behind it.
 type: feedback | project | reference | design | identity | user | log | index | roadmap | lineage
 tags: [auto-inferred, optional]
 projects: [auto-inferred, optional]
@@ -45,10 +47,32 @@ prevented: 0               # Option D confirmations of mistake-prevented citatio
 last_applied: null         # ISO date of most recent citation
 created: YYYY-MM-DD
 half_life_days: 30         # decay parameter
-critical: false            # if true, full content always injected at SessionStart
+critical: false            # if true, the invariant is always injected at SessionStart
 evergreen: false           # if true, never decays regardless of age
 ---
 ```
+
+### `invariant:` — the binding rule, separated from the story
+
+Most memory files are one or two binding sentences followed by the incident that
+earned them. Those are different things with different lifetimes and different
+consumers, and only the first has to be in context at all times.
+
+**Required whenever `critical: true`.** Write it so the rule can be obeyed by
+someone who has never read the narrative — no "as we saw", no pronouns pointing
+at the incident, no trailing colon introducing a block that will not be injected.
+
+**Authored, never extracted.** A heuristic that infers the rule from prose cannot
+be graded on its tail: any predicate you write to detect a bad extraction is the
+same predicate the extractor optimises against, so the residue is invisible by
+construction. An explicit field is the only version whose failures are countable —
+either it is there or it is not, and the harness can say which. (Measured across
+51 criticals: "first prose paragraph" left the rule *provably absent* in 10 of
+them, most ending in a dangling colon.)
+
+**Nothing is deleted or summarised away.** The file keeps every byte, stays
+vectorised, stays retrievable. What changes is only what is pushed into context
+unconditionally at session start.
 
 Weight function (used for ranking non-critical memories at SessionStart):
 
@@ -56,7 +80,8 @@ Weight function (used for ranking non-critical memories at SessionStart):
 weight = (hits + 3·prevented + 1) · exp(-age_days / half_life_days)
 ```
 
-- `critical: true` bypasses the weight — full content always injected.
+- `critical: true` bypasses the weight — the invariant is always injected, and the
+  full body is admitted only if budget remains after the constitution and index.
 - `evergreen: true` never decays.
 - For all others, the Stop hook auto-increments `hits` based on filename mentions in the session transcript; `prevented` is incremented manually at `/checkpoint` (Option D — user confirms which memories actually prevented a mistake).
 
