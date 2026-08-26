@@ -116,6 +116,43 @@ HANDOFF_PATH = ORCHESTRATOR_DIR / "transcripts" / ".handoff.md"
 # Frontmatter parsing (kept minimal — mirrors migrate_frontmatter.py)
 # ---------------------------------------------------------------------------
 
+# Nested mapping keys whose children are lifted into the flat namespace.
+# Two frontmatter schemas are in circulation: flat (`critical: true` at column 0)
+# and nested (`metadata:` / `  critical: true`). This parser is line-based and
+# anchors keys at column 0, so before the lift it skipped every indented line and
+# recorded `metadata` as None -- silently discarding `critical`, `evergreen`,
+# `type`, `tags` and `projects` for any file written in the nested schema.
+#
+# Measured 2026-08-26 before the fix: 63 of 291 memory files used the nested
+# schema, and FOUR of them declared `critical: true` while never being injected --
+# including `feedback_mandatory_adversarial_qa` (the rule making independent
+# adversarial QA mandatory) and `user_clint_divorce_2026-07`. MEMORY.md listed
+# them under "always injected", so the index asserted a delivery that was not
+# happening and nothing distinguished the two cases from the outside.
+_LIFTED_NESTED_KEYS = ("metadata",)
+
+
+def _coerce_scalar(val: str):
+    """YAML-ish scalar coercion, shared by the flat and nested paths."""
+    if val == "":
+        return None
+    low = val.lower()
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    if low in ("null", "~"):
+        return None
+    if re.match(r"^-?\d+$", val):
+        return int(val)
+    if val.startswith("[") and val.endswith("]"):
+        inner = val[1:-1].strip()
+        return [s.strip().strip('"').strip("'") for s in inner.split(",")] if inner else []
+    if val.startswith('"') and val.endswith('"'):
+        return val[1:-1]
+    return val
+
+
 def parse_frontmatter(text: str) -> tuple[dict, str]:
     if not text.startswith("---\n"):
         return {}, text
@@ -123,31 +160,52 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     if not m:
         return {}, text
     block, body = m.group(1), m.group(2)
-    fm = {}
+    fm: dict = {}
+    nested: dict[str, dict] = {}
+    current_nested: str | None = None
+
     for line in block.split("\n"):
         if not line.strip():
             continue
+        indented = line[:1].isspace()
+
+        if indented:
+            # Child of the most recent empty-valued top-level key.
+            if current_nested is None:
+                continue
+            km = re.match(r"^\s+([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$", line)
+            if not km:
+                continue
+            nested[current_nested][km.group(1)] = _coerce_scalar(km.group(2).strip())
+            continue
+
         km = re.match(r"^([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$", line)
         if not km:
+            current_nested = None
             continue
         key, val = km.group(1), km.group(2).strip()
+        fm[key] = _coerce_scalar(val)
+        # An empty value opens a candidate nested block (`metadata:`), which the
+        # next indented lines fill. A non-empty value closes any open block.
         if val == "":
-            fm[key] = None
-        elif val.lower() == "true":
-            fm[key] = True
-        elif val.lower() == "false":
-            fm[key] = False
-        elif val.lower() in ("null", "~"):
-            fm[key] = None
-        elif re.match(r"^-?\d+$", val):
-            fm[key] = int(val)
-        elif val.startswith("[") and val.endswith("]"):
-            inner = val[1:-1].strip()
-            fm[key] = [s.strip().strip('"').strip("'") for s in inner.split(",")] if inner else []
-        elif val.startswith('"') and val.endswith('"'):
-            fm[key] = val[1:-1]
+            current_nested = key
+            nested.setdefault(key, {})
         else:
-            fm[key] = val
+            current_nested = None
+
+    # Lift nested children into the flat namespace. A top-level key always wins:
+    # an explicit `critical: false` at column 0 is not overridden by a nested
+    # `critical: true`. The nested dict is preserved under its own key so any
+    # caller that wants the structure still has it.
+    for container in _LIFTED_NESTED_KEYS:
+        children = nested.get(container)
+        if not children:
+            continue
+        fm[container] = dict(children)
+        for k, v in children.items():
+            if fm.get(k) is None:
+                fm[k] = v
+
     return fm, body
 
 # ---------------------------------------------------------------------------
@@ -335,7 +393,61 @@ def assemble_context(active_projects: set) -> str:
     if len(joined) > TOKEN_BUDGET_CHARS:
         # Truncation strategy: keep identity + user + critical intact; trim log/weighted memories.
         # Simple approach: truncate the tail.
-        joined = joined[:TOKEN_BUDGET_CHARS] + "\n\n[…truncated for token budget…]"
+        #
+        # NOTE (2026-08-26): the comment above states an INTENTION the code does not
+        # implement. Sections are concatenated before clipping, so the tail clip cuts
+        # whatever was assembled last, regardless of tier. Measured on this date:
+        # 8 of 50 critical memories survived; the "## CRITICAL RULES" header did not
+        # begin until char 37,919 of the 50,000-char budget.
+        #
+        # This is a SIZING problem more than a clipping one. Full critical bodies now
+        # total ~185,000 chars against a 50,000-char budget, and MEMORY.md alone is
+        # ~112,000. Reordering by tier does not make that fit; it only changes which
+        # 27% survives, and choosing that tradeoff (pointer-inject past a threshold?
+        # demote some criticals? split MEMORY.md?) is a design decision for the
+        # framework owner, not something to settle inside a truncation branch.
+        #
+        # What IS fixed here: the loss is now ANNOUNCED. A silent cap reads exactly
+        # like "everything was included", which is the defect class this codebase has
+        # been bitten by repeatedly. See docs/testing/VERIFICATION_STANDARDS.md §4.1.
+        over = len(joined) - TOKEN_BUDGET_CHARS
+        total_critical = sum(1 for _p, _fm, _b in memories if _fm.get("critical"))
+        joined = joined[:TOKEN_BUDGET_CHARS]
+        # Count AFTER the clip. Counting before it reports every critical memory as
+        # loaded while most were cut -- a false number inside the very message whose
+        # job is to prevent a false reading.
+        # A heading survives the clip even when its BODY was cut, so counting
+        # headings overstates by one exactly when the clip lands mid-memory.
+        # Sections are joined by SEP, so a section is whole iff its terminating
+        # separator is still present after the clip; anything past the last
+        # separator is a fragment that renders with a heading and simply stops —
+        # which reads as complete and is worse than being plainly absent.
+        #
+        # This deliberately UNDERCOUNTS by one when the clip lands exactly on a
+        # boundary (the separator has not started yet, so a whole section reads
+        # as a fragment). In a notice whose job is to stop a false reading,
+        # understating what loaded is the safe direction to be wrong in.
+        _sep = "\n\n---\n\n"
+        _last = joined.rfind(_sep)
+        rendered = joined[:_last].count("\n### `") if _last != -1 else 0
+        partial = joined.count("\n### `") - rendered
+
+        _partial_note = (
+            f" One more was cut MID-BODY and stops without warning — treat it as unread."
+            if partial > 0 else ""
+        )
+        joined += (
+            f"\n\n[…truncated for token budget: {over:,} chars cut. "
+            f"{rendered} of {total_critical} critical memories were loaded in full — "
+            f"the rest were NOT.{_partial_note} "
+            f"Read them from orchestrator/memory/ if the work touches them.]"
+        )
+        print(
+            f"[session_start] BUDGET: {over:,} chars over the {TOKEN_BUDGET_CHARS:,}-char "
+            f"budget; {rendered}/{total_critical} critical memories loaded in full, "
+            f"{partial} truncated mid-body, remainder cut.",
+            file=sys.stderr,
+        )
     return joined
 
 def first_run_invitation() -> str:
