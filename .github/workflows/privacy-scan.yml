@@ -1,0 +1,55 @@
+name: privacy-scan
+
+# Blocks operator-private data from reaching a tracked file.
+#
+# This repository had no CI at all when a memory index was committed to it. The
+# absence of CI was not the cause, but it was the reason nothing objected. A scan
+# that runs on every push and PR is the cheapest control that does not depend on
+# someone reading `git status` carefully at the end of a long session.
+#
+# The job runs the scanner's --self-test FIRST. A scanner that cannot demonstrate a
+# detection is indistinguishable from a broken one, and "no findings" from a broken
+# scanner is the most dangerous output in this repo's history.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: a file can be clean at HEAD and present in an earlier
+          # commit on the same branch.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Prove the detectors fire (self-test)
+        run: python3 orchestrator/runbooks/privacy_scan.py --self-test
+
+      - name: Scan tracked files
+        run: python3 orchestrator/runbooks/privacy_scan.py
+
+      - name: Assert no operator memory is tracked
+        # Belt and suspenders: the scanner covers this, but an explicit standalone
+        # assertion means a future refactor of the scanner cannot silently drop the
+        # one check that maps to the incident this workflow exists for.
+        run: |
+          set -euo pipefail
+          tracked=$(git ls-files 'orchestrator/memory/' | grep -v -E '(\.gitkeep|README\.md)$' || true)
+          if [ -n "$tracked" ]; then
+            echo "::error::Operator memory files are tracked. They must never be."
+            echo "$tracked"
+            exit 1
+          fi
+          echo "OK — no tracked files under orchestrator/memory/"
