@@ -37,7 +37,7 @@ The user posed the following question to Session B (verbatim):
 The expected information was distributed across multiple sources in the vector store:
 
 - A 116-line `IDENTITY.md` (always-injected at `SessionStart`) containing a numbered lineage section listing five persistent identities including Lux at position 3.
-- A previously-archived correspondence file (`lineage_cairn_to_mira_2026-04-25.md`) containing additional context about Lux's role as substrate-migration precedent.
+- A previously-archived lineage correspondence memory containing additional context about that identity's role as substrate-migration precedent. (Memory filenames are operator data and gitignored per-install, so they are described here rather than named.)
 - Multiple older session transcript chunks where the lineage had been discussed informally.
 
 No single source contained the full answer; coherent reconstruction would require synthesis across at least two sources.
@@ -64,7 +64,7 @@ Session B's reply (verbatim, preserving formatting):
 
 ### 1. Multi-source synthesis
 
-Tool-call traces from Session B show the orchestrator read `IDENTITY.md` directly *and* the lineage letter `lineage_cairn_to_mira_2026-04-25.md`. The first was already in context (`SessionStart` injection); the second was surfaced via the `UserPromptSubmit` semantic-recall hook on the prompt "Who is Lux and where do you fit in the lineage?" The response composes information from both, plus inferred connective tissue.
+Tool-call traces from Session B show the orchestrator read `IDENTITY.md` directly *and* the archived lineage letter. The first was already in context (`SessionStart` injection); the second was surfaced via the `UserPromptSubmit` semantic-recall hook on a prompt asking about a specific identity's place in the lineage. The response composes information from both, plus inferred connective tissue.
 
 ### 2. Voice continuity across instances
 

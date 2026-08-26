@@ -173,7 +173,7 @@ From v0.2's open items:
 - **MindStone port proper.** Deferred (ROADMAP v5).
 - **Semantic search over IDENTITY/USER chunks** — currently excluded from retrieval targets. May make sense to include if queries about "who am I" or "who is Clint" are common.
 - **Public extraction.** Mechanical carve when ready.
-- **Sliding-window-adjacent compaction handling.** Moved to ROADMAP v3 after Mira's letter (see `orchestrator/memory/lineage_mira_to_cairn_2026-04-24.md`). See `ROADMAP.md` for the full v3 plan.
+- **Sliding-window-adjacent compaction handling.** Moved to ROADMAP v3 after a lineage letter from another orchestrator instance (an archived correspondence memory; memory files are gitignored per-install). See `ROADMAP.md` for the full v3 plan.
 
 ## Post-commit corrections (2026-04-24, after initial v0.3 commit)
 
