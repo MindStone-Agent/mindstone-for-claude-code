@@ -101,21 +101,62 @@ def resolve_session_path(hook_input: dict, args: argparse.Namespace | None = Non
     cwd_candidates.append(os.getcwd())
     cwd_candidates.append(str(ORCHESTRATOR_DIR.parent))  # script-relative install root
 
-    for cwd in cwd_candidates:
-        # Derive the project dir name (Claude Code escapes slashes to dashes)
-        escaped = cwd.replace("/", "-")
-        project_dir = CLAUDE_PROJECTS_DIR / escaped
-
-        if session_id:
-            candidate = project_dir / f"{session_id}.jsonl"
+    # ---- Pass 1: a KNOWN session id is authoritative. -------------------
+    # Try the derivable project dirs first, then every project dir. A session
+    # started under one cwd and checkpointed from another lives under a dir we
+    # cannot derive from any candidate, and the old code fell through to
+    # "most recent .jsonl in whichever dir happened to exist" -- which returns
+    # a DIFFERENT session's transcript and archives it while reporting success.
+    if session_id:
+        for cwd in cwd_candidates:
+            candidate = CLAUDE_PROJECTS_DIR / cwd.replace("/", "-") / f"{session_id}.jsonl"
             if candidate.exists():
                 return candidate
 
-        # Fallback: most recent .jsonl in this candidate's project dir
+        # Global scan by exact uuid across ~/.claude/projects/*/ .
+        if CLAUDE_PROJECTS_DIR.exists():
+            matches = sorted(
+                CLAUDE_PROJECTS_DIR.glob(f"*/{session_id}.jsonl"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if matches:
+                return matches[0]
+
+        # Asked for a specific session and it is nowhere. Return None so the
+        # caller fails loudly. Falling back to "most recent" here would archive
+        # some other session under this one's name and print [checkpoint] OK --
+        # a wrong answer is worse than no answer.
+        return None
+
+    # ---- Pass 2: no session id (manual invocation, e.g. /checkpoint). ---
+    # Most recent .jsonl in the first candidate project dir that has one.
+    for cwd in cwd_candidates:
+        project_dir = CLAUDE_PROJECTS_DIR / cwd.replace("/", "-")
         if project_dir.exists():
             jsonls = sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
             if jsonls:
                 return jsonls[0]
+
+    # Last resort: most recent .jsonl anywhere under ~/.claude/projects/.
+    # The derived dir can EXIST and still hold no transcripts -- Claude Code
+    # keys the project dir on the directory it was LAUNCHED from, not on the
+    # project being worked in. If sessions are habitually started from the home
+    # directory, `-Users-<user>-Projects-<repo>/` can exist while holding only a
+    # stray symlink, with every real transcript under `-Users-<user>/`. Then
+    # /checkpoint step 7 (invoked with `< /dev/null`, hence no session id)
+    # resolves to None and fails outright even though a transcript plainly exists.
+    # Guessing the most recently active session is a guess, but the caller
+    # prints the file it archived, so the guess is visible rather than silent
+    # -- and it beats failing when a transcript plainly exists.
+    if CLAUDE_PROJECTS_DIR.exists():
+        jsonls = sorted(
+            CLAUDE_PROJECTS_DIR.glob("*/*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if jsonls:
+            return jsonls[0]
 
     return None
 
