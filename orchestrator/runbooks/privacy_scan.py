@@ -73,6 +73,20 @@ BENIGN = re.compile(
     re.I,
 )
 
+# Explicit per-line opt-out. Put `privacy-scan: allow` in a comment on the line.
+#
+# This exists because this scanner's OWN self-test fixtures trip its own detectors —
+# it must contain a literal private-key header and a routable IP in order to prove
+# those detectors fire. Caught by CI on the first run after the file became tracked;
+# it had passed locally only because the scan ran before `git add`, so the scanner was
+# still untracked and never scanned itself.
+#
+# Deliberately a per-LINE pragma rather than excluding this file: the file most likely
+# to contain a mistake is the one being actively edited, and a whole-file exemption
+# would blind the scan exactly there. An opt-out that must be typed next to the
+# offending line is visible in review; a path exclusion in a config is not.
+PRAGMA_ALLOW = "privacy-scan: allow"
+
 IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 BINARY_EXT = {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".ico", ".woff", ".woff2", ".db"}
 # Lockfiles are enormous and full of hash-like strings; they are also machine-generated.
@@ -149,7 +163,7 @@ def scan(staged_only: bool = False) -> list[str]:
             continue
 
         for i, line in enumerate(text.splitlines(), 1):
-            if BENIGN.search(line):
+            if BENIGN.search(line) or PRAGMA_ALLOW in line:
                 continue
             for name, pat in CREDENTIALS.items():
                 if pat.search(line):
@@ -169,7 +183,7 @@ def self_test() -> int:
         ("OpenAI key",        "apiKey = 'sk-proj-" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8" + "'"),
         ("GitHub token",      "token: gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9"),
         ("AWS access key",    "aws_key = AKIA" + "IOSFODNN7EXAMPL9"),
-        ("Private key block", "-----BEGIN OPENSSH PRIVATE KEY-----"),
+        ("Private key block", "-----BEGIN OPENSSH PRIVATE KEY-----"),  # privacy-scan: allow
     ]
     failures = 0
     print("self-test — each detector must FIRE on a known-bad line:")
@@ -180,8 +194,8 @@ def self_test() -> int:
         if not fired:
             failures += 1
 
-    ip_cases = [("8.8.8.8", True), ("192.168.1.10", False), ("127.0.0.1", False),
-                ("10.0.0.5", False), ("203.0.113.9", False), ("172.16.4.2", False)]
+    ip_cases = [("8.8.8.8", True), ("192.168.1.10", False), ("127.0.0.1", False),   # privacy-scan: allow
+                ("10.0.0.5", False), ("203.0.113.9", False), ("172.16.4.2", False)]  # privacy-scan: allow
     print("  IP classification:")
     for ip, should_flag in ip_cases:
         flagged = not _is_private_ip(ip)
@@ -195,6 +209,20 @@ def self_test() -> int:
     hit = "orchestrator/memory/MEMORY.md".startswith(MEMORY_DIR_REL)
     print(f"    orchestrator/memory/MEMORY.md flagged: {hit}")
     if not hit:
+        failures += 1
+
+    # The pragma needs a control in BOTH directions. A suppressor that matches too
+    # eagerly silently disables the entire scan, which is worse than no scan at all
+    # because it still prints OK.
+    print("  pragma (must suppress ONLY the marked line):")
+    key = "AKIA" + "IOSFODNN7EXAMPL9"
+    marked = f"aws = {key}  # {PRAGMA_ALLOW}"
+    unmarked = f"aws = {key}"
+    suppressed = PRAGMA_ALLOW in marked
+    leaks = PRAGMA_ALLOW in unmarked
+    print(f"    marked line suppressed:   {suppressed}")
+    print(f"    unmarked line suppressed: {leaks}  (must be False)")
+    if not suppressed or leaks:
         failures += 1
 
     print()
