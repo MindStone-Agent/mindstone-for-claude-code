@@ -1,0 +1,41 @@
+# Install-specific privacy terms for orchestrator/runbooks/privacy_scan.py
+#
+# Copy to `privacy_patterns.toml` (gitignored) and fill in YOUR terms.
+#
+# WHY THIS FILE IS AN EXAMPLE AND NOT THE REAL LIST:
+# the real list is the thing it protects. Committing your family members' names,
+# your hostnames, or your project code-names into a public repo in order to detect
+# them would publish exactly what the scan exists to prevent. So the terms live in
+# a gitignored sibling of this file, and only these placeholders ship.
+#
+# Matching is case-insensitive substring. Prefer specific strings over short ones:
+# "Ada" will match "Adapter"; "ada-workstation" will not.
+
+terms = [
+  # --- people ---------------------------------------------------------------
+  # Real names of family, colleagues, or clients that should never appear in a
+  # tracked file. Include surnames and any distinctive nicknames.
+  # "Jane Doe",
+  # "jdoe",
+
+  # --- machines & networks --------------------------------------------------
+  # Internal hostnames, mDNS names, VPN node names.
+  # "workstation-01.local",
+  # "homelab-nas",
+
+  # --- private project or agent names --------------------------------------
+  # Internal code-names for projects, deployments, or agent instances that are
+  # not part of the public framework.
+  # "project-bluebird",
+  # "assistant-instance-name",
+
+  # --- private memory filenames --------------------------------------------
+  # A memory file's NAME is derived from its subject, so naming one in tracked
+  # source publishes what you keep memories about, even though the file itself is
+  # gitignored. List any whose name alone is sensitive.
+  # "user_someone_medical",
+  # "project_client_acme_dispute",
+
+  # --- employers / clients --------------------------------------------------
+  # "AcmeCorp",
+]

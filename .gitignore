@@ -58,16 +58,26 @@ orchestrator/IDENTITY.md
 orchestrator/USER.md
 orchestrator/LOG.md
 orchestrator/DOCS_UPDATED.md
-orchestrator/memory/feedback_*.md
-orchestrator/memory/project_*.md
-orchestrator/memory/reference_*.md
-orchestrator/memory/lineage_*.md
-# The memory INDEX is private for the same reason the memories are. Every line in
-# it summarises a gitignored file -- names, hosts, projects, people. Keeping the
-# index on the public side of this boundary guarantees it drifts back across:
-# it is written by the same /checkpoint flow that writes the private memories.
-# Ships as onboarding/MEMORY.md.example instead, like IDENTITY/USER/AGENTS.
-orchestrator/memory/MEMORY.md
+# The memory directory is ignored WHOLESALE, with an explicit allowlist.
+#
+# It used to be a denylist of filename prefixes (feedback_*, project_*, reference_*,
+# lineage_*, MEMORY.md). That fails OPEN: any memory whose name did not match a
+# listed prefix was tracked by default. `design_synapse.md` matched none of them and
+# sat tracked in a public repo for months, and every future naming convention would
+# have done the same -- silently, because a file that is simply never ignored looks
+# identical to a file someone decided to publish.
+#
+# Ignore everything, allow back the few framework files by name. A new memory is
+# private by default; publishing one becomes a deliberate act that shows up in review.
+#
+# The INDEX is private for the same reason the memories are: every line summarises a
+# gitignored file -- names, hosts, projects, people. It ships as
+# onboarding/MEMORY.md.example instead, like IDENTITY/USER/AGENTS.
+#
+# Enforced by orchestrator/runbooks/privacy_scan.py and .github/workflows/privacy-scan.yml.
+orchestrator/memory/*
+!orchestrator/memory/.gitkeep
+!orchestrator/memory/README.md
 # User-private skills (project-specific scripts referencing private infra,
 # IPs, credentials, keys). Substrate-mechanic skills can be opted in by
 # moving them out of skills/ into hooks/ or by carving a sub-path exception.
