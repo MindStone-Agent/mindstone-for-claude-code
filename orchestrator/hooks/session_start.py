@@ -371,15 +371,36 @@ def assemble_context(active_projects: set) -> str:
         # Count AFTER the clip. Counting before it reports every critical memory as
         # loaded while most were cut -- a false number inside the very message whose
         # job is to prevent a false reading.
-        rendered = joined.count("\n### `")
+        # A heading survives the clip even when its BODY was cut, so counting
+        # headings overstates by one exactly when the clip lands mid-memory.
+        # Sections are joined by SEP, so a section is whole iff its terminating
+        # separator is still present after the clip; anything past the last
+        # separator is a fragment that renders with a heading and simply stops —
+        # which reads as complete and is worse than being plainly absent.
+        #
+        # This deliberately UNDERCOUNTS by one when the clip lands exactly on a
+        # boundary (the separator has not started yet, so a whole section reads
+        # as a fragment). In a notice whose job is to stop a false reading,
+        # understating what loaded is the safe direction to be wrong in.
+        _sep = "\n\n---\n\n"
+        _last = joined.rfind(_sep)
+        rendered = joined[:_last].count("\n### `") if _last != -1 else 0
+        partial = joined.count("\n### `") - rendered
+
+        _partial_note = (
+            f" One more was cut MID-BODY and stops without warning — treat it as unread."
+            if partial > 0 else ""
+        )
         joined += (
             f"\n\n[…truncated for token budget: {over:,} chars cut. "
-            f"Roughly {rendered} of {total_critical} critical memories were loaded in full — "
-            f"the rest were NOT. Read them from orchestrator/memory/ if the work touches them.]"
+            f"{rendered} of {total_critical} critical memories were loaded in full — "
+            f"the rest were NOT.{_partial_note} "
+            f"Read them from orchestrator/memory/ if the work touches them.]"
         )
         print(
             f"[session_start] BUDGET: {over:,} chars over the {TOKEN_BUDGET_CHARS:,}-char "
-            f"budget; ~{rendered}/{total_critical} critical memories loaded, remainder cut.",
+            f"budget; {rendered}/{total_critical} critical memories loaded in full, "
+            f"{partial} truncated mid-body, remainder cut.",
             file=sys.stderr,
         )
     return joined
