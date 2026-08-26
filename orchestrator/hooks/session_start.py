@@ -40,7 +40,60 @@ except Exception:
 # ---------------------------------------------------------------------------
 
 # Token budget for the entire injected block. Rough estimate — 1 token ≈ 4 chars.
-TOKEN_BUDGET_CHARS = 50000  # ~12500 tokens — roomy so identity + user + critical land intact
+#
+# 80,000 (~20k tokens) per design decision D2. Chosen by measurement, not feel: on a
+# 102-file store the always-inject block totals ~58,400 chars once pointer lists are
+# deduped, which overflows 50k (117%) and fits 80k at 73% — leaving headroom, which
+# matters because this degrades FASTER than it grows (a bigger store means more rules
+# competing for a fixed budget, so coverage falls as the store rises).
+#
+# Deliberately ONE number with a per-install override rather than a table of tuned
+# per-branch values: the measurement covers one store, and three numbers extrapolated
+# from it would be false precision. Any other install — especially a larger one —
+# should set MS4CC_CONTEXT_BUDGET_CHARS from its OWN measured utilisation, which
+# assemble_context() reports every run.
+TOKEN_BUDGET_CHARS = 80000
+
+# ADMISSION TIERS — declared precedence, lowest admitted first.
+#
+# Ordering is a POLICY, stated here, not an accident of `sorted(glob)`. Under the
+# old positional clip a rule's survival depended on its filename: `feedback_*` sorts
+# before `lineage_*`, `project_*`, `reference_*`, so whole categories died by prefix
+# with no judgement about importance involved anywhere.
+#
+# The index outranks full critical bodies on purpose (design D1). Knowing WHAT
+# EXISTS is worth more per character than any single rule's full text, because the
+# index is what makes a partial constitution recoverable: an agent that can see a
+# rule's name and description can go and read the file. An agent missing the index
+# does not know the rule exists to be read.
+TIER_IDENTITY = 10   # required — an agent without identity is a different agent
+TIER_USER = 20       # required
+TIER_INDEX = 30      # what exists at all
+TIER_CRITICAL = 40   # binding rules, full text, one admission item per file
+TIER_EVERGREEN = 50  # pointers
+TIER_CONTEXT = 60    # weighted pointers
+TIER_LOG = 70        # continuity tail
+
+# Populated by assemble_context() on every run: a machine-readable account of what
+# was admitted, so `--check`, CI and the checkpoint flow can gate on a result rather
+# than scraping the human-readable notice.
+LAST_ASSEMBLY: dict = {}
+
+
+def context_budget_chars() -> int:
+    """Effective budget: env override wins, else the measured default."""
+    raw = os.environ.get("MS4CC_CONTEXT_BUDGET_CHARS")
+    if raw:
+        try:
+            val = int(raw)
+            if val > 0:
+                return val
+            print(f"[session_start] MS4CC_CONTEXT_BUDGET_CHARS={raw!r} is not positive; "
+                  f"using {TOKEN_BUDGET_CHARS}.", file=sys.stderr)
+        except ValueError:
+            print(f"[session_start] MS4CC_CONTEXT_BUDGET_CHARS={raw!r} is not an integer; "
+                  f"using {TOKEN_BUDGET_CHARS}.", file=sys.stderr)
+    return TOKEN_BUDGET_CHARS
 
 # Top-N non-critical project memories to consider ranking.
 TOP_N_PROJECT_MEMORIES = 10
@@ -315,15 +368,33 @@ def load_memory_files():
     return results
 
 def assemble_context(active_projects: set) -> str:
-    """Build the <orchestrator-context> block."""
-    now = datetime.now(tz=timezone.utc)
-    parts = []
+    """Build the <orchestrator-context> block.
 
-    # --- Identity & user (always) ---
+    Admission is PER ITEM and ordered by declared precedence — see ADMISSION TIERS.
+    Nothing is ever cut mid-item: a memory is injected whole or not at all, and
+    whatever does not fit is NAMED in an in-band notice rather than vanishing.
+
+    Assembly NEVER aborts. A session that boots with a partial constitution can
+    compensate (read the file, ask before acting); one that boots empty cannot,
+    and cannot even read the error explaining why. See §4.3 of
+    docs/design/context-budget-and-memory-tiering.md.
+    """
+    now = datetime.now(tz=timezone.utc)
+    items: list[dict] = []
+
+    def add(tier: int, text: str, *, label: str = "", required: bool = False):
+        if text and text.strip():
+            items.append({"tier": tier, "text": text, "label": label, "required": required})
+
+    # --- Identity & user: REQUIRED. Admitted even if they exceed the budget on
+    # their own — an agent without its identity is not a degraded agent, it is a
+    # different one. The overage is reported rather than silently absorbed.
     if IDENTITY_FILE.exists():
-        parts.append("## IDENTITY (who I am)\n" + IDENTITY_FILE.read_text())
+        add(TIER_IDENTITY, "## IDENTITY (who I am)\n" + IDENTITY_FILE.read_text(),
+            label="IDENTITY", required=True)
     if USER_FILE.exists():
-        parts.append("## USER (who I'm working with)\n" + USER_FILE.read_text())
+        add(TIER_USER, "## USER (who I'm working with)\n" + USER_FILE.read_text(),
+            label="USER", required=True)
 
     # --- Critical memories: FULL CONTENT injection ---
     # --- Evergreen (non-critical) memories: POINTER injection (filename + description) ---
@@ -342,18 +413,19 @@ def assemble_context(active_projects: set) -> str:
         else:
             rankable.append((path, fm))
 
-    if critical_full:
-        parts.append("## CRITICAL RULES (always applied — read in full)")
-        for path, fm, body in critical_full:
-            desc = fm.get("description", path.name)
-            parts.append(f"### `{path.name}` — {desc}\n{body.strip()}")
+    # Each critical memory is its OWN admission item, which is what makes
+    # "never cut mid-file" structural rather than a promise. A rule that stops
+    # halfway reads as complete and is worse than one plainly absent.
+    for path, fm, body in critical_full:
+        desc = fm.get("description", path.name)
+        add(TIER_CRITICAL, f"### `{path.name}` — {desc}\n{body.strip()}", label=path.name)
 
     if evergreen_pointers:
         lines = ["## EVERGREEN REFERENCES (available — consult on demand)"]
         for path, fm in evergreen_pointers:
             desc = fm.get("description", path.name)
             lines.append(f"- `{path.name}` — {desc}")
-        parts.append("\n".join(lines))
+        add(TIER_EVERGREEN, "\n".join(lines), label="EVERGREEN")
 
     # --- Weighted project memories (top-N) ---
     # Belt-and-suspenders: weight() is itself crash-proof now, but the whole ranking is
@@ -380,80 +452,118 @@ def assemble_context(active_projects: set) -> str:
             projects = fm.get("projects") or []
             proj_str = f" [{', '.join(projects)}]" if projects else ""
             lines.append(f"- `{path.name}`{proj_str} — {desc}")
-        parts.append("\n".join(lines))
+        add(TIER_CONTEXT, "\n".join(lines), label="CONTEXT")
 
-    # --- Memory index (MEMORY.md is small; always useful) ---
+    # --- Memory index: admitted BEFORE full critical bodies (design D1) ---
+    # Knowing WHAT EXISTS is worth more per char than any single rule's full text.
+    # The index is the one artefact that makes a partial constitution recoverable:
+    # an agent that can see a rule's name and description can go read it. An agent
+    # missing the index does not know the rule exists to be read.
+    #
+    # Before this change the index was assembled LAST and the clip was a positional
+    # slice, so it reached context 0% of the time on this store — the capability
+    # existed and was deleted, every session, unreported.
     memory_index = MEMORY_DIR / "MEMORY.md"
     if memory_index.exists():
-        parts.append("## MEMORY INDEX (all available memories)\n" + memory_index.read_text())
+        add(TIER_INDEX, "## MEMORY INDEX (all available memories)\n" + memory_index.read_text(),
+            label="MEMORY INDEX")
 
     # --- Recent LOG tail for continuity ---
     if LOG_FILE.exists():
         log_text = LOG_FILE.read_text()
         lines = log_text.split("\n")
         tail = "\n".join(lines[-LOG_TAIL_LINES:])
-        parts.append("## RECENT LOG (tail for continuity)\n" + tail)
+        add(TIER_LOG, "## RECENT LOG (tail for continuity)\n" + tail, label="RECENT LOG")
 
-    # Assemble and budget-clip.
-    joined = "\n\n---\n\n".join(parts)
-    if len(joined) > TOKEN_BUDGET_CHARS:
-        # Truncation strategy: keep identity + user + critical intact; trim log/weighted memories.
-        # Simple approach: truncate the tail.
-        #
-        # NOTE (2026-08-26): the comment above states an INTENTION the code does not
-        # implement. Sections are concatenated before clipping, so the tail clip cuts
-        # whatever was assembled last, regardless of tier. Measured on this date:
-        # 8 of 50 critical memories survived; the "## CRITICAL RULES" header did not
-        # begin until char 37,919 of the 50,000-char budget.
-        #
-        # This is a SIZING problem more than a clipping one. Full critical bodies now
-        # total ~185,000 chars against a 50,000-char budget, and MEMORY.md alone is
-        # ~112,000. Reordering by tier does not make that fit; it only changes which
-        # 27% survives, and choosing that tradeoff (pointer-inject past a threshold?
-        # demote some criticals? split MEMORY.md?) is a design decision for the
-        # framework owner, not something to settle inside a truncation branch.
-        #
-        # What IS fixed here: the loss is now ANNOUNCED. A silent cap reads exactly
-        # like "everything was included", which is the defect class this codebase has
-        # been bitten by repeatedly. See docs/testing/VERIFICATION_STANDARDS.md §4.1.
-        over = len(joined) - TOKEN_BUDGET_CHARS
-        total_critical = sum(1 for _p, _fm, _b in memories if _fm.get("critical"))
-        joined = joined[:TOKEN_BUDGET_CHARS]
-        # Count AFTER the clip. Counting before it reports every critical memory as
-        # loaded while most were cut -- a false number inside the very message whose
-        # job is to prevent a false reading.
-        # A heading survives the clip even when its BODY was cut, so counting
-        # headings overstates by one exactly when the clip lands mid-memory.
-        # Sections are joined by SEP, so a section is whole iff its terminating
-        # separator is still present after the clip; anything past the last
-        # separator is a fragment that renders with a heading and simply stops —
-        # which reads as complete and is worse than being plainly absent.
-        #
-        # This deliberately UNDERCOUNTS by one when the clip lands exactly on a
-        # boundary (the separator has not started yet, so a whole section reads
-        # as a fragment). In a notice whose job is to stop a false reading,
-        # understating what loaded is the safe direction to be wrong in.
-        _sep = "\n\n---\n\n"
-        _last = joined.rfind(_sep)
-        rendered = joined[:_last].count("\n### `") if _last != -1 else 0
-        partial = joined.count("\n### `") - rendered
+    # ------------------------------------------------------------------
+    # Admission. Per item, in precedence order, whole-or-not-at-all.
+    # ------------------------------------------------------------------
+    # This replaces `joined[:BUDGET]`. That slice cut wherever the character
+    # count landed, which meant (a) one memory always ended mid-sentence and
+    # read as complete, and (b) everything assembled after the cut vanished
+    # regardless of importance — on this store the memory index, the pointer
+    # lists and the log tail reached context 0% of the time.
+    #
+    # Ordering is DECLARED (the TIER_* constants), not an accident of
+    # alphabetical filenames. If something has to be dropped, the choice is
+    # explicit and recorded rather than decided by a leading underscore.
+    SEP = "\n\n---\n\n"
+    budget = context_budget_chars()
 
-        _partial_note = (
-            f" One more was cut MID-BODY and stops without warning — treat it as unread."
-            if partial > 0 else ""
-        )
-        joined += (
-            f"\n\n[…truncated for token budget: {over:,} chars cut. "
-            f"{rendered} of {total_critical} critical memories were loaded in full — "
-            f"the rest were NOT.{_partial_note} "
-            f"Read them from orchestrator/memory/ if the work touches them.]"
+    admitted: list[dict] = []
+    omitted: list[dict] = []
+    used = 0
+    for item in sorted(items, key=lambda i: i["tier"]):
+        cost = len(item["text"]) + (len(SEP) if admitted else 0)
+        if item["required"] or used + cost <= budget:
+            admitted.append(item)
+            used += cost
+        else:
+            omitted.append(item)
+
+    n_crit_total = sum(1 for i in items if i["tier"] == TIER_CRITICAL)
+    n_crit_ok = sum(1 for i in admitted if i["tier"] == TIER_CRITICAL)
+    missing = [i["label"] for i in omitted]
+
+    # Report BEFORE the notice is built, so a caller (`--check`, the checkpoint
+    # flow, CI) can gate on a machine-readable result instead of scraping prose.
+    global LAST_ASSEMBLY
+    LAST_ASSEMBLY = {
+        "budget": budget,
+        "used": used,
+        "utilisation": (used / budget) if budget else 0.0,
+        "over_budget": used > budget,
+        "items_total": len(items),
+        "items_admitted": len(admitted),
+        "critical_total": n_crit_total,
+        "critical_admitted": n_crit_ok,
+        "omitted": missing,
+        "complete": not omitted,
+    }
+
+    body_parts = []
+    current_tier = None
+    for item in admitted:
+        if item["tier"] != current_tier and item["tier"] == TIER_CRITICAL:
+            body_parts.append("## CRITICAL RULES (always applied — read in full)")
+        current_tier = item["tier"]
+        body_parts.append(item["text"])
+    joined = SEP.join(body_parts)
+
+    # In-band notice at the TOP. At the bottom it competes with the recency the
+    # rest of the block is fighting for, and it is precisely the line that must
+    # not be skimmed: it is the difference between "I have my rules" and "I have
+    # most of my rules and here are the names of the ones I do not."
+    if omitted:
+        names = ", ".join(f"`{m}`" for m in missing[:12])
+        more = f" (+{len(missing) - 12} more)" if len(missing) > 12 else ""
+        joined = (
+            f"## ⚠ PARTIAL CONTEXT — {len(omitted)} item(s) did not fit the "
+            f"{budget:,}-char budget\n"
+            f"{n_crit_ok} of {n_crit_total} critical memories loaded IN FULL. "
+            f"Nothing was cut mid-file: what is here is complete, what is missing is "
+            f"absent entirely.\n"
+            f"**NOT LOADED:** {names}{more}\n"
+            f"Read them from `orchestrator/memory/` before acting on anything they "
+            f"cover, and say so rather than guessing.\n"
+            + SEP + joined
         )
         print(
-            f"[session_start] BUDGET: {over:,} chars over the {TOKEN_BUDGET_CHARS:,}-char "
-            f"budget; {rendered}/{total_critical} critical memories loaded in full, "
-            f"{partial} truncated mid-body, remainder cut.",
+            f"[session_start] BUDGET: {len(omitted)} item(s) omitted at "
+            f"{budget:,} chars ({used:,} used); "
+            f"{n_crit_ok}/{n_crit_total} critical loaded in full. "
+            f"Omitted: {', '.join(missing[:8])}"
+            + (f" +{len(missing) - 8} more" if len(missing) > 8 else ""),
             file=sys.stderr,
         )
+    elif LAST_ASSEMBLY["over_budget"]:
+        # Everything fitted only because required items are exempt.
+        print(
+            f"[session_start] BUDGET: required items alone exceed the budget "
+            f"({used:,} > {budget:,}). Nothing dropped, but there is no headroom.",
+            file=sys.stderr,
+        )
+
     return joined
 
 def first_run_invitation() -> str:
@@ -624,7 +734,47 @@ def kick_deferred_embed() -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def check_mode() -> int:
+    """`--check`: assemble, report, and EXIT NON-ZERO if anything did not fit.
+
+    Deliberately separate from the live hook path. §4.3 of the design doc says the
+    process should exit non-zero on an incomplete constitution — correct for CI, the
+    checkpoint flow, and the fork gate, all of which run before an agent exists.
+
+    It is WRONG for the live SessionStart hook. That path prints the context as JSON
+    on stdout; a non-zero exit risks the harness discarding it, which would boot a
+    session with NO context at all. That is not a louder version of a partial
+    constitution, it is the categorically worse failure the design forbids — and the
+    running agent could not even read the error, because the error is in the thing
+    that failed to load. So: loud here, degraded-but-honest there.
+    """
+    if not IDENTITY_FILE.exists():
+        print("[check] no IDENTITY.md — first-run install, nothing to verify.")
+        return 0
+
+    assemble_context(infer_active_projects(os.getcwd()))
+    r = LAST_ASSEMBLY
+    print(f"budget          {r['budget']:,} chars")
+    print(f"used            {r['used']:,} ({r['utilisation']*100:.1f}%)")
+    print(f"items           {r['items_admitted']}/{r['items_total']} admitted")
+    print(f"critical        {r['critical_admitted']}/{r['critical_total']} loaded in full")
+
+    if r["omitted"]:
+        print(f"\nFAIL — {len(r['omitted'])} item(s) did not fit:")
+        for name in r["omitted"]:
+            print(f"  - {name}")
+        print("\nNothing was cut mid-file; the above are absent entirely.")
+        return 1
+    if r["over_budget"]:
+        print("\nFAIL — required items alone exceed the budget. Nothing dropped, no headroom.")
+        return 1
+    print("\nOK — every item reached context.")
+    return 0
+
+
 def main():
+    if "--check" in sys.argv:
+        sys.exit(check_mode())
     hook_input = read_hook_input()
     source = str(hook_input.get("source") or hook_input.get("matcher") or "").lower()
     cwd = os.getcwd()
