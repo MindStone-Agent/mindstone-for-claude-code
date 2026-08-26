@@ -33,7 +33,37 @@ TOP_K_TRANSCRIPT = 2 # plus a couple from past transcripts
 MMR_LAMBDA = 0.65    # favor relevance but allow some diversity
 
 # Minimum similarity threshold — below this, don't bother injecting.
-MIN_SIMILARITY = 0.30
+#
+# 0.30 was never measured against this store and filtered NOTHING: across 50 real
+# user prompts it kept 673 of 673 candidate results (100%), at the widened
+# CANDIDATE_K_MEMORY pool and at the old k=4 alike. It sat below even the score
+# that pure gibberish achieves, so it could not fire — while reading, in config
+# and in review, as though the problem were handled. A floor that cannot fire is
+# worse than no floor, because it stops anyone from looking.
+#
+# Measured on this store (orchestrator/runbooks/calibrate_recall_floor.py):
+#
+#     weakest true positive     0.5201   a lone sentence matching its own file
+#     strongest false positive  0.5172   fluent English on a subject not in the store
+#     margin                   +0.0029   = 1% of the observed score range
+#
+# Two results worth carrying forward. Coherent-but-absent text scores HIGHER than
+# token salad, so calibrating against gibberish alone sets the floor beneath the
+# real failure mode and certifies it safe. And the bands are disjoint on paper and
+# not in practice: no threshold reliably separates "this store has an answer" from
+# "it does not."
+#
+# So this sits deliberately BELOW the calibrated midpoint (0.519). Recall is one of
+# three paths to a memory, not the only one (docs/design/context-budget-and-memory-
+# tiering.md, D1), and the injected block already tells the agent these results are
+# probabilistic rather than authoritative. Given that, a spurious hit the agent can
+# disregard costs less than a real memory silently withheld. 0.50 drops the
+# clearly-irrelevant fifth of the candidate pool and leaves real matches alone.
+#
+# THIS IS A NOISE SUPPRESSOR, NOT A CORRECTNESS MECHANISM. A non-empty recall block
+# is not evidence that the store had an answer. Re-run the calibration after any
+# large ingest — the number is a property of this store, not a constant.
+MIN_SIMILARITY = 0.50
 
 # Per-chunk display budget (chars) — keep context lean
 MAX_CHARS_PER_CHUNK = 800
