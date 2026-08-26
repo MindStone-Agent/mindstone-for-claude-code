@@ -606,13 +606,29 @@ def assemble_context(active_projects: set) -> str:
                         "_Present only as budget allowed. Absence here is not absence of the rule; "
                         "the rule is in the constitution above._"),
     }
-    body_parts = []
+    # Invariants are one-line bullets and must render as a LIST. Admission is
+    # per-item so each can be dropped independently, but joining 32 bullets with a
+    # horizontal rule turns the constitution into 32 separated blocks — harder to
+    # read as a single body of rules, which is exactly how it should read.
+    body_parts, group = [], []
     seen_tiers = set()
+
+    def _flush():
+        if group:
+            body_parts.append("\n".join(group))
+            group.clear()
+
     for item in admitted:
         if item["tier"] in HEADINGS and item["tier"] not in seen_tiers:
+            _flush()
             body_parts.append(HEADINGS[item["tier"]])
         seen_tiers.add(item["tier"])
-        body_parts.append(item["text"])
+        if item["tier"] == TIER_INVARIANT and item["text"].startswith("- "):
+            group.append(item["text"])          # bullet: keep in the running list
+        else:
+            _flush()
+            body_parts.append(item["text"])
+    _flush()
     joined = SEP.join(body_parts)
 
     # In-band notice at the TOP. At the bottom it competes with the recency the
