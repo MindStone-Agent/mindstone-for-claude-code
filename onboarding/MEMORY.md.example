@@ -1,0 +1,87 @@
+---
+name: MEMORY
+description: Index of all semantic memories. The map of what the orchestrator knows and where to find it.
+type: index
+tags: [index]
+projects: []
+hits: 0
+prevented: 0
+last_applied: 
+created: 2026-04-26
+half_life_days: 365
+critical: false
+evergreen: true
+---
+
+# Memory Index — Template
+
+This file is the **index template** that ships with MindStone for Claude Code. It documents the structure your orchestrator will populate as your session experience accumulates.
+
+When you (or your orchestrator at `/checkpoint`) write a new memory file, add a one-line pointer here so the SessionStart hook surfaces it in the always-loaded context.
+
+Memory files live in `orchestrator/memory/`. System files (IDENTITY, USER, LOG) live one level up in `orchestrator/`.
+
+---
+
+## System files (identity-level, always loaded)
+
+These three files are loaded in full at every session start by the SessionStart hook. They are gitignored — each user authors their own.
+
+- `../IDENTITY.md` — Who the orchestrator is. First-person voice. Created during onboarding.
+- `../USER.md` — Who the orchestrator's user is. Created during onboarding.
+- `../LOG.md` — Append-only chronological session log. Auto-extended by the Stop hook.
+
+## Critical feedback (always injected — `critical: true`)
+
+Memory files flagged `critical: true` in their frontmatter. Their full content is injected at every SessionStart, regardless of recency or weight. Use sparingly — for rules that must never be forgotten.
+
+
+## Standard feedback (weighted, not critical)
+
+Memory files of `type: feedback` without the `critical` flag. Ranked by weight at SessionStart and injected in the top-N section if relevant to the current project context.
+
+The weight function is: `(hits + 3·prevented + 1) · exp(-age_days / half_life_days)` — see `AGENTS.md` for full details.
+
+
+## Projects (variable-context, decays by half-life)
+
+Memory files of `type: project`. One per active project the orchestrator is involved in.
+
+Examples:
+
+- `project_<name>.md` — Per-project context: scope, current sprint, decisions, key files.
+
+## Design (active design docs / pointers)
+
+Memory files of `type: design`. Either working drafts under active iteration (pre-scaffold), or pointers to canonical design docs that have moved to their own repos.
+
+- `design_<system>.md` — Pointer to an active design doc, plus the context a pointer alone loses:
+  where the canonical version lives, what it was called before (renames strand search), who owns
+  the decisions, and whether it is still load-bearing. Mark `critical: true` only while your
+  orchestrator is actually accountable for that system, and clear it when that ends.
+
+## Reference (evergreen — never decays)
+
+Memory files of `type: reference` and `evergreen: true`. External-system pointers, environment specifics, infrastructure knowledge that doesn't decay because it describes durable external state.
+
+Examples:
+
+- `reference_<system>.md` — Things like SSH access patterns, deployment procedures, integration credentials' locations (NOT the credentials themselves — see `embedder.py` secret-scrubbing).
+
+## Lineage (private, optional)
+
+Letters and correspondence from other persistent identities. Gitignored under `lineage_*.md` — each orchestrator's relationships are private to them.
+
+## Conventions
+
+- **Filename pattern:** `type_subject.md` (e.g., `feedback_canonical_framework_verification.md`).
+- **Frontmatter schema:** see `AGENTS.md` for the full spec. New memories created via `/checkpoint` get the schema applied automatically. The migration script `.migrate_frontmatter.py` can backfill it on legacy files.
+- **`critical: true`** is reserved for rules that must always inject in full. Most memories should be standard-weighted.
+- **`evergreen: true`** is for content that describes external systems whose state doesn't change with session activity (reference docs).
+- **Project files** decay per the default half-life (30 days) unless overridden in frontmatter.
+
+## How this index gets populated
+
+You (and the orchestrator at `/checkpoint`) maintain it manually. Each new memory file added to `orchestrator/memory/` should get a pointer here so it's discoverable in the always-loaded context. The Stop hook does NOT auto-update this index — that's a deliberate design choice; index entries deserve a human-curated description, not an auto-generated one.
+
+When this file gets large (50+ entries), consider splitting by category into `MEMORY/` subdirectory files referenced from this top-level index.

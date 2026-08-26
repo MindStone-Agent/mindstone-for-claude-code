@@ -62,13 +62,18 @@ orchestrator/memory/feedback_*.md
 orchestrator/memory/project_*.md
 orchestrator/memory/reference_*.md
 orchestrator/memory/lineage_*.md
+# The memory INDEX is private for the same reason the memories are. Every line in
+# it summarises a gitignored file -- names, hosts, projects, people. Keeping the
+# index on the public side of this boundary guarantees it drifts back across:
+# it is written by the same /checkpoint flow that writes the private memories.
+# Ships as onboarding/MEMORY.md.example instead, like IDENTITY/USER/AGENTS.
+orchestrator/memory/MEMORY.md
 # User-private skills (project-specific scripts referencing private infra,
 # IPs, credentials, keys). Substrate-mechanic skills can be opted in by
 # moving them out of skills/ into hooks/ or by carving a sub-path exception.
 orchestrator/skills/
 .claude/scheduled_tasks.lock
 # KEPT (framework-level, team/public-shareable):
-#   orchestrator/memory/MEMORY.md           — index structure/template
 #   orchestrator/memory/CAIRN_DESIGN_*.md   — design documentation
 #   orchestrator/memory/.migrate_frontmatter.py — schema migration utility
 
