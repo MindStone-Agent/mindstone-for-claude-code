@@ -138,17 +138,35 @@ def resolve_session_path(hook_input: dict, args: argparse.Namespace | None = Non
             if jsonls:
                 return jsonls[0]
 
-    # Last resort: most recent .jsonl anywhere under ~/.claude/projects/.
-    # The derived dir can EXIST and still hold no transcripts -- Claude Code
-    # keys the project dir on the directory it was LAUNCHED from, not on the
-    # project being worked in. If sessions are habitually started from the home
-    # directory, `-Users-<user>-Projects-<repo>/` can exist while holding only a
-    # stray symlink, with every real transcript under `-Users-<user>/`. Then
-    # /checkpoint step 7 (invoked with `< /dev/null`, hence no session id)
-    # resolves to None and fails outright even though a transcript plainly exists.
-    # Guessing the most recently active session is a guess, but the caller
-    # prints the file it archived, so the guess is visible rather than silent
-    # -- and it beats failing when a transcript plainly exists.
+    # ---- Pass 3: ANCESTOR project dirs, before any global guess. -----------
+    # Claude Code keys the project dir on the directory the session was LAUNCHED
+    # from, not the project being worked in. Launching from $HOME and working in
+    # ~/Projects/<repo> puts every transcript under `-Users-<user>/` while
+    # `-Users-<user>-Projects-<repo>/` exists holding nothing.
+    #
+    # So the launch dir is usually an ANCESTOR of the working dir, which makes
+    # this a derivation rather than a guess: walk each candidate's parents and
+    # look there. Observed live 2026-08-26 -- /checkpoint step 7 (invoked with
+    # `< /dev/null`, hence no session id) failed outright while a 611 MB
+    # transcript sat under the parent dir.
+    seen: set[Path] = set()
+    for cwd in cwd_candidates:
+        for ancestor in Path(cwd).parents:
+            project_dir = CLAUDE_PROJECTS_DIR / str(ancestor).replace("/", "-")
+            if project_dir in seen or not project_dir.exists():
+                continue
+            seen.add(project_dir)
+            jsonls = sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if jsonls:
+                return jsonls[0]
+
+    # ---- Pass 4: global most-recent. A GUESS, and it says so. --------------
+    # Only reached when no candidate dir and no ancestor dir holds a transcript.
+    # Deliberately NOT silent: this can return another project's session, which
+    # is the failure mode that makes "most recent anywhere" dangerous -- with
+    # several project dirs holding zero transcripts, "most recent anywhere"
+    # resolves to whatever unrelated project was touched last. The caller prints
+    # what it archived, and this warns, so the guess is visible on two channels.
     if CLAUDE_PROJECTS_DIR.exists():
         jsonls = sorted(
             CLAUDE_PROJECTS_DIR.glob("*/*.jsonl"),
@@ -156,6 +174,10 @@ def resolve_session_path(hook_input: dict, args: argparse.Namespace | None = Non
             reverse=True,
         )
         if jsonls:
+            print(f"[session_end] WARNING — no transcript under any candidate or ancestor project "
+                  f"dir; falling back to the most recently modified transcript ANYWHERE: "
+                  f"{jsonls[0].parent.name}/{jsonls[0].name}. This may belong to a different "
+                  f"project. Pass --session-id/--cwd to resolve exactly.", file=sys.stderr)
             return jsonls[0]
 
     return None
@@ -497,18 +519,30 @@ def main():
     if not ORCHESTRATOR_DIR.exists():
         return
 
+    # Failure exits NON-ZERO in every mode, not just checkpoint mode.
+    #
+    # This used to be `sys.exit(1 if CHECKPOINT_MODE else 0)`, so a failed archive
+    # reported success on the per-turn Stop-hook path -- the path that runs on
+    # EVERY turn completion, roughly a hundred times more often than /checkpoint.
+    # The mode that almost never runs was the loud one, and the mode that is the
+    # actual safety net was silent. An unarchived transcript is a real failure
+    # whoever invoked it, and a hook exiting 0 after printing FAILED is precisely
+    # the "check that cannot fail" shape this codebase keeps getting bitten by.
+    #
+    # Exiting non-zero from a Stop hook does not interrupt the session; it surfaces
+    # the failure where it can be seen instead of leaving it in stderr nobody reads.
     session_jsonl = resolve_session_path(hook_input, args)
     if not session_jsonl:
         print("[session_end] FAILED — no session JSONL found (checked --cwd/stdin/process-cwd/"
-              f"install-root candidates under {CLAUDE_PROJECTS_DIR}). Nothing archived or embedded.",
-              file=sys.stderr)
-        sys.exit(1 if CHECKPOINT_MODE else 0)
+              f"install-root candidates, and their ancestors, under {CLAUDE_PROJECTS_DIR}). "
+              "Nothing archived or embedded.", file=sys.stderr)
+        sys.exit(1)
 
     archived, copied = archive_transcript(session_jsonl)
     if archived is None:
         print(f"[session_end] FAILED — session JSONL vanished during archive: {session_jsonl}",
               file=sys.stderr)
-        sys.exit(1 if CHECKPOINT_MODE else 0)
+        sys.exit(1)
     if not copied and not CHECKPOINT_MODE:
         # Per-turn / watchdog with an up-to-date archive: genuinely nothing to do.
         return
