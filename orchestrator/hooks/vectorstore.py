@@ -35,6 +35,11 @@ import sqlite_vec
 
 EMBEDDING_DIMS = 768  # nomic-embed-text via local Ollama (8K context)
 
+# sqlite-vec refuses a KNN k above this — "k value in knn query too large,
+# provided N and the limit is 4096". A hard limit in the extension, not a
+# tunable, so any depth escalation has to stop here even on a larger index.
+MAX_KNN_K = 4096
+
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
@@ -220,39 +225,73 @@ class VectorStore:
         blob = _vec_to_blob(query_vec)
 
         # Pull a larger candidate set if MMR is requested.
-        candidates_k = k * 3 if mmr else k
+        want = k * 3 if mmr else k
 
-        where = ""
-        params: list = [blob, candidates_k]
-        if source_types:
-            placeholders = ",".join("?" * len(source_types))
-            where = f"AND c.source_type IN ({placeholders})"
-            params = [blob, candidates_k] + source_types  # adjust order for the specific query below
-
-        # Join vec_chunks ↔ chunks via rowid. sqlite-vec's KNN uses MATCH on the vector column.
-        if source_types:
-            sql = f"""
+        # sqlite-vec applies `k` to the KNN over the ENTIRE index. The
+        # `source_type` predicate is therefore a POST-filter on whatever those
+        # rows happen to be, not a constraint on the search.
+        #
+        # When the requested types are a small slice of the store this silently
+        # under-returns. Measured on a 17,758-chunk store where memory is 568
+        # chunks (3.2%): a k=4 memory query returned 0 rows, k=8 returned 3,
+        # k=200 returned 40 — with an identical top similarity (0.531) at every
+        # depth. The correct answer was always reachable; it was crowded out of
+        # the KNN by transcript chunks before the filter ever ran, and nothing
+        # anywhere reported a degraded result.
+        #
+        # So: escalate the KNN depth until enough rows survive the filter, or
+        # until the whole index has been scanned. LIMIT bounds the result set so
+        # escalating depth cannot balloon the rows we materialise.
+        select_cols = """
                 SELECT c.chunk_id, c.source_type, c.source_path, c.start_line, c.end_line,
                        c.text, c.metadata_json, vc.distance, vc.rowid
                 FROM vec_chunks vc
                 JOIN chunks c ON c.rowid = vc.rowid
                 WHERE vc.embedding MATCH ? AND k = ?
-                AND c.source_type IN ({",".join("?" * len(source_types))})
-                ORDER BY vc.distance
-            """
-            params = [blob, candidates_k] + source_types
+        """
+        if source_types:
+            sql = (select_cols
+                   + f"AND c.source_type IN ({','.join('?' * len(source_types))})\n"
+                   + "                ORDER BY vc.distance LIMIT ?")
+            extra: list = list(source_types)
         else:
-            sql = """
-                SELECT c.chunk_id, c.source_type, c.source_path, c.start_line, c.end_line,
-                       c.text, c.metadata_json, vc.distance, vc.rowid
-                FROM vec_chunks vc
-                JOIN chunks c ON c.rowid = vc.rowid
-                WHERE vc.embedding MATCH ? AND k = ?
-                ORDER BY vc.distance
-            """
-            params = [blob, candidates_k]
+            sql = select_cols + "                ORDER BY vc.distance LIMIT ?"
+            extra = []
 
-        rows = conn.execute(sql, params).fetchall()
+        total = conn.execute("SELECT COUNT(*) FROM vec_chunks").fetchone()[0] or 0
+        # sqlite-vec rejects a KNN k above this ("k value in knn query too large").
+        # It is a hard limit in the extension, not a tunable, so the escalation
+        # ladder has to stop here even when the index is larger.
+        ceiling = min(total, MAX_KNN_K)
+
+        depth = max(min(want, ceiling), 1)
+        rows = []
+        escalations = 0
+        while True:
+            rows = conn.execute(sql, [blob, depth, *extra, want]).fetchall()
+            # Without a type filter the KNN result IS the answer — never escalate.
+            if not source_types or len(rows) >= want or depth >= ceiling:
+                break
+            depth = min(max(depth * 4, 1), ceiling)
+            escalations += 1
+
+        # Observability: a caller that cares whether recall was degraded can ask.
+        # `exhausted` means the index was scanned end to end and still could not
+        # supply `want` rows — that is a genuine "there is not enough here",
+        # which is a different statement from "the query found nothing".
+        self.last_search_stats = {
+            "requested": k,
+            "want": want,
+            "returned": len(rows),
+            "knn_depth": depth,
+            "escalations": escalations,
+            "index_size": total,
+            "exhausted": bool(source_types) and len(rows) < want and depth >= ceiling,
+            # True when the extension's k ceiling stopped us before the index did:
+            # results are correct but may be incomplete, and that is worth saying
+            # out loud rather than returning a short list as if it were the answer.
+            "knn_capped": bool(source_types) and len(rows) < want and ceiling == MAX_KNN_K < total,
+        }
 
         candidates = []
         for row in rows:
