@@ -68,8 +68,9 @@ TOKEN_BUDGET_CHARS = 80000
 # does not know the rule exists to be read.
 TIER_IDENTITY = 10   # required — an agent without identity is a different agent
 TIER_USER = 20       # required
+TIER_INVARIANT = 25  # the constitution itself: the binding rule of every critical
 TIER_INDEX = 30      # what exists at all
-TIER_CRITICAL = 40   # binding rules, full text, one admission item per file
+TIER_CRITICAL = 40   # full narrative bodies — admitted ONLY if budget remains
 TIER_EVERGREEN = 50  # pointers
 TIER_CONTEXT = 60    # weighted pointers
 TIER_LOG = 70        # continuity tail
@@ -222,11 +223,41 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     fm: dict = {}
     nested: dict[str, dict] = {}
     current_nested: str | None = None
+    # Open folded/literal block scalar: (key, style, [lines]).
+    current_block: tuple[str, str, list] | None = None
+
+    # `>` folds newlines to spaces, `|` keeps them; a trailing `-` strips the final
+    # newline. Without this, `invariant: >` parsed to the literal string ">" -- a
+    # value that reports as PRESENT while carrying no rule, which is the exact
+    # false-positive shape the invariant tier exists to eliminate.
+    BLOCK_STYLES = (">", "|", ">-", "|-", ">+", "|+")
+
+    def _close_block():
+        nonlocal current_block
+        if current_block is None:
+            return
+        key, style, lines = current_block
+        # Strip the common indent, then fold or keep newlines per style.
+        stripped = [ln.strip() for ln in lines]
+        while stripped and not stripped[-1]:
+            stripped.pop()
+        joined = ("\n".join(stripped) if style.startswith("|")
+                  else " ".join(s for s in stripped if s))
+        fm[key] = joined.strip()
+        current_block = None
 
     for line in block.split("\n"):
+        indented = line[:1].isspace()
+
+        # An open block scalar consumes every indented line, blank ones included.
+        if current_block is not None:
+            if indented or not line.strip():
+                current_block[2].append(line)
+                continue
+            _close_block()
+
         if not line.strip():
             continue
-        indented = line[:1].isspace()
 
         if indented:
             # Child of the most recent empty-valued top-level key.
@@ -243,6 +274,12 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
             current_nested = None
             continue
         key, val = km.group(1), km.group(2).strip()
+
+        if val in BLOCK_STYLES:
+            current_block = (key, val, [])
+            current_nested = None
+            continue
+
         fm[key] = _coerce_scalar(val)
         # An empty value opens a candidate nested block (`metadata:`), which the
         # next indented lines fill. A non-empty value closes any open block.
@@ -251,6 +288,8 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
             nested.setdefault(key, {})
         else:
             current_nested = None
+
+    _close_block()
 
     # Lift nested children into the flat namespace. A top-level key always wins:
     # an explicit `critical: false` at column 0 is not overridden by a nested
@@ -413,12 +452,30 @@ def assemble_context(active_projects: set) -> str:
         else:
             rankable.append((path, fm))
 
-    # Each critical memory is its OWN admission item, which is what makes
-    # "never cut mid-file" structural rather than a promise. A rule that stops
-    # halfway reads as complete and is worse than one plainly absent.
+    # Critical memories inject in TWO tiers.
+    #
+    # The INVARIANT is the binding rule and it always goes in — 32 of them cost
+    # ~9k chars where their full bodies cost 146,913 (184% of an 80k budget). That
+    # is the whole point of the split: ordering alone cannot make full text fit,
+    # and no budget large enough exists at store scale.
+    #
+    # The BODY is the narrative that earned the rule. It is admitted only if room
+    # remains after identity, the constitution and the index — and it is always
+    # reachable on disk and through recall, so losing it costs context, not access.
+    #
+    # A file with no invariant falls back to full body at the invariant tier: it is
+    # unmigrated, not exempt, and dropping it silently would be the failure this
+    # design exists to prevent. The audit names it.
+    missing_invariant = []
     for path, fm, body in critical_full:
         desc = fm.get("description", path.name)
-        add(TIER_CRITICAL, f"### `{path.name}` — {desc}\n{body.strip()}", label=path.name)
+        inv = (fm.get("invariant") or "").strip()
+        if inv:
+            add(TIER_INVARIANT, f"- **`{path.name}`** — {inv}", label=f"invariant:{path.name}")
+            add(TIER_CRITICAL, f"### `{path.name}` — {desc}\n{body.strip()}", label=path.name)
+        else:
+            missing_invariant.append(path.name)
+            add(TIER_INVARIANT, f"### `{path.name}` — {desc}\n{body.strip()}", label=path.name)
 
     if evergreen_pointers:
         lines = ["## EVERGREEN REFERENCES (available — consult on demand)"]
@@ -501,9 +558,20 @@ def assemble_context(active_projects: set) -> str:
         else:
             omitted.append(item)
 
+    # Account for the two tiers SEPARATELY. Counting only bodies reports "6 of 32
+    # critical" while all 32 binding rules are in fact loaded -- an alarm raised by
+    # the design working as intended, which is how a useful signal gets ignored.
+    #
+    # Constitution completeness is the property that matters and must be total.
+    # Narrative coverage is best-effort by construction: the body is deferred to
+    # disk and recall, so its absence costs context, never access.
+    n_inv_total = sum(1 for i in items if i["tier"] == TIER_INVARIANT)
+    n_inv_ok = sum(1 for i in admitted if i["tier"] == TIER_INVARIANT)
     n_crit_total = sum(1 for i in items if i["tier"] == TIER_CRITICAL)
     n_crit_ok = sum(1 for i in admitted if i["tier"] == TIER_CRITICAL)
     missing = [i["label"] for i in omitted]
+    missing_invariants = [i["label"] for i in omitted if i["tier"] == TIER_INVARIANT]
+    index_dropped = any(i["tier"] == TIER_INDEX for i in omitted)
 
     # Report BEFORE the notice is built, so a caller (`--check`, the checkpoint
     # flow, CI) can gate on a machine-readable result instead of scraping prose.
@@ -515,18 +583,35 @@ def assemble_context(active_projects: set) -> str:
         "over_budget": used > budget,
         "items_total": len(items),
         "items_admitted": len(admitted),
-        "critical_total": n_crit_total,
-        "critical_admitted": n_crit_ok,
+        # The property that must hold: every binding rule reached context.
+        "invariants_total": n_inv_total,
+        "invariants_admitted": n_inv_ok,
+        "missing_invariants": missing_invariants,
+        "constitution_complete": not missing_invariants,
+        "index_present": not index_dropped,
+        # Best-effort by design: narrative deferred to disk + recall.
+        "bodies_total": n_crit_total,
+        "bodies_admitted": n_crit_ok,
         "omitted": missing,
-        "complete": not omitted,
+        # `complete` now means "nothing that MUST be present is missing", not
+        # "nothing at all was deferred" -- deferring narrative is the design.
+        "complete": (not missing_invariants) and (not index_dropped),
     }
 
+    HEADINGS = {
+        TIER_INVARIANT: ("## CONSTITUTION (binding rules — always applied)\n"
+                         "_Each line is the rule itself. The incident that earned it lives in the "
+                         "named file and is retrievable; read it before acting on anything subtle._"),
+        TIER_CRITICAL: ("## CRITICAL MEMORIES (full text — the narrative behind the rules above)\n"
+                        "_Present only as budget allowed. Absence here is not absence of the rule; "
+                        "the rule is in the constitution above._"),
+    }
     body_parts = []
-    current_tier = None
+    seen_tiers = set()
     for item in admitted:
-        if item["tier"] != current_tier and item["tier"] == TIER_CRITICAL:
-            body_parts.append("## CRITICAL RULES (always applied — read in full)")
-        current_tier = item["tier"]
+        if item["tier"] in HEADINGS and item["tier"] not in seen_tiers:
+            body_parts.append(HEADINGS[item["tier"]])
+        seen_tiers.add(item["tier"])
         body_parts.append(item["text"])
     joined = SEP.join(body_parts)
 
@@ -534,28 +619,40 @@ def assemble_context(active_projects: set) -> str:
     # rest of the block is fighting for, and it is precisely the line that must
     # not be skimmed: it is the difference between "I have my rules" and "I have
     # most of my rules and here are the names of the ones I do not."
-    if omitted:
-        names = ", ".join(f"`{m}`" for m in missing[:12])
-        more = f" (+{len(missing) - 12} more)" if len(missing) > 12 else ""
+    if missing_invariants or index_dropped:
+        # The serious case: a BINDING RULE or the index did not reach context.
+        names = ", ".join(f"`{m}`" for m in missing_invariants[:12])
+        more = f" (+{len(missing_invariants) - 12} more)" if len(missing_invariants) > 12 else ""
+        lines = [f"## ⚠ INCOMPLETE CONSTITUTION — {len(missing_invariants)} binding rule(s) "
+                 f"did not fit the {budget:,}-char budget"]
+        if missing_invariants:
+            lines.append(f"**RULES NOT LOADED:** {names}{more}")
+            lines.append("Read them from `orchestrator/memory/` before acting on anything they "
+                         "cover, and say so rather than guessing.")
+        if index_dropped:
+            lines.append("**The memory index did not load** — I cannot see what else exists. "
+                         "Treat any 'I have no memory of that' as unreliable.")
+        joined = "\n".join(lines) + "\n" + SEP + joined
+        print(f"[session_start] CONSTITUTION INCOMPLETE: {len(missing_invariants)} invariant(s) "
+              f"omitted at {budget:,} chars ({used:,} used)"
+              + (f"; index dropped" if index_dropped else "")
+              + (f". Missing: {', '.join(missing_invariants[:8])}" if missing_invariants else ""),
+              file=sys.stderr)
+    elif omitted:
+        # The ordinary case: the constitution is whole, narrative was deferred.
+        # Deliberately NOT phrased as a failure — this is the tiering working.
         joined = (
-            f"## ⚠ PARTIAL CONTEXT — {len(omitted)} item(s) did not fit the "
-            f"{budget:,}-char budget\n"
-            f"{n_crit_ok} of {n_crit_total} critical memories loaded IN FULL. "
-            f"Nothing was cut mid-file: what is here is complete, what is missing is "
-            f"absent entirely.\n"
-            f"**NOT LOADED:** {names}{more}\n"
-            f"Read them from `orchestrator/memory/` before acting on anything they "
-            f"cover, and say so rather than guessing.\n"
+            f"## Context note — constitution complete, {len(omitted)} narrative item(s) deferred\n"
+            f"All {n_inv_total} binding rules are loaded above. "
+            f"{n_crit_ok} of {n_crit_total} full narratives fit; the rest live in "
+            f"`orchestrator/memory/` and are retrievable by name or recall. "
+            f"Nothing was cut mid-file.\n"
             + SEP + joined
         )
-        print(
-            f"[session_start] BUDGET: {len(omitted)} item(s) omitted at "
-            f"{budget:,} chars ({used:,} used); "
-            f"{n_crit_ok}/{n_crit_total} critical loaded in full. "
-            f"Omitted: {', '.join(missing[:8])}"
-            + (f" +{len(missing) - 8} more" if len(missing) > 8 else ""),
-            file=sys.stderr,
-        )
+        print(f"[session_start] budget {used:,}/{budget:,} ({used/budget*100:.0f}%): "
+              f"constitution COMPLETE ({n_inv_ok}/{n_inv_total} invariants); "
+              f"{n_crit_ok}/{n_crit_total} narratives loaded, {len(omitted)} deferred.",
+              file=sys.stderr)
     elif LAST_ASSEMBLY["over_budget"]:
         # Everything fitted only because required items are exempt.
         print(
@@ -757,18 +854,31 @@ def check_mode() -> int:
     print(f"budget          {r['budget']:,} chars")
     print(f"used            {r['used']:,} ({r['utilisation']*100:.1f}%)")
     print(f"items           {r['items_admitted']}/{r['items_total']} admitted")
-    print(f"critical        {r['critical_admitted']}/{r['critical_total']} loaded in full")
+    print(f"CONSTITUTION    {r['invariants_admitted']}/{r['invariants_total']} binding rules  "
+          f"<- must be total")
+    print(f"index           {'present' if r['index_present'] else 'DROPPED'}")
+    print(f"narratives      {r['bodies_admitted']}/{r['bodies_total']} full bodies  "
+          f"(best-effort; deferred to disk + recall)")
 
-    if r["omitted"]:
-        print(f"\nFAIL — {len(r['omitted'])} item(s) did not fit:")
-        for name in r["omitted"]:
+    # Gate on the constitution, NOT on narrative coverage. Failing because a body
+    # was deferred would fire on every healthy run at store scale and train
+    # everyone to ignore it -- the alarm that cries wolf is worse than no alarm.
+    if r["missing_invariants"]:
+        print(f"\nFAIL — {len(r['missing_invariants'])} binding rule(s) did not reach context:")
+        for name in r["missing_invariants"]:
             print(f"  - {name}")
-        print("\nNothing was cut mid-file; the above are absent entirely.")
+        return 1
+    if not r["index_present"]:
+        print("\nFAIL — the memory index did not load; the agent cannot see what exists.")
         return 1
     if r["over_budget"]:
         print("\nFAIL — required items alone exceed the budget. Nothing dropped, no headroom.")
         return 1
-    print("\nOK — every item reached context.")
+
+    deferred = len(r["omitted"])
+    print(f"\nOK — constitution complete and index present."
+          + (f" {deferred} narrative item(s) deferred, which is the tiering working."
+             if deferred else " Everything fit."))
     return 0
 
 
