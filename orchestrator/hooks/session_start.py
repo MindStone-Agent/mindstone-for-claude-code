@@ -125,10 +125,16 @@ HANDOFF_PATH = ORCHESTRATOR_DIR / "transcripts" / ".handoff.md"
 #
 # Measured 2026-08-26 before the fix: 63 of 291 memory files used the nested
 # schema, and FOUR of them declared `critical: true` while never being injected --
-# including `feedback_mandatory_adversarial_qa` (the rule making independent
-# adversarial QA mandatory) and `<redacted-operator-memory>`. MEMORY.md listed
-# them under "always injected", so the index asserted a delivery that was not
-# happening and nothing distinguished the two cases from the outside.
+# including the rule making independent adversarial QA mandatory, and a memory
+# holding sensitive personal context. MEMORY.md listed them under "always
+# injected", so the index asserted a delivery that was not happening and nothing
+# distinguished the two cases from the outside.
+#
+# Memory FILENAMES are operator data, not framework data. They are derived from
+# the memory's subject, so naming one in a tracked file publishes what the
+# operator keeps memories ABOUT even when the content itself never leaves the
+# machine. Describe the category ("a memory holding sensitive personal context"),
+# never the filename. See feedback_no_project_names_in_public_repos.
 _LIFTED_NESTED_KEYS = ("metadata",)
 
 
