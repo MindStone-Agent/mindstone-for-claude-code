@@ -194,7 +194,7 @@ def a5_index_degrades(r: Result):
         f"{rep['index_name_only']} name-only, all {rep['index_entries']} still listed")
     if rep_full.get("index_signal_saturated"):
         r.notes.append("last_applied is SATURATED — recency cannot order the index on this "
-                       "store; ordering falls through to prevented/hits. See #90.")
+                       "store; ordering falls through to prevented/hits. See #91.")
     assemble(None)
 
 
