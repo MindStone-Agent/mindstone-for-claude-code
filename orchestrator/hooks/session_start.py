@@ -35,6 +35,18 @@ try:
 except Exception:
     _authority_base = None
 
+# The bounded index generator. Guarded the same way — but note the fallback is NOT
+# "no index". An agent without the index cannot see what exists and therefore cannot
+# tell "I have no memory of that" from "I was never shown it", which is the single
+# most misleading state this system can boot into. So the fallback is the OLD
+# behaviour (MEMORY.md verbatim, unbounded) and it announces itself on stderr.
+try:
+    import memory_index as memory_index_mod
+except Exception as _e:  # pragma: no cover - import guard
+    memory_index_mod = None
+    print(f"[session_start] memory_index unavailable ({_e}); "
+          f"falling back to UNBOUNDED MEMORY.md injection", file=sys.stderr)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -420,6 +432,9 @@ def assemble_context(active_projects: set) -> str:
     """
     now = datetime.now(tz=timezone.utc)
     items: list[dict] = []
+    # Resolved once, up front: the index tier needs it to size its allocation
+    # BEFORE admission runs, not just at the admission step.
+    budget_for_index = budget = context_budget_chars()
 
     def add(tier: int, text: str, *, label: str = "", required: bool = False):
         if text and text.strip():
@@ -477,26 +492,16 @@ def assemble_context(active_projects: set) -> str:
             missing_invariant.append(path.name)
             add(TIER_INVARIANT, f"### `{path.name}` — {desc}\n{body.strip()}", label=path.name)
 
-    # The evergreen pointer list is a SUBSET of the memory index — measured 54 of 55
-    # entries duplicated verbatim, 23,021 chars of the injected block spent saying the
-    # same thing twice. The index is admitted at a higher precedence than this list, so
-    # whenever the index exists the pointers are pure duplication and the budget they
-    # consume comes straight out of the narrative tier.
+    # NOTE: there is no longer an "evergreen pointer list".
     #
-    # Build it ONLY as a fallback for installs with no index. (The one entry not in the
-    # index was `handoff.md`, which is not a memory file.)
-    index_file = MEMORY_DIR / "MEMORY.md"
-    if evergreen_pointers and not index_file.exists():
-        lines = ["## EVERGREEN REFERENCES (available — consult on demand)",
-                 "_No MEMORY.md index found, so evergreen memories are listed directly._"]
-        for path, fm in evergreen_pointers:
-            desc = fm.get("description", path.name)
-            lines.append(f"- `{path.name}` — {desc}")
-        # Admitted at the INDEX tier, not the evergreen tier: with no MEMORY.md this
-        # list IS the index, and "what exists" outranks any single narrative body.
-        # At the evergreen tier it sat behind 32 full narratives and never survived
-        # admission at all — a fallback that could not fire, which the control caught.
-        add(TIER_INDEX, "\n".join(lines), label="EVERGREEN (index fallback)")
+    # It was a SUBSET of the memory index — 54 of 55 entries duplicated verbatim,
+    # 23,021 chars of the block spent saying the same thing twice (#87) — kept only
+    # as a fallback for installs with no MEMORY.md on disk. The index is now
+    # GENERATED from frontmatter rather than read from that file, so it exists
+    # whenever memories exist and covers every evergreen memory by construction.
+    # The fallback would therefore fire never, or fire and re-create #87. Removed
+    # rather than left as a comforting no-op.
+    _ = evergreen_pointers  # retained above for the tier split; no longer injected
 
     # --- Weighted project memories (top-N) ---
     # Belt-and-suspenders: weight() is itself crash-proof now, but the whole ranking is
@@ -534,10 +539,43 @@ def assemble_context(active_projects: set) -> str:
     # Before this change the index was assembled LAST and the clip was a positional
     # slice, so it reached context 0% of the time on this store — the capability
     # existed and was deleted, every session, unreported.
-    memory_index = MEMORY_DIR / "MEMORY.md"
-    if memory_index.exists():
-        add(TIER_INDEX, "## MEMORY INDEX (all available memories)\n" + memory_index.read_text(),
-            label="MEMORY INDEX")
+    # The index is GENERATED from frontmatter and BOUNDED to a share of the budget.
+    # It used to be `MEMORY.md` read verbatim, which has two defects:
+    #
+    #   1. Unbounded. It is the only tier whose cost scales with memory COUNT rather
+    #      than with how many memories are binding. The constitution stops growing;
+    #      the index grows every checkpoint, forever. On a sibling store that file is
+    #      already 114,177 chars — 143% of the whole budget by itself.
+    #   2. Drift. A hand-maintained pointer file silently falls out of sync with the
+    #      corpus; #86 found 16 memories with no pointer at all. Generating from each
+    #      memory's own frontmatter makes that class of gap structurally impossible.
+    #
+    # Descriptions are still human-written — the generator enforces width and order,
+    # it does not summarise. `MEMORY.md` remains the human artefact on disk, with its
+    # categories and conventions, and #86's completeness check still guards it.
+    index_stats: dict = {}
+    if memory_index_mod is not None:
+        # The allocation is the SMALLER of its budget share and what is actually
+        # left after everything that outranks it (identity, user, the constitution).
+        #
+        # A fixed 40% of the TOTAL is wrong when the budget is squeezed: the index
+        # gets built to a size that cannot be admitted, then admission drops it
+        # WHOLE, and the agent loses all 102 names instead of shrinking to a
+        # name-only roster that would have fitted. Sizing against the real
+        # remainder is what makes "degrade the description, never the existence"
+        # hold at small budgets as well as large ones.
+        spent_above = sum(len(i["text"]) + len("\n\n---\n\n")
+                          for i in items if i["tier"] < TIER_INDEX)
+        allocation = max(0, min(int(budget_for_index * memory_index_mod.INDEX_ALLOCATION_FRACTION),
+                                budget_for_index - spent_above - len("\n\n---\n\n")))
+        index_text, index_stats = memory_index_mod.build_index(memories, allocation)
+        if index_text:
+            add(TIER_INDEX, index_text, label="MEMORY INDEX")
+    else:
+        legacy_index = MEMORY_DIR / "MEMORY.md"
+        if legacy_index.exists():
+            add(TIER_INDEX, "## MEMORY INDEX (all available memories)\n" + legacy_index.read_text(),
+                label="MEMORY INDEX")
 
     # --- Recent LOG tail for continuity ---
     if LOG_FILE.exists():
@@ -559,7 +597,6 @@ def assemble_context(active_projects: set) -> str:
     # alphabetical filenames. If something has to be dropped, the choice is
     # explicit and recorded rather than decided by a leading underscore.
     SEP = "\n\n---\n\n"
-    budget = context_budget_chars()
 
     admitted: list[dict] = []
     omitted: list[dict] = []
@@ -603,6 +640,21 @@ def assemble_context(active_projects: set) -> str:
         "missing_invariants": missing_invariants,
         "constitution_complete": not missing_invariants,
         "index_present": not index_dropped,
+        # The index is now bounded, so "present" is no longer the whole story:
+        # it can be present and rationed. Report the shape so a caller can tell
+        # a full catalogue from a name-only one instead of inferring from size.
+        "index_entries": index_stats.get("entries", 0),
+        "index_listed": index_stats.get("listed", 0),
+        "index_full": index_stats.get("full", 0),
+        "index_name_only": index_stats.get("name_only", 0),
+        "index_chars": index_stats.get("chars", 0),
+        "index_over_allocation": index_stats.get("over_allocation", False),
+        # The hard alarm: the catalogue could not hold even the NAMES of this many
+        # memories. Existence rationed, not just description. Must be 0 in a healthy
+        # install; non-zero means the agent cannot see part of its own store.
+        "index_unlisted": index_stats.get("unlisted", 0),
+        "index_roster_truncated": index_stats.get("roster_truncated", False),
+        "index_signal_saturated": index_stats.get("last_applied_saturated", False),
         # Best-effort by design: narrative deferred to disk + recall.
         "bodies_total": n_crit_total,
         "bodies_admitted": n_crit_ok,
@@ -651,10 +703,21 @@ def assemble_context(active_projects: set) -> str:
     # most of my rules and here are the names of the ones I do not."
     if missing_invariants or index_dropped:
         # The serious case: a BINDING RULE or the index did not reach context.
+        #
+        # The heading must name what ACTUALLY failed. An earlier version always
+        # said "INCOMPLETE CONSTITUTION", so a run with all 32 rules loaded and
+        # only the index dropped announced "0 binding rule(s) did not fit" — a
+        # warning that contradicts itself, which is how a real warning gets
+        # trained away. Same defect class as counting bodies and reporting 6/32.
         names = ", ".join(f"`{m}`" for m in missing_invariants[:12])
         more = f" (+{len(missing_invariants) - 12} more)" if len(missing_invariants) > 12 else ""
-        lines = [f"## ⚠ INCOMPLETE CONSTITUTION — {len(missing_invariants)} binding rule(s) "
-                 f"did not fit the {budget:,}-char budget"]
+        if missing_invariants:
+            heading = (f"## ⚠ INCOMPLETE CONSTITUTION — {len(missing_invariants)} binding rule(s) "
+                       f"did not fit the {budget:,}-char budget")
+        else:
+            heading = (f"## ⚠ MEMORY INDEX NOT LOADED — the constitution is complete, but the "
+                       f"catalogue did not fit the {budget:,}-char budget")
+        lines = [heading]
         if missing_invariants:
             lines.append(f"**RULES NOT LOADED:** {names}{more}")
             lines.append("Read them from `orchestrator/memory/` before acting on anything they "
@@ -663,11 +726,17 @@ def assemble_context(active_projects: set) -> str:
             lines.append("**The memory index did not load** — I cannot see what else exists. "
                          "Treat any 'I have no memory of that' as unreliable.")
         joined = "\n".join(lines) + "\n" + SEP + joined
-        print(f"[session_start] CONSTITUTION INCOMPLETE: {len(missing_invariants)} invariant(s) "
-              f"omitted at {budget:,} chars ({used:,} used)"
-              + (f"; index dropped" if index_dropped else "")
-              + (f". Missing: {', '.join(missing_invariants[:8])}" if missing_invariants else ""),
-              file=sys.stderr)
+        if missing_invariants:
+            print(f"[session_start] CONSTITUTION INCOMPLETE: {len(missing_invariants)} invariant(s) "
+                  f"omitted at {budget:,} chars ({used:,} used)"
+                  + ("; index also dropped" if index_dropped else "")
+                  + f". Missing: {', '.join(missing_invariants[:8])}", file=sys.stderr)
+        else:
+            print(f"[session_start] INDEX DROPPED at {budget:,} chars ({used:,} used): "
+                  f"constitution COMPLETE ({n_inv_ok}/{n_inv_total}), but no room remained for the "
+                  f"{index_stats.get('entries', 0)}-entry catalogue. Raise "
+                  f"MS4CC_CONTEXT_BUDGET_CHARS — at this budget the agent cannot see what exists.",
+                  file=sys.stderr)
     elif omitted:
         # The ordinary case: the constitution is whole, narrative was deferred.
         # Deliberately NOT phrased as a failure — this is the tiering working.
