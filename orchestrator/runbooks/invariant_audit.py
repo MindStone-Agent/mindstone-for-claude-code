@@ -46,6 +46,7 @@ import sys
 from pathlib import Path
 
 ORCHESTRATOR_DIR = Path(__file__).resolve().parent.parent
+MEMORY_DIR = ORCHESTRATOR_DIR / "memory"
 sys.path.insert(0, str(ORCHESTRATOR_DIR / "hooks"))
 
 MIN_INVARIANT_CHARS = 40
@@ -76,6 +77,29 @@ def degeneracy(inv: str, description: str = "") -> list[str]:
     if description and s.strip().lower() == description.strip().lower():
         reasons.append("identical to `description` — adds nothing over the index line")
     return reasons
+
+
+def index_check() -> tuple[int, list[str]]:
+    """Every memory must have a pointer in MEMORY.md. Returns (missing_count, names).
+
+    The index is maintained BY HAND, on purpose: an entry carries a curated one-line
+    description that an auto-generated line cannot match, and that description is
+    what makes a memory findable when recall does not surface it. So this does not
+    generate the index — it fails when one is missing, and a human writes the line.
+
+    Measured 2026-08-26: 16 of 102 memories had no pointer. Fifteen were created in
+    the store's first month, when the habit was still forming; the rate has been ~0
+    every month since. Nothing detected it for three months because nothing checked.
+    """
+    import re
+    idx_path = MEMORY_DIR / "MEMORY.md"
+    if not idx_path.exists():
+        return 0, []
+    idx = idx_path.read_text(encoding="utf-8", errors="replace")
+    linked = set(re.findall(r"([A-Za-z0-9_.\-]+\.md)", idx))
+    missing = sorted(p.name for p in MEMORY_DIR.glob("*.md")
+                     if p.name != "MEMORY.md" and p.name not in linked)
+    return len(missing), missing
 
 
 def audit():
@@ -121,12 +145,28 @@ def audit():
     if full_total:
         print(f"  reduction vs full text              {100 - projected/full_total*100:>9.1f}%")
 
-    rc = 1 if (missing or degen) else 0
+    # ---- index completeness ------------------------------------------------
+    n_unindexed, unindexed = index_check()
+    print(f"\nINDEX COMPLETENESS")
+    print(f"  memories with no pointer in MEMORY.md : {n_unindexed}")
+    if n_unindexed:
+        for name in unindexed[:20]:
+            print(f"      - {name}")
+        if n_unindexed > 20:
+            print(f"      ... and {n_unindexed - 20} more")
+        print("  Write a curated one-line pointer for each. Do NOT auto-generate them:")
+        print("  the description is what makes a memory findable when recall does not surface it.")
+
+    rc = 1 if (missing or degen or n_unindexed) else 0
     if rc:
-        print(f"\nINCOMPLETE — {len(missing)} missing, {len(degen)} degenerate. "
-              f"Run with --missing for the worklist.")
+        bits = []
+        if missing: bits.append(f"{len(missing)} invariant(s) missing")
+        if degen: bits.append(f"{len(degen)} degenerate")
+        if n_unindexed: bits.append(f"{n_unindexed} unindexed")
+        print(f"\nINCOMPLETE — {', '.join(bits)}. Run with --missing for the worklist.")
     else:
-        print("\nOK — every critical memory carries a usable invariant.")
+        print("\nOK — every critical memory carries a usable invariant, "
+              "and every memory has an index pointer.")
     return rc, missing
 
 
