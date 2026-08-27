@@ -36,17 +36,17 @@ try:
 except Exception:
     _authority_base = None
 
-# The bounded index generator. Guarded the same way — but note the fallback is NOT
-# "no index". An agent without the index cannot see what exists and therefore cannot
-# tell "I have no memory of that" from "I was never shown it", which is the single
-# most misleading state this system can boot into. So the fallback is the OLD
-# behaviour (MEMORY.md verbatim, unbounded) and it announces itself on stderr.
+# The bounded index generator. Guarded — but the fallback is NOT "no index". An
+# agent without the index cannot tell "I have no memory of that" from "I was never
+# shown it", which is the most misleading state this system can boot into. The
+# fallback is a name-only roster built from frontmatter, which needs nothing from
+# this module and is bounded by construction.
 try:
     import memory_index as memory_index_mod
 except Exception as _e:  # pragma: no cover - import guard
     memory_index_mod = None
     print(f"[session_start] memory_index unavailable ({_e}); "
-          f"falling back to UNBOUNDED MEMORY.md injection", file=sys.stderr)
+          f"falling back to a NAME-ONLY index roster", file=sys.stderr)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -342,11 +342,13 @@ def _as_str_list(v) -> list[str]:
     """
     if v is None or v == "":
         return []
+    # STRIP: `projects: threatgen ` with a trailing space is a hand-edit, and an
+    # unstripped value silently fails to match the project it names (Cairn, #99 review).
     if isinstance(v, str):
-        return [v]
+        return [v.strip()] if v.strip() else []
     if isinstance(v, (list, tuple, set)):
-        return [str(x) for x in v]
-    return [str(v)]
+        return [s for s in (str(x).strip() for x in v) if s]
+    return [str(v).strip()]
 
 
 def weight(fm: dict, now: datetime, active_projects: set) -> float:
@@ -596,10 +598,28 @@ def assemble_context(active_projects: set) -> str:
         if index_text:
             add(TIER_INDEX, index_text, label="MEMORY INDEX")
     else:
-        legacy_index = MEMORY_DIR / "MEMORY.md"
-        if legacy_index.exists():
-            add(TIER_INDEX, "## MEMORY INDEX (all available memories)\n" + legacy_index.read_text(),
-                label="MEMORY INDEX")
+        # The generator is unavailable. The OLD fallback injected `MEMORY.md`
+        # verbatim — 114,656 chars on a sibling store against ~41,000 of headroom
+        # — so admission dropped it WHOLE and the agent got no catalogue at all.
+        # A fallback that restores the pre-#90 failure is not a fallback.
+        #
+        # Build a name-only roster from frontmatter instead. It needs nothing from
+        # the missing module, it is bounded by construction (~48 chars/entry), and
+        # it keeps this path consistent with minimal_context() rather than being
+        # the one place that says existence is expendable. Cairn ran it and
+        # confirmed the old behaviour; this is the shape he suggested.
+        names = sorted(p.name for p, fm, _b in memories
+                       if fm.get("type") not in ("index", "log", "roadmap"))
+        if names:
+            add(TIER_INDEX,
+                "## MEMORY INDEX (names only — the index generator is unavailable)\n"
+                "_Descriptions are missing because `memory_index` failed to import, not because "
+                "the budget is short. Every memory is listed and readable on disk._\n"
+                + "\n".join(f"- `{n}`" for n in names),
+                label="MEMORY INDEX (degraded: generator unavailable)")
+            index_stats = {"entries": len(names), "listed": len(names), "full": 0,
+                           "name_only": len(names), "unlisted": 0, "roster_truncated": False,
+                           "chars": 0, "over_allocation": False}
 
     # --- Recent LOG tail for continuity ---
     if LOG_FILE.exists():
@@ -756,25 +776,57 @@ def assemble_context(active_projects: set) -> str:
                   + ("; index also dropped" if index_dropped else "")
                   + f". Missing: {', '.join(missing_invariants[:8])}", file=sys.stderr)
         else:
-            print(f"[session_start] INDEX DROPPED at {budget:,} chars ({used:,} used): "
-                  f"constitution COMPLETE ({n_inv_ok}/{n_inv_total}), but no room remained for the "
-                  f"{index_stats.get('entries', 0)}-entry catalogue. Raise "
-                  f"MS4CC_CONTEXT_BUDGET_CHARS — at this budget the agent cannot see what exists.",
+            # Say what actually happened and recommend the action that fixes IT.
+            #
+            # The previous version printed "no room remained" alongside "335 used"
+            # of 80,000 — self-contradictory — reported a 0-entry catalogue for a
+            # document holding 900 (index_stats is empty when the generator never
+            # ran), and told the operator to raise the budget. Following that
+            # advice would have "worked" for the wrong reason and buried the real
+            # cause: a module that failed to import. Cairn caught it by running
+            # the path rather than reading it.
+            #
+            # A diagnostic that teaches a wrong cause is worse than none, because
+            # it gets acted on — and this one is aimed at a human at 2am with a
+            # broken install.
+            item = next((i for i in omitted if i["tier"] == TIER_INDEX), None)
+            size = len(item["text"]) if item else 0
+            headroom = budget - sum(len(i["text"]) + len(SEP) for i in admitted
+                                    if i["tier"] < TIER_INDEX)
+            if memory_index_mod is None:
+                cause = ("the memory_index module failed to IMPORT, so the fallback roster was "
+                         "used. Fix the import — raising the budget will not help.")
+            elif size > budget:
+                cause = (f"the catalogue alone is {size:,} chars against a {budget:,} budget, so it "
+                         f"cannot fit however much room is free. Lower "
+                         f"MS4CC_INDEX_ALLOCATION or raise MS4CC_CONTEXT_BUDGET_CHARS above {size:,}.")
+            else:
+                cause = (f"the catalogue is {size:,} chars and only {headroom:,} remained after "
+                         f"identity, user and the constitution. Raise MS4CC_CONTEXT_BUDGET_CHARS.")
+            print(f"[session_start] INDEX DROPPED: constitution COMPLETE "
+                  f"({n_inv_ok}/{n_inv_total}) but the agent cannot see what exists — {cause}",
                   file=sys.stderr)
     elif omitted:
         # The ordinary case: the constitution is whole, narrative was deferred.
         # Deliberately NOT phrased as a failure — this is the tiering working.
         joined = (
-            f"## Context note — constitution complete, {len(omitted)} narrative item(s) deferred\n"
+            f"## Context note — constitution complete, {n_crit_total - n_crit_ok} narrative item(s) deferred\n"
             f"All {n_inv_total} binding rules are loaded above. "
             f"{n_crit_ok} of {n_crit_total} full narratives fit; the rest live in "
             f"`orchestrator/memory/` and are retrievable by name or recall. "
             f"Nothing was cut mid-file.\n"
             + SEP + joined
         )
+        # `len(omitted)` counts EVERY deferred item, not just narratives, so the
+        # line read "10/32 narratives loaded, 24 deferred" -> 10 + 24 = 34 against a
+        # stated total of 32. Cairn spotted the arithmetic. Count the narratives,
+        # and name the other tiers separately rather than folding them in.
+        other = len(omitted) - (n_crit_total - n_crit_ok)
         print(f"[session_start] budget {used:,}/{budget:,} ({used/budget*100:.0f}%): "
               f"constitution COMPLETE ({n_inv_ok}/{n_inv_total} invariants); "
-              f"{n_crit_ok}/{n_crit_total} narratives loaded, {len(omitted)} deferred.",
+              f"{n_crit_ok}/{n_crit_total} narratives loaded, "
+              f"{n_crit_total - n_crit_ok} deferred"
+              + (f"; {other} other item(s) deferred" if other else "") + ".",
               file=sys.stderr)
     elif LAST_ASSEMBLY["over_budget"]:
         # Everything fitted only because required items are exempt.
@@ -784,6 +836,20 @@ def assemble_context(active_projects: set) -> str:
             file=sys.stderr,
         )
 
+    # The reported figure must be the ARTIFACT, not the accounting.
+    #
+    # `used` is admission arithmetic and excludes the in-band notice, which is
+    # prepended afterwards — so the block reaching context was 459 chars larger
+    # than the number reported beside it. Cairn measured +326 on his store. Small
+    # in effect, and exactly the family of defect as the P1 footnote reserve:
+    # a total that disagrees with the thing it claims to total.
+    #
+    # `used` is kept because the admission loop is entitled to its own arithmetic;
+    # `emitted` is what actually reaches the model, and it is what --check reports.
+    LAST_ASSEMBLY["emitted"] = len(joined)
+    LAST_ASSEMBLY["notice_chars"] = len(joined) - sum(
+        len(i["text"]) + (len(SEP) if n else 0) for n, i in enumerate(admitted))
+    LAST_ASSEMBLY["over_budget"] = len(joined) > budget
     return joined
 
 def first_run_invitation() -> str:
@@ -975,7 +1041,9 @@ def check_mode() -> int:
     assemble_context(infer_active_projects(os.getcwd()))
     r = LAST_ASSEMBLY
     print(f"budget          {r['budget']:,} chars")
-    print(f"used            {r['used']:,} ({r['utilisation']*100:.1f}%)")
+    print(f"emitted         {r['emitted']:,} ({r['emitted']/r['budget']*100:.1f}%)  "
+          f"<- what actually reaches context")
+    print(f"  of which      {r['used']:,} admitted items + {r['notice_chars']:,} in-band notice")
     print(f"items           {r['items_admitted']}/{r['items_total']} admitted")
     print(f"CONSTITUTION    {r['invariants_admitted']}/{r['invariants_total']} binding rules  "
           f"<- must be total")
@@ -1100,6 +1168,12 @@ def _self_test() -> int:
     ck("CONTROL and it DOES match its own project",
        any(p in {"threatgen"} for p in _as_str_list("threatgen")))
 
+    ck("a trailing space is stripped so the project still matches",
+       _as_str_list("  spaced  "), ["spaced"])
+    ck("CONTROL an unstripped value would NOT have matched",
+       any(p in {"spaced"} for p in ["  spaced  "]), False)
+    ck("whitespace-only is empty, not a phantom project", _as_str_list("   "), [])
+
     now = datetime.now(tz=timezone.utc)
     raised = []
     for v in (["a"], "a", 5, None, "", ("a", "b"), {"a": 1}, 3.5):
@@ -1139,6 +1213,22 @@ def _self_test() -> int:
         ck("CONTROL the floor is smaller than a healthy assembly", len(ctx) < len(full))
     except Exception:  # noqa: BLE001
         ck("CONTROL healthy assembly available for comparison", False)
+        full = ""
+
+    # --- the report must describe the ARTIFACT, not the accounting.
+    r = LAST_ASSEMBLY
+    ck("reported `emitted` equals the block actually returned", r["emitted"], len(full))
+    ck("the in-band notice is accounted for, not free",
+       r["used"] + r["notice_chars"], r["emitted"])
+    # CONTROL: on a healthy store there IS a notice, so this is not vacuous.
+    ck("CONTROL the notice is non-empty (so the accounting is exercised)",
+       r["notice_chars"] > 0)
+
+    # --- the narrative arithmetic must add up.
+    ck("narratives loaded + deferred == total",
+       r["bodies_admitted"] + (r["bodies_total"] - r["bodies_admitted"]), r["bodies_total"])
+    ck("CONTROL total omitted exceeds omitted narratives (so the old count was wrong)",
+       len(r["omitted"]) >= r["bodies_total"] - r["bodies_admitted"])
 
     failed = [l for l, ok in checks if not ok]
     for label, ok in checks:
