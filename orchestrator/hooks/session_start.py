@@ -477,12 +477,26 @@ def assemble_context(active_projects: set) -> str:
             missing_invariant.append(path.name)
             add(TIER_INVARIANT, f"### `{path.name}` — {desc}\n{body.strip()}", label=path.name)
 
-    if evergreen_pointers:
-        lines = ["## EVERGREEN REFERENCES (available — consult on demand)"]
+    # The evergreen pointer list is a SUBSET of the memory index — measured 54 of 55
+    # entries duplicated verbatim, 23,021 chars of the injected block spent saying the
+    # same thing twice. The index is admitted at a higher precedence than this list, so
+    # whenever the index exists the pointers are pure duplication and the budget they
+    # consume comes straight out of the narrative tier.
+    #
+    # Build it ONLY as a fallback for installs with no index. (The one entry not in the
+    # index was `handoff.md`, which is not a memory file.)
+    index_file = MEMORY_DIR / "MEMORY.md"
+    if evergreen_pointers and not index_file.exists():
+        lines = ["## EVERGREEN REFERENCES (available — consult on demand)",
+                 "_No MEMORY.md index found, so evergreen memories are listed directly._"]
         for path, fm in evergreen_pointers:
             desc = fm.get("description", path.name)
             lines.append(f"- `{path.name}` — {desc}")
-        add(TIER_EVERGREEN, "\n".join(lines), label="EVERGREEN")
+        # Admitted at the INDEX tier, not the evergreen tier: with no MEMORY.md this
+        # list IS the index, and "what exists" outranks any single narrative body.
+        # At the evergreen tier it sat behind 32 full narratives and never survived
+        # admission at all — a fallback that could not fire, which the control caught.
+        add(TIER_INDEX, "\n".join(lines), label="EVERGREEN (index fallback)")
 
     # --- Weighted project memories (top-N) ---
     # Belt-and-suspenders: weight() is itself crash-proof now, but the whole ranking is
