@@ -410,12 +410,55 @@ def reindex_changed_memory() -> tuple[int, int, int, int]:
 # Auto-increment hits based on memory filenames appearing in the transcript
 # ---------------------------------------------------------------------------
 
-def auto_increment_hits(archived_path: Path) -> list[str]:
-    """Scan the transcript for memory-file filename mentions and bump `hits`.
+# Regions the hooks INJECT into the transcript. A memory's name inside one of
+# these is evidence the system PRINTED it, not that anyone used it — the memory
+# index alone names every memory that exists, every session.
+_INJECTED_REGIONS = (
+    "orchestrator-context",
+    "semantic-recall",
+    "session-handoff",
+    "context-capacity-handoff",
+    "synapse-digest",
+)
+_INJECTED_RE = re.compile(
+    r"<(" + "|".join(_INJECTED_REGIONS) + r")\b[^>]*>.*?</\1>",
+    re.DOTALL | re.IGNORECASE,
+)
 
-    Heuristic: if a memory filename like `feedback_never_destructive_git` or
-    `feedback_never_destructive_git.md` appears anywhere in the transcript
-    text, count it as a citation and increment that file's `hits` frontmatter.
+
+def strip_injected(text: str) -> str:
+    """Remove hook-injected regions so only authored text is scanned.
+
+    An unterminated region swallows to the next close tag, which over-strips and
+    therefore UNDER-counts. That is the safe direction: a missed citation costs a
+    little ranking accuracy, a phantom one corrupts the signal permanently.
+    """
+    return _INJECTED_RE.sub(" ", text)
+
+
+def auto_increment_hits(archived_path: Path) -> list[str]:
+    """Credit a memory with a citation when its name appears in NEW authored text.
+
+    Two filters, both load-bearing:
+
+    1. **Only the bytes written since the last scan.** This is the one that
+       mattered. The scan used to read the WHOLE cumulative transcript every
+       turn, so a memory mentioned once was re-credited on every turn forever
+       after. `hits` therefore measured turns-elapsed-since-first-mention, i.e.
+       file age (measured: r=0.85 with age, and 103/103 files credited on every
+       single run), and `last_applied` was stamped to today for every file every
+       turn — which pinned the exponential decay term near 1.0 permanently and
+       meant the half-life mechanism had NEVER ONCE fired.
+
+       Measured on a 617 MB transcript: scanning the last 50 KB credits 1 memory,
+       the last 500 KB credits 4, the whole file credits all 103.
+
+    2. **Not text the hooks injected.** The memory index names every memory that
+       exists; crediting a name found there is the system reading its own output
+       back as evidence of use. Secondary to (1) but independently correct, and
+       it is what keeps a fresh install from self-crediting on turn one.
+
+    A counter with no input that produces zero is not a measurement. See #91.
 
     Returns list of memory filenames that were incremented.
     """
@@ -424,9 +467,34 @@ def auto_increment_hits(archived_path: Path) -> list[str]:
     if not MEMORY_DIR.exists():
         return []
 
+    # Resume from wherever the previous scan stopped. Keyed by filename so a
+    # re-archive of the same session continues rather than restarting.
+    state = _load_index_state()
+    offsets = state.setdefault("hit_scan_offsets", {})
+    key = archived_path.name
     try:
-        transcript_text = archived_path.read_text()
+        size = archived_path.stat().st_size
     except Exception:
+        return []
+    start = int(offsets.get(key, 0) or 0)
+    # Truncated or replaced file — never seek past EOF and silently scan nothing.
+    if start > size:
+        start = 0
+
+    try:
+        with archived_path.open("rb") as fh:
+            fh.seek(start)
+            transcript_text = fh.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    # Record the new watermark even if nothing matches, so an unproductive turn
+    # does not leave the window open to be rescanned next time.
+    offsets[key] = size
+    _save_index_state(state)
+
+    transcript_text = strip_injected(transcript_text)
+    if not transcript_text.strip():
         return []
 
     memory_names = {p.name: p for p in MEMORY_DIR.glob("*.md")}
