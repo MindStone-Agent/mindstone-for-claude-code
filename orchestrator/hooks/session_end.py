@@ -632,6 +632,51 @@ def main():
             + (f", error={vec['error']}" if vec["error"] else ""),
             file=sys.stderr,
         )
+
+        # Store health, reported where it will actually be read. The index is
+        # hand-maintained on purpose (a curated description beats a generated one),
+        # which means a skipped step is invisible forever unless something checks.
+        # 16 of 102 memories had drifted out of the index over three months before
+        # anyone looked. Warn, never fail: the checkpoint's job is persistence, and
+        # refusing to persist a session because an index line is missing would
+        # trade a small gap for a large one.
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "runbooks"))
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from invariant_audit import index_check, degeneracy  # noqa: E402
+            # Reuse the REAL parser rather than writing a second one here: a
+            # divergent copy would disagree with what actually gets injected,
+            # and then this check would be auditing a fiction.
+            from session_start import parse_frontmatter  # noqa: E402
+            n_unindexed, unindexed = index_check()
+            no_inv, degen = [], []
+            for p in sorted(MEMORY_DIR.glob("*.md")):
+                if p.name == "MEMORY.md":
+                    continue
+                fm, _ = parse_frontmatter(p.read_text(encoding="utf-8", errors="replace"))
+                if not fm.get("critical"):
+                    continue
+                inv = (fm.get("invariant") or "").strip()
+                if not inv:
+                    no_inv.append(p.name)
+                elif degeneracy(inv, fm.get("description", "")):
+                    degen.append(p.name)
+            if n_unindexed or no_inv or degen:
+                bits = []
+                if n_unindexed:
+                    bits.append(f"{n_unindexed} memory(s) missing an index pointer "
+                                f"({', '.join(unindexed[:3])}{'…' if n_unindexed > 3 else ''})")
+                if no_inv:
+                    bits.append(f"{len(no_inv)} critical without an invariant "
+                                f"({', '.join(no_inv[:3])}{'…' if len(no_inv) > 3 else ''})")
+                if degen:
+                    bits.append(f"{len(degen)} degenerate invariant(s) "
+                                f"({', '.join(degen[:3])}{'…' if len(degen) > 3 else ''})")
+                print(f"[checkpoint] STORE HEALTH: " + "; ".join(bits)
+                      + ". Run orchestrator/runbooks/invariant_audit.py", file=sys.stderr)
+        except Exception as e:
+            print(f"[checkpoint] store-health check unavailable ({e})", file=sys.stderr)
+
         if not vec_ok:
             sys.exit(1)
 
