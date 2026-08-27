@@ -39,9 +39,19 @@ scores it must not suppress. If those bands overlap there is NO safe floor, and 
 is a finding about the store — reported, not tuned away. Exits non-zero so a caller
 can gate on it.
 
+A NOTE ON TRUSTING THIS SCRIPT
+------------------------------
+Its output became `MIN_SIMILARITY = 0.50`, and for a while it had no test of any
+kind — a calibration tool that could not itself be calibrated. `decide()` is now
+pure and `--self-test` exercises it on synthetic bands with known answers,
+including the case that must never read as clean: overlapping bands. The
+self-test also gates a real run, so a green calibration cannot come from broken
+verdict logic.
+
 Usage:
     python3 calibrate_recall_floor.py
     python3 calibrate_recall_floor.py --k 6 --json report.json
+    python3 calibrate_recall_floor.py --self-test
 """
 
 from __future__ import annotations
@@ -204,12 +214,158 @@ def band(scores):
     }
 
 
+MARGINAL_REL = 0.05          # <5% of the observed score range = not separation
+
+
+def decide(bands: dict) -> dict | None:
+    """Turn measured bands into a verdict. PURE — no printing, no I/O.
+
+    Extracted from main() so it can be exercised on synthetic bands. It was
+    previously inline, which meant the single most consequential piece of logic
+    in this repo's calibration path — the one whose output became
+    MIN_SIMILARITY = 0.50 — had no test of any kind. A calibration tool that
+    cannot be calibrated is the same species of problem as a check that cannot
+    fail, and this one had already been acted on.
+
+    Returns None when a required band is empty (INCONCLUSIVE).
+    """
+    if not bands.get("absent") or not any(bands.get(c) for c in POSITIVE_CLASSES):
+        return None
+
+    # The floor must clear EVERY negative and suppress NO positive, so it is
+    # bounded by the worst case on each side — the highest false positive and the
+    # WEAKEST true positive, across all classes.
+    #
+    # An earlier version set the ceiling from `descriptive` alone, on the
+    # reasoning that `verbatim` was inflated. That was backwards: verbatim scores
+    # LOWER (a lone sentence must match its own file against 500+ competing
+    # chunks, where a description is a dense summary of the whole file), so
+    # excluding it discarded the hardest positive case and produced a floor that
+    # would have suppressed real matches. Choosing which positives to measure
+    # against is how a harness flatters itself.
+    neg = {c: b for c, b in bands.items() if c in NEGATIVE_CLASSES and b}
+    neg_ceiling = max(b["max"] for b in neg.values())
+    neg_min = min(b["min"] for b in neg.values())
+    pos_floor, binding_class = min(
+        ((bands[c]["min"], c) for c in POSITIVE_CLASSES if bands.get(c)), key=lambda t: t[0])
+    margin = pos_floor - neg_ceiling
+
+    span = (max(b["max"] for b in bands.values() if b)
+            - min(b["min"] for b in bands.values() if b))
+    rel = margin / span if span else 0.0
+
+    # A positive margin is not the same as a usable one. The score range here
+    # spans roughly 0.48-0.77, so a margin of a few thousandths is a rounding
+    # artefact dressed as a decision. Three outcomes, not two.
+    if margin <= 0:
+        verdict, rc = "no_safe_floor", 1
+    elif rel < MARGINAL_REL:
+        verdict, rc = "marginal", 1
+    else:
+        verdict, rc = "viable", 0
+
+    return {
+        "neg_ceiling": neg_ceiling, "neg_min": neg_min,
+        "pos_floor": pos_floor, "binding_class": binding_class,
+        "margin": margin, "span": span, "rel": rel,
+        "recommended": neg_ceiling + margin * 0.5,
+        "verdict": verdict, "rc": rc,
+    }
+
+
+def _self_test() -> int:
+    """Prove the verdict logic discriminates. Synthetic bands, known answers."""
+    def B(lo, hi):
+        return {"n": 10, "min": lo, "p05": lo, "median": (lo + hi) / 2, "p95": hi, "max": hi}
+
+    checks: list[tuple[str, bool]] = []
+
+    def ck(label, got, want=True):
+        checks.append((label, got == want))
+
+    # --- clean separation -> viable
+    d = decide({"verbatim": B(0.70, 0.80), "descriptive": B(0.75, 0.85),
+                "gibberish": B(0.30, 0.40), "absent": B(0.35, 0.45)})
+    ck("well-separated bands -> viable", d["verdict"], "viable")
+    ck("  recommended floor sits between the bands",
+       d["neg_ceiling"] < d["recommended"] < d["pos_floor"])
+    ck("  exit code is success", d["rc"], 0)
+
+    # --- OVERLAP -> no safe floor. The case that must never read as clean.
+    d = decide({"verbatim": B(0.40, 0.80), "descriptive": B(0.75, 0.85),
+                "gibberish": B(0.30, 0.40), "absent": B(0.35, 0.55)})
+    ck("overlapping bands -> NO SAFE FLOOR", d["verdict"], "no_safe_floor")
+    ck("  margin is negative", d["margin"] < 0)
+    ck("  exit code is failure", d["rc"], 1)
+
+    # --- technically disjoint, practically not -> marginal
+    d = decide({"verbatim": B(0.5010, 0.80), "descriptive": B(0.75, 0.85),
+                "gibberish": B(0.30, 0.40), "absent": B(0.35, 0.50)})
+    ck("a hair's-breadth gap -> MARGINAL, not viable", d["verdict"], "marginal")
+    ck("  and it does NOT report success", d["rc"], 1)
+
+    # --- the binding positive must be the WEAKEST class, not a chosen one.
+    d = decide({"verbatim": B(0.60, 0.70), "descriptive": B(0.80, 0.90),
+                "gibberish": B(0.30, 0.40), "absent": B(0.35, 0.45)})
+    ck("the weakest positive class binds the floor", d["binding_class"], "verbatim")
+    ck("  the floor is NOT taken from the flattering class", d["pos_floor"], 0.60)
+
+    # --- the hardest negative must set the ceiling.
+    d = decide({"verbatim": B(0.70, 0.80), "descriptive": B(0.75, 0.85),
+                "gibberish": B(0.30, 0.40), "absent": B(0.35, 0.58)})
+    ck("the strongest false positive sets the ceiling", d["neg_ceiling"], 0.58)
+
+    # --- INCONCLUSIVE rather than a confident number from missing data.
+    ck("an empty negative band is inconclusive, not viable",
+       decide({"verbatim": B(0.7, 0.8), "descriptive": B(0.7, 0.8),
+               "gibberish": None, "absent": None}), None)
+    ck("an empty positive band is inconclusive, not viable",
+       decide({"verbatim": None, "descriptive": None,
+               "gibberish": B(0.3, 0.4), "absent": B(0.3, 0.4)}), None)
+
+    # --- band() itself
+    ck("band() returns None when every score is a miss", band([0.0, 0.0, 0.0]), None)
+    b = band([0.0, 0.5, 0.7])
+    ck("band() ignores misses when summarising", (b["n"], b["min"], b["max"]), (2, 0.5, 0.7))
+
+    # --- score_class against an injected recall, both directions.
+    def fake(hit_name):
+        def _r(_q, k=4, source_types=None, mmr=False):
+            return [{"source_path": f"/x/{hit_name}", "similarity": 0.42}]
+        return _r
+    s, m = score_class(fake("right.md"), [("q", Path("/mem/right.md"))], 4, positive=True)
+    ck("score_class credits a correct retrieval", (s, m), ([0.42], 0))
+    s, m = score_class(fake("wrong.md"), [("q", Path("/mem/right.md"))], 4, positive=True)
+    ck("CONTROL score_class records a MISS when the wrong file comes back", (s, m), ([0.0], 1))
+
+    failed = [l for l, ok in checks if not ok]
+    for label, ok in checks:
+        print(f"  {'ok  ' if ok else 'FAIL'} {label}")
+    print()
+    if failed:
+        print(f"SELF-TEST FAILED — {len(failed)} assertion(s). Do not trust this calibration.")
+        return 1
+    print(f"SELF-TEST PASSED — {len(checks)} assertions; the verdict distinguishes "
+          f"separated, marginal and overlapping bands.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--self-test", action="store_true",
+                    help="prove the verdict logic discriminates, then exit")
     ap.add_argument("--k", type=int, default=4, help="top-k, match the caller you are calibrating (default 4)")
     ap.add_argument("--gibberish", type=int, default=12, help="number of token-salad queries")
     ap.add_argument("--json", type=Path, help="write the full report as JSON")
     args = ap.parse_args()
+
+    if args.self_test:
+        return _self_test()
+    # A green run means nothing if the verdict logic itself is broken, so the
+    # self-test gates the real calibration rather than sitting beside it.
+    if _self_test() != 0:
+        return 2
+    print()
 
     try:
         from recall import recall
@@ -256,25 +412,14 @@ def main() -> int:
 
     # ---- the decision -------------------------------------------------------
     print("\n" + "=" * 72)
-    if not bands["absent"] or not any(bands[c] for c in POSITIVE_CLASSES):
+    d = decide(bands)
+    if d is None:
         print("VERDICT: INCONCLUSIVE — a required band is empty.")
         return 2
 
-    # The floor must clear EVERY negative and suppress NO positive, so it is
-    # bounded by the worst case on each side — the highest false positive and the
-    # WEAKEST true positive, across all classes.
-    #
-    # An earlier version of this script set the ceiling from `descriptive` alone,
-    # on the reasoning that `verbatim` was inflated and should not drive the
-    # decision. That was backwards: verbatim scores LOWER (a lone sentence must
-    # match its own file against 500+ competing chunks, where a description is a
-    # dense summary of the whole file), so excluding it discarded the hardest
-    # positive case and produced a floor that would have suppressed real matches.
-    # Choosing which positives to measure against is how a harness flatters itself.
-    neg_ceiling = max(b["max"] for c, b in bands.items() if c in NEGATIVE_CLASSES and b)
-    binding = min(((bands[c]["min"], c) for c in POSITIVE_CLASSES if bands[c]), key=lambda t: t[0])
-    pos_floor, binding_class = binding
-    margin = pos_floor - neg_ceiling
+    neg_ceiling = d["neg_ceiling"]
+    pos_floor, binding_class = d["pos_floor"], d["binding_class"]
+    margin = d["margin"]
 
     print(f"negative ceiling (worst false positive) : {neg_ceiling:.4f}")
     print(f"positive floor   (weakest true positive): {pos_floor:.4f}   [binding class: {binding_class}]")
@@ -286,22 +431,16 @@ def main() -> int:
               f"   ({'coherent absent text scores HIGHER — calibrating on gibberish alone would set the floor too low'
                     if gap > 0 else 'gibberish scored at least as high'})")
 
-    # A positive margin is not the same as a usable one. The score range here spans
-    # roughly 0.48–0.77, so a margin of a few thousandths is a rounding artefact
-    # dressed as a decision. Report three outcomes, not two.
-    span = max(b["max"] for b in bands.values() if b) - min(b["min"] for b in bands.values() if b)
-    rel = margin / span if span else 0.0
-    MARGINAL_REL = 0.05          # <5% of the observed score range = not separation
-
-    rc = 0
-    rec = neg_ceiling + margin * 0.5
-    if margin <= 0:
+    span, rel = d["span"], d["rel"]
+    rc = d["rc"]
+    rec = d["recommended"]
+    if d["verdict"] == "no_safe_floor":
         print("\nVERDICT: NO SAFE FLOOR — the bands OVERLAP.")
         print("  Some unanswerable queries outscore some genuine matches. No single threshold")
         print("  separates them. This is a finding about the store, not a tuning failure:")
         print("  narrative must NOT be deferred to recall alone on this branch.")
         rc = 1
-    elif rel < MARGINAL_REL:
+    elif d["verdict"] == "marginal":
         print(f"\nVERDICT: MARGINAL — the bands are technically disjoint and practically not.")
         print(f"  margin {margin:.4f} is {rel*100:.1f}% of the observed score range ({span:.3f}).")
         print(f"  A floor at {rec:.3f} would sit {margin/2:.4f} from BOTH the weakest true")
