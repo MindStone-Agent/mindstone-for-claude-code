@@ -23,6 +23,7 @@ import math
 import os
 import re
 import subprocess
+import traceback
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -981,6 +982,61 @@ def check_mode() -> int:
     return 0
 
 
+def minimal_context(err: Exception) -> str:
+    """The floor. Identity, user, and every binding rule we can read off disk.
+
+    Deliberately primitive: direct file reads, a line-scan for `invariant:`, no
+    ranking, no weighting, no budget arithmetic, no index generator. Every one of
+    those is a component that could have been what raised, so none of them may be
+    on the recovery path. Each file is guarded individually, so one unreadable
+    memory cannot take the fallback down the way it just took assembly down.
+
+    The notice is IN-BAND because a diagnostic on stderr does not reach the model,
+    and an agent running on a partial constitution needs to know it is.
+    """
+    parts = [
+        "## ⚠ DEGRADED BOOT — context assembly failed\n"
+        f"`{type(err).__name__}: {err}`\n\n"
+        "Identity and the binding rules below were read directly from disk. "
+        "**The memory index did not load, so I cannot see what else exists** — "
+        "treat any 'I have no memory of that' as unreliable, and read "
+        "`orchestrator/memory/` directly before acting on anything it might cover. "
+        "Most likely a malformed frontmatter field in one memory file; "
+        "`orchestrator/hooks/session_start.py --check` will name it."
+    ]
+    for label, path in (("IDENTITY (who I am)", IDENTITY_FILE), ("USER (who I'm working with)", USER_FILE)):
+        try:
+            if path.exists():
+                parts.append(f"## {label}\n{path.read_text()}")
+        except Exception:  # noqa: BLE001
+            parts.append(f"## {label}\n_unreadable_")
+
+    rules, unreadable = [], 0
+    try:
+        for p in sorted(MEMORY_DIR.glob("*.md")):
+            try:
+                text = p.read_text()
+            except Exception:  # noqa: BLE001
+                unreadable += 1
+                continue
+            # Line-scan rather than parse: the parser is a suspect too.
+            for line in text.splitlines()[:60]:
+                if line.startswith("invariant:"):
+                    rule = line.split(":", 1)[1].strip()
+                    if rule and rule not in (">", "|", ">-", "|-"):
+                        rules.append(f"- **`{p.name}`** — {rule}")
+                    break
+    except Exception:  # noqa: BLE001
+        pass
+
+    if rules:
+        parts.append("## CONSTITUTION (binding rules — read directly from disk)\n"
+                     + "\n".join(rules))
+    parts.append(f"_Degraded boot: {len(rules)} binding rule(s) recovered"
+                 + (f", {unreadable} file(s) unreadable" if unreadable else "") + "._")
+    return "\n\n---\n\n".join(parts)
+
+
 def main():
     if "--check" in sys.argv:
         sys.exit(check_mode())
@@ -992,7 +1048,35 @@ def main():
     if not IDENTITY_FILE.exists():
         context = first_run_invitation()
     else:
-        context = assemble_context(active_projects)
+        try:
+            context = assemble_context(active_projects)
+        except Exception as e:  # noqa: BLE001
+            # LAST-RESORT GUARD. Assembly must never take the session to zero.
+            #
+            # Memory files are hand-edited by design, so a malformed one is a
+            # normal input, not an exceptional one. Twice now a single bad field
+            # has raised out of assembly and made the hook emit NOTHING — no
+            # identity, no user, no constitution — which is silent from inside
+            # the session, because a hook that prints nothing is indistinguishable
+            # from a hook with nothing to add:
+            #
+            #   #71  weight() raised TypeError on a bare-scalar `projects`
+            #   #95  memory_index built a sort key with chr(255 - ord(c)), which
+            #        goes negative on any non-ASCII char — one en-dash in one
+            #        date zeroed the entire injection
+            #
+            # Both were one-line bugs; the CLASS is what needs the guard. Cairn
+            # argued this from my own words and he is right: a partial catalogue
+            # with an honest count beats nothing at all, and that reasoning holds
+            # for the whole injection, not just the index.
+            #
+            # So: fall back to identity + user + a directly-read constitution,
+            # bypassing ranking, weighting and the index generator entirely —
+            # every component that could have been the thing that raised.
+            print(f"[session_start] ASSEMBLY FAILED ({type(e).__name__}: {e}) — "
+                  f"falling back to identity + constitution only", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            context = minimal_context(e)
 
     # Wrap in a clear tag so the model sees this as orchestrator context.
     wrapped = f"<orchestrator-context>\n{context}\n</orchestrator-context>"
