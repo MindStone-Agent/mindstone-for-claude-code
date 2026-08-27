@@ -410,30 +410,64 @@ def reindex_changed_memory() -> tuple[int, int, int, int]:
 # Auto-increment hits based on memory filenames appearing in the transcript
 # ---------------------------------------------------------------------------
 
-# Regions the hooks INJECT into the transcript. A memory's name inside one of
-# these is evidence the system PRINTED it, not that anyone used it — the memory
-# index alone names every memory that exists, every session.
-_INJECTED_REGIONS = (
-    "orchestrator-context",
-    "semantic-recall",
-    "session-handoff",
-    "context-capacity-handoff",
-    "synapse-digest",
-)
-_INJECTED_RE = re.compile(
-    r"<(" + "|".join(_INJECTED_REGIONS) + r")\b[^>]*>.*?</\1>",
-    re.DOTALL | re.IGNORECASE,
-)
+# The transcript is JSONL: one RECORD per physical line. Hook injections arrive
+# as a specific record shape, and that is the anchor — not the tag text.
+_HOOK_ATTACHMENT_TYPES = ("hook_additional_context",)
 
 
-def strip_injected(text: str) -> str:
-    """Remove hook-injected regions so only authored text is scanned.
+def authored_text(chunk: str) -> str:
+    """Return only text a human or the model wrote, dropping hook injections.
 
-    An unterminated region swallows to the next close tag, which over-strips and
-    therefore UNDER-counts. That is the safe direction: a missed citation costs a
-    little ranking accuracy, a phantom one corrupts the signal permanently.
+    WHY NOT A TAG REGEX (#96, found by Cairn)
+    -----------------------------------------
+    The first version matched `<orchestrator-context>...</orchestrator-context>`
+    with DOTALL. Those tag names also occur in ORDINARY CONTENT — most sharply in
+    this repo's own source, where `assemble_context`'s docstring literally says
+    "Build the `<orchestrator-context>` block". A mere mention opened a match,
+    `.*?` then ran forward to the next real closing tag, and every genuine
+    citation in between was deleted. Cairn measured 10 such records in one 398 MB
+    archive and 66% of a test document removed.
+
+    The bias was the worst part: it preferentially destroyed citations from
+    sessions that WORK ON THE MEMORY SYSTEM — the sessions where a citation
+    carries the most signal. And because the watermark advances regardless, those
+    bytes are never rescanned, so the loss is permanent.
+
+    My stated justification was wrong too. I claimed over-stripping "under-counts,
+    which is the safe direction." That holds inside a complete document; it fails
+    at a WINDOW boundary, which the watermark makes the normal case — a window
+    starting or ending mid-region leaves an unmatched tag and OVER-counts.
+
+    So the filter is structural instead. JSONL is one record per line, which makes
+    cross-record bridging impossible, and injections are identifiable by record
+    shape rather than by text that anything may quote.
+
+    THIS FILTER IS LOAD-BEARING, not belt-and-braces. `semantic-recall` fires on
+    EVERY user turn and names the memories it recalled, all of it inside the
+    watermark window. Without this, every recalled memory is credited every turn
+    and #91 returns in a milder form.
     """
-    return _INJECTED_RE.sub(" ", text)
+    out = []
+    for line in chunk.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if not s.startswith("{"):
+            # Not a JSON record (a torn line, or a plain-text file). Keep it:
+            # dropping unrecognised text would silently lose real citations, and
+            # this filter has already cost us once by discarding too much.
+            out.append(line)
+            continue
+        try:
+            rec = json.loads(s)
+        except Exception:  # noqa: BLE001
+            out.append(line)
+            continue
+        att = rec.get("attachment")
+        if isinstance(att, dict) and att.get("type") in _HOOK_ATTACHMENT_TYPES:
+            continue          # a hook printing its own output. Not a citation.
+        out.append(line)
+    return "\n".join(out)
 
 
 def auto_increment_hits(archived_path: Path) -> list[str]:
@@ -484,16 +518,28 @@ def auto_increment_hits(archived_path: Path) -> list[str]:
     try:
         with archived_path.open("rb") as fh:
             fh.seek(start)
-            transcript_text = fh.read().decode("utf-8", errors="ignore")
+            raw = fh.read()
     except Exception:
         return []
 
+    # LINE-ALIGN the watermark. `archive_transcript` copies a JSONL that Claude
+    # Code may be appending to concurrently, so the last record can be TORN.
+    # Advancing to EOF across a partial record would scan half of it now and skip
+    # the rest forever; stopping at the last newline means the torn record is
+    # simply re-read next time, when it is whole. (Cairn's note on #93.)
+    cut = raw.rfind(b"\n") + 1
+    if cut <= 0:
+        # No complete record in the window yet — leave the watermark alone and
+        # come back when there is one. Advancing here would skip the record.
+        return []
+    transcript_text = raw[:cut].decode("utf-8", errors="ignore")
+
     # Record the new watermark even if nothing matches, so an unproductive turn
     # does not leave the window open to be rescanned next time.
-    offsets[key] = size
+    offsets[key] = start + cut
     _save_index_state(state)
 
-    transcript_text = strip_injected(transcript_text)
+    transcript_text = authored_text(transcript_text)
     if not transcript_text.strip():
         return []
 

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import statistics
 import sys
 import tempfile
@@ -38,6 +39,12 @@ ORCHESTRATOR_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ORCHESTRATOR_DIR / "hooks"))
 
 MEMORY_DIR = ORCHESTRATOR_DIR / "memory"
+
+# `YYYY-MM-DD__<uuid>.jsonl` or a bare `<uuid>.jsonl` — the shapes
+# archive_transcript writes. Anything else in transcripts/ is not a session.
+_SESSION_JSONL = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}__)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$", re.I)
 
 FM = """---
 name: {stem}
@@ -88,19 +95,30 @@ def _self_test() -> int:
                         return int(line.split(":", 1)[1])
                 return -1
 
-            # --- 1. A name that appears ONLY inside an injected region is not a citation.
-            transcript.write_text(
-                "<orchestrator-context>\n"
-                "## MEMORY INDEX\n- `feedback_alpha_rule.md` - a test memory\n"
-                "</orchestrator-context>\n"
-            )
+            # Fixtures are real JSONL RECORDS, because that is what a transcript
+            # is. An earlier version used bare text, which meant the injection
+            # cases were never shaped like actual injections — the fixture could
+            # not reach the state the assertion described. Same failure as #95 P1.
+            def injected(*names):
+                return json.dumps({"type": "attachment", "attachment": {
+                    "type": "hook_additional_context",
+                    "content": ["<orchestrator-context>\n## MEMORY INDEX\n"
+                                + "\n".join(f"- `{n}` - a test memory" for n in names)
+                                + "\n</orchestrator-context>"]}})
+
+            def wrote(text):
+                return json.dumps({"type": "assistant", "message": {
+                    "role": "assistant", "content": [{"type": "text", "text": text}]}})
+
+            # --- 1. A name that appears ONLY inside an injected record is not a citation.
+            transcript.write_text(injected("feedback_alpha_rule.md") + "\n")
             got = se.auto_increment_hits(transcript)
             ck("an injected index mention credits NOTHING", got, [])
             ck("  and the counter really did not move", hits("feedback_alpha_rule"), 0)
 
             # --- 2. The same name in authored text IS a citation.
             with transcript.open("a") as f:
-                f.write("I applied feedback_alpha_rule.md before touching that config.\n")
+                f.write(wrote("I applied feedback_alpha_rule.md before touching that config.") + "\n")
             got = se.auto_increment_hits(transcript)
             ck("an authored mention credits the memory", got, ["feedback_alpha_rule.md"])
             ck("  and the counter moved by exactly one", hits("feedback_alpha_rule"), 1)
@@ -115,7 +133,7 @@ def _self_test() -> int:
 
             # --- 4. New authored text after the watermark still counts.
             with transcript.open("a") as f:
-                f.write("Then feedback_beta_rule.md came up and I followed it.\n")
+                f.write(wrote("Then feedback_beta_rule.md came up and I followed it.") + "\n")
             got = se.auto_increment_hits(transcript)
             ck("NEW text after the watermark is still credited", got, ["feedback_beta_rule.md"])
             ck("  and the earlier memory was NOT re-credited", hits("feedback_alpha_rule"), 1)
@@ -124,7 +142,7 @@ def _self_test() -> int:
             ck("an unmentioned memory stays at zero", hits("feedback_gamma_rule"), 0)
 
             # --- 6. Truncation/replacement must not seek past EOF and scan nothing.
-            transcript.write_text("short file mentioning feedback_gamma_rule.md once.\n")
+            transcript.write_text(wrote("short file mentioning feedback_gamma_rule.md once.") + "\n")
             got = se.auto_increment_hits(transcript)
             ck("a REPLACED (shorter) transcript is rescanned from the start",
                got, ["feedback_gamma_rule.md"])
@@ -135,10 +153,58 @@ def _self_test() -> int:
             ck("the watermark is persisted at EOF",
                state["hit_scan_offsets"]["2026-01-01__test.jsonl"] == transcript.stat().st_size)
 
-            # --- CONTROL: the stripper must not eat authored prose.
-            kept = se.strip_injected("before <orchestrator-context>X</orchestrator-context> after")
-            ck("CONTROL the stripper removes only the injected region",
-               "before" in kept and "after" in kept and "X" not in kept)
+            # --- #96: the filter must anchor on RECORD SHAPE, not on tag text.
+            #
+            # Cairn's reproduction: a docstring that merely NAMES the tag used to
+            # open a DOTALL match, which then ran forward to the next real closing
+            # tag and deleted every genuine citation in between. Preferentially
+            # destroying citations from sessions that work on the memory system.
+            inj = json.dumps({"type": "attachment", "attachment": {
+                "type": "hook_additional_context",
+                "content": ["<semantic-recall>\nfeedback_gamma_rule.md\n</semantic-recall>"]}})
+            doc = json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": 'def assemble_context(): """Build the '
+                                         '<orchestrator-context> block."""'}]}})
+            cite = json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "I applied feedback_alpha_rule.md here, "
+                                         "and it stopped me."}]}})
+            real = json.dumps({"type": "attachment", "attachment": {
+                "type": "hook_additional_context",
+                "content": ["<orchestrator-context>\nindex\n</orchestrator-context>"]}})
+            kept = se.authored_text("\n".join([inj, doc, cite, real]))
+            ck("#96 a citation between a tag-mention and a real region SURVIVES",
+               "feedback_alpha_rule.md" in kept)
+            ck("#96 the tag-naming docstring itself survives",
+               "Build the" in kept)
+            ck("#96 CONTROL hook-injected records are still dropped",
+               "feedback_gamma_rule.md" not in kept and "\nindex\n" not in kept)
+            ck("#96 CONTROL an injection-only window yields nothing to credit",
+               se.authored_text(inj).strip(), "")
+
+            # A torn/partial line is KEPT rather than discarded: dropping
+            # unrecognised text is how this filter lost citations the first time.
+            ck("#96 a torn JSON line is kept, not silently dropped",
+               "feedback_beta_rule.md" in se.authored_text('{"type":"assist'
+                                                           'feedback_beta_rule.md'))
+
+            # --- the watermark must be LINE-ALIGNED so a torn final record is
+            #     re-read when whole rather than half-scanned and skipped forever.
+            torn = tmp / "torn.jsonl"
+            torn.write_text(cite + "\n" + '{"type":"assistant","message":{"content":[{"typ')
+            before = hits("feedback_alpha_rule")
+            se.auto_increment_hits(torn)
+            st = json.loads((tmp / "state.json").read_text())
+            ck("the watermark stops at the last COMPLETE record",
+               st["hit_scan_offsets"]["torn.jsonl"], len(cite) + 1)
+            ck("  and the complete record before it was still credited",
+               hits("feedback_alpha_rule"), before + 1)
+            # Completing the torn record must then credit it — not skip it.
+            torn.write_text(cite + "\n" + json.dumps(
+                {"type": "assistant", "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": "and feedback_gamma_rule.md too"}]}}) + "\n")
+            got = se.auto_increment_hits(torn)
+            ck("CONTROL the once-torn record is credited once it is complete",
+               got, ["feedback_gamma_rule.md"])
         finally:
             se.MEMORY_DIR, se.STATE_PATH = orig_mem, orig_state
 
@@ -210,7 +276,16 @@ def _seed_watermarks() -> int:
     state = se._load_index_state()
     offsets = state.setdefault("hit_scan_offsets", {})
     seeded, already = 0, 0
+    # Session transcripts only. `recall_usage.jsonl` also lives in this directory
+    # and is append-only log data that names memories constantly — 283 of 296 stems
+    # in one measurement — so anything that globs `*.jsonl` here and treats the
+    # result as a transcript acquires the single worst file in the tree to scan for
+    # citations. Cairn's note on #93; it was seeded harmlessly before, but the glob
+    # is the hazard, not the seeding.
     for p in sorted((ORCHESTRATOR_DIR / "transcripts").glob("*.jsonl")):
+        if not _SESSION_JSONL.match(p.name):
+            print(f"  skipped {p.name}  (not a session transcript)")
+            continue
         size = p.stat().st_size
         if offsets.get(p.name) == size:
             already += 1
