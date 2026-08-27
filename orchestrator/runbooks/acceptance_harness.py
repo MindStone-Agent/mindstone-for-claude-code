@@ -14,6 +14,8 @@ tests the promise.
         the cut reports every rule as present while most were dropped
     A4  a rule chosen AT RANDOM can be retrieved from the store by searching for it
         — WITH a control that must NOT match
+    A5  the memory index rations DESCRIPTIONS under pressure and never EXISTENCE:
+        every memory stays named even when the catalogue cannot hold its summaries
 
 A4's control is the point of the whole file. A harness fed only cases that should
 succeed looks perfect exactly when it is blind, and this repo has produced nine
@@ -123,6 +125,77 @@ def a1_a2_a3(r: Result, budget: int | None):
     r.check(f"A3 {label} index_present matches the block",
             rep["index_present"] == ("MEMORY INDEX" in ctx or "index fallback" in ctx.lower()))
     return rep
+
+
+def a5_index_degrades(r: Result):
+    """A5 — the catalogue rations descriptions, never existence.
+
+    The index is the only tier whose cost scales with memory COUNT, so it is the
+    one guaranteed to hit its ceiling as the store grows. When it does, the
+    contract is that every memory is still NAMED and only the description is
+    dropped: a name is something an agent can search for and read on demand, an
+    absent entry is invisible.
+
+    Tested at a budget squeezed hard enough to force the degradation but not so
+    hard that the index cannot be admitted at all — and paired with a control
+    asserting the degradation genuinely happened, because "all names present"
+    passes trivially on a run where nothing was rationed.
+    """
+    import session_start as ss
+
+    names = [p.name for p, fm, _b in ss.load_memory_files()
+             if fm.get("type") not in ("index", "log", "roadmap")]
+
+    ctx_full, rep_full = assemble(None)
+    r.check("A5 @budget every memory is catalogued",
+            rep_full["index_entries"] == len(names),
+            f"{rep_full['index_entries']}/{len(names)} entries, "
+            f"{rep_full['index_full']} with descriptions")
+    r.check("A5 @budget the index stays inside its allocation",
+            not rep_full["index_over_allocation"], f"{rep_full['index_chars']:,} chars")
+    # The hard failure: existence itself rationed. Fine to survive (it is reported
+    # in-band), but it must never happen silently on a healthy install.
+    r.check("A5 @budget no memory is missing from the catalogue entirely",
+            rep_full["index_unlisted"] == 0,
+            f"{rep_full['index_unlisted']} unlisted"
+            if rep_full["index_unlisted"] else "all listed")
+
+    # Squeeze until the index rations. Walk down rather than hard-coding one
+    # number: the threshold moves with the store, and a fixed budget that stops
+    # forcing degradation would silently turn this into a no-op.
+    squeezed = None
+    for budget in (34_000, 32_000, 30_000, 28_000):
+        _ctx, rep = assemble(budget)
+        if rep["index_present"] and rep["index_name_only"] > 0:
+            squeezed = (budget, _ctx, rep)
+            break
+
+    if squeezed is None:
+        r.check("A5 a squeezed budget forces the index to ration", False,
+                "no tested budget produced a rationed-but-present index — "
+                "the degradation path went untested")
+        assemble(None)
+        return
+
+    budget, ctx, rep = squeezed
+    missing = [n for n in names if f"`{n}`" not in ctx]
+    r.check(f"A5 @{budget:,} EVERY memory still named when descriptions are rationed",
+            not missing,
+            f"{len(names) - len(missing)}/{len(names)} named; "
+            f"{rep['index_full']} full, {rep['index_name_only']} name-only"
+            + (f"; MISSING {', '.join(missing[:3])}" if missing else ""))
+    # CONTROL: prove the run actually degraded. Without this, a budget that
+    # happened to fit everything would pass the check above for the wrong reason.
+    r.check(f"A5 CONTROL @{budget:,} the run really did ration descriptions",
+            rep["index_name_only"] > 0 and rep["index_full"] < rep["index_entries"],
+            f"{rep['index_name_only']} of {rep['index_entries']} reduced to name-only")
+    r.notes.append(
+        f"index rations at ~{budget:,} chars: {rep['index_full']} full + "
+        f"{rep['index_name_only']} name-only, all {rep['index_entries']} still listed")
+    if rep_full.get("index_signal_saturated"):
+        r.notes.append("last_applied is SATURATED — recency cannot order the index on this "
+                       "store; ordering falls through to prevented/hits. See #90.")
+    assemble(None)
 
 
 def a4_retrieval(r: Result, samples: int):
@@ -239,6 +312,8 @@ def main() -> int:
     a1_a2_a3(r, 20_000)
     print(f"\n=== A4 retrieval, {args.samples} random rules + {len(NONSENSE)} nonsense controls ===")
     a4_retrieval(r, args.samples)
+    print(f"\n=== A5 the index rations descriptions, never existence ===")
+    a5_index_degrades(r)
 
     print("\n" + "=" * 72)
     for n in r.notes:
