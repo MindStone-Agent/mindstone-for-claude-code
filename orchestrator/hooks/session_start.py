@@ -332,6 +332,23 @@ def _safe_num(v):
     return f if math.isfinite(f) else 0.0
 
 
+def _as_str_list(v) -> list[str]:
+    """Frontmatter list fields, coerced. Total: no input raises.
+
+    `projects: [a, b]` -> ["a","b"];  `projects: a` -> ["a"];  `projects: 5` ->
+    ["5"];  absent/None -> []. A scalar becomes a one-element list rather than
+    being iterated character-by-character, which is what the old `or []` did to
+    a bare string — `"threatgen"` silently matched the project `"t"`.
+    """
+    if v is None or v == "":
+        return []
+    if isinstance(v, str):
+        return [v]
+    if isinstance(v, (list, tuple, set)):
+        return [str(x) for x in v]
+    return [str(v)]
+
+
 def weight(fm: dict, now: datetime, active_projects: set) -> float:
     """Compute injection-ranking weight for a memory.
 
@@ -383,7 +400,13 @@ def weight(fm: dict, now: datetime, active_projects: set) -> float:
 
     w = base * decay
 
-    projects = fm.get("projects") or []
+    # Coerce to a list of strings. `projects: threatgen` (a bare scalar) and
+    # `projects: 5` are both things a hand-edit produces, and the second still
+    # raised `TypeError: 'int' object is not iterable` — #71, the FIRST instance
+    # of the class that #95 was the second of. The outer guard in main() now keeps
+    # either from zeroing the session, but a memory should not lose its project
+    # boost because someone typed a value without brackets.
+    projects = _as_str_list(fm.get("projects"))
     if active_projects and any(p in active_projects for p in projects):
         w *= PROJECT_MATCH_BOOST
 
@@ -1019,13 +1042,29 @@ def minimal_context(err: Exception) -> str:
             except Exception:  # noqa: BLE001
                 unreadable += 1
                 continue
-            # Line-scan rather than parse: the parser is a suspect too.
-            for line in text.splitlines()[:60]:
-                if line.startswith("invariant:"):
-                    rule = line.split(":", 1)[1].strip()
-                    if rule and rule not in (">", "|", ">-", "|-"):
-                        rules.append(f"- **`{p.name}`** — {rule}")
-                    break
+            # Line-scan rather than parse: the parser is a suspect too. But it
+            # MUST understand block scalars — all 32 invariants on this store are
+            # written `invariant: >` with the rule on following indented lines,
+            # and the first version of this reader took only inline values and so
+            # recovered ZERO rules from the only store it exists to protect. The
+            # sandbox missed it because the fixture used a simpler shape than the
+            # real files. Same defect Cairn hit in his harness the same night.
+            lines = text.splitlines()
+            for i, line in enumerate(lines[:80]):
+                if not line.startswith("invariant:"):
+                    continue
+                rule = line.split(":", 1)[1].strip()
+                if rule in (">", "|", ">-", "|-", ""):
+                    folded = []
+                    for cont in lines[i + 1:]:
+                        if cont.strip() and not cont.startswith((" ", "\t")):
+                            break            # next key, or the closing ---
+                        if cont.strip():
+                            folded.append(cont.strip())
+                    rule = " ".join(folded)
+                if rule:
+                    rules.append(f"- **`{p.name}`** — {rule}")
+                break
     except Exception:  # noqa: BLE001
         pass
 
@@ -1037,7 +1076,85 @@ def minimal_context(err: Exception) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+def _self_test() -> int:
+    """Prove the crash-proofing and the degraded-boot floor actually work.
+
+    `minimal_context()` is a safety net, and until now it had no test in-repo —
+    only a sandbox run. An untested safety net is the thing this whole effort
+    exists to remove, so it gets assertions like everything else.
+    """
+    checks: list[tuple[str, bool]] = []
+
+    def ck(label, got, want=True):
+        checks.append((label, got == want))
+
+    # --- #71: frontmatter list coercion is total, and matches correctly.
+    ck("a bare scalar becomes a one-element list", _as_str_list("threatgen"), ["threatgen"])
+    ck("a real list passes through", _as_str_list(["a", "b"]), ["a", "b"])
+    ck("a number does not raise", _as_str_list(5), ["5"])
+    ck("absent is empty", _as_str_list(None), [])
+    # CONTROL: the old `or []` iterated a bare string CHARACTER BY CHARACTER, so
+    # `projects: threatgen` matched the project "t" and missed "threatgen".
+    ck("CONTROL a bare string no longer matches a single character",
+       any(p in {"t"} for p in _as_str_list("threatgen")), False)
+    ck("CONTROL and it DOES match its own project",
+       any(p in {"threatgen"} for p in _as_str_list("threatgen")))
+
+    now = datetime.now(tz=timezone.utc)
+    raised = []
+    for v in (["a"], "a", 5, None, "", ("a", "b"), {"a": 1}, 3.5):
+        try:
+            weight({"projects": v, "hits": 1, "created": "2026-01-01"}, now, {"a"})
+        except Exception as e:  # noqa: BLE001
+            raised.append((v, type(e).__name__))
+    ck("weight() survives every shape of `projects`", raised, [])
+
+    # --- the degraded-boot floor.
+    ctx = minimal_context(ValueError("simulated"))
+    ck("degraded boot names the failure", "simulated" in ctx)
+    ck("degraded boot carries the in-band warning", "DEGRADED BOOT" in ctx)
+    ck("degraded boot says the index is missing", "cannot see what else exists" in ctx)
+    ck("degraded boot recovers identity when it exists",
+       ("## IDENTITY" in ctx) if IDENTITY_FILE.exists() else True)
+    # Count the rules the store actually holds and require the floor to recover
+    # EVERY one. "## CONSTITUTION is present" passed while zero rules were
+    # recovered, because the heading is emitted from a non-empty list — and the
+    # list was non-empty for a store with inline invariants and empty for this
+    # one. Assert the number, not the heading.
+    on_disk = sum(1 for p in MEMORY_DIR.glob("*.md")
+                  if any(l.startswith("invariant:") for l in p.read_text(errors="ignore").splitlines()[:80]))
+    recovered = ctx.count("\n- **`")
+    ck(f"degraded boot recovers ALL {on_disk} binding rules from disk",
+       recovered, on_disk)
+    # CONTROL: block scalars are the real shape here, so a reader that only
+    # handles inline values must fail this, not pass it vacuously.
+    ck("CONTROL the store really does use block scalars (so this is not vacuous)",
+       on_disk > 0 and any(
+           p.read_text(errors="ignore").find("invariant: >") >= 0
+           for p in MEMORY_DIR.glob("*.md")))
+    # CONTROL: it must be materially smaller than a healthy assembly, or it is
+    # not a floor — it is the same code path wearing a different label.
+    try:
+        full = assemble_context(infer_active_projects(os.getcwd()))
+        ck("CONTROL the floor is smaller than a healthy assembly", len(ctx) < len(full))
+    except Exception:  # noqa: BLE001
+        ck("CONTROL healthy assembly available for comparison", False)
+
+    failed = [l for l, ok in checks if not ok]
+    for label, ok in checks:
+        print(f"  {'ok  ' if ok else 'FAIL'} {label}")
+    print()
+    if failed:
+        print(f"SELF-TEST FAILED — {len(failed)} assertion(s).")
+        return 1
+    print(f"SELF-TEST PASSED — {len(checks)} assertions covering frontmatter "
+          f"coercion and the degraded-boot floor.")
+    return 0
+
+
 def main():
+    if "--self-test" in sys.argv:
+        sys.exit(_self_test())
     if "--check" in sys.argv:
         sys.exit(check_mode())
     hook_input = read_hook_input()
