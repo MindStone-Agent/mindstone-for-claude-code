@@ -26,10 +26,20 @@ can search for. A dropped entry is invisible — and invisible-but-present is th
 exact failure state this whole tiering effort exists to eliminate. So every
 memory appears in the index unconditionally; only the DESCRIPTION is rationed.
 
-This generator therefore never truncates the roster. If even the name-only
-roster exceeds the allocation, it emits the full roster anyway and reports the
-overage. That is deliberate: the alternative is a silently short catalogue,
-which reads exactly like a complete one.
+Descriptions are therefore surrendered completely — every one of them — before a
+single name is dropped.
+
+There is still a hard ceiling: names cost ~48 chars each and that grows linearly
+forever, so around 646 memories (at 40% of an 80,000 budget) even the bare roster
+stops fitting. Name-only is a LONGER delay than a width cap, not an escape from
+one. Past that point the generator lists as many as fit, in priority order, and
+states IN-BAND exactly how many are not listed.
+
+That is chosen over emitting an over-budget roster, because an over-budget index
+gets dropped by admission as a single item — and then the agent sees nothing at
+all. A partial catalogue with an honest count still separates "I was not shown
+it" from "it does not exist". A silently short one does not, and reads exactly
+like a complete one.
 
 WHAT IT DOES NOT DO
 -------------------
@@ -112,7 +122,7 @@ def _signal_health(entries: list[dict]) -> dict:
     That is a closed loop — the system reads its own output back as evidence of
     use. The ordering below is written to survive it, but a degenerate signal
     must be REPORTED, because ordering by a field that cannot discriminate
-    produces output that still looks ordered. See MS4CC #90.
+    produces output that still looks ordered. See MS4CC #91.
     """
     la = {e["last_applied"] for e in entries if e["last_applied"]}
     return {
@@ -127,7 +137,7 @@ def _priority(e: dict) -> tuple:
 
     1. critical            the constitution's map; a rule you can't find is a rule you don't have
     2. prevented > 0       human-CONFIRMED usefulness, the one uncontaminated usage signal we own
-    3. everything else     by last_applied desc, then hits desc  (degenerate today — see #90)
+    3. everything else     by last_applied desc, then hits desc  (degenerate today — see #91)
     4. name                deterministic tie-break; an unstable index diffs as noise every session
     """
     band = 0 if e["critical"] else (1 if e["prevented"] > 0 else 2)
@@ -446,7 +456,7 @@ def main() -> int:
     print(f"chars        {stats['chars']:,} / {stats['allocation']:,} allocation"
           f"{'  ** OVER **' if stats['over_allocation'] else ''}")
     print(f"signal       last_applied distinct={stats['distinct_last_applied']}"
-          f"{'  SATURATED (see #90)' if stats['last_applied_saturated'] else ''}"
+          f"{'  SATURATED (see #91)' if stats['last_applied_saturated'] else ''}"
           f", prevented>0 on {stats['prevented_nonzero']}")
     return 0
 
