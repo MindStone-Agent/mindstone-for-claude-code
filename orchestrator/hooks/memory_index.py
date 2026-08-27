@@ -57,6 +57,8 @@ pointer at all when the check was first run).
 
 from __future__ import annotations
 
+import re
+
 # Full rendered width of one entry, INCLUDING markup. Fixed at 160 by the
 # cross-agent decision of 2026-08-26 so that entries authored on one substrate
 # survive this generator unchanged rather than being re-wrapped. Do not drift
@@ -109,20 +111,67 @@ def _full_line(name: str, desc: str, width: int) -> str:
     return prefix + body if body else _name_line(name)
 
 
+_ISO_DATE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+
+
+def _int(v) -> int:
+    """Frontmatter is hand-edited. `hits: many` must not take down the session."""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _recency_key(la: str) -> int:
+    """Sort key for `last_applied`, DESCENDING, that cannot raise.
+
+    The first version was `"".join(chr(255 - ord(c)) for c in la)`, which inverts
+    a string lexically. `255 - ord(c)` goes negative on any non-ASCII character,
+    so `last_applied: 2026–01–01` with en-dashes — what a hand-edit or a
+    smart-quotes paste produces — raised ValueError out of build_index, out of
+    assemble_context, out of main(), and the hook emitted NOTHING. No identity,
+    no user, no constitution, no index, and silent: a hook that prints nothing
+    looks exactly like a hook with nothing to add.
+
+    Found by Cairn in adversarial review of #90 (#95), reproduced in a sandbox.
+    Second instance of the class — #71 was weight() raising on a bare-scalar
+    `projects`. Memory files are hand-edited BY DESIGN, so parsing them must be
+    total: every input maps to some ordering, none maps to an exception.
+
+    Returns a negated YYYYMMDD so larger dates sort first; anything unparseable
+    sorts last, which is the correct place for "we do not know when this was
+    used" rather than a crash or a false claim of recency.
+    """
+    m = _ISO_DATE.search(la or "")
+    if not m:
+        return 0
+    return -int(m.group(1) + m.group(2) + m.group(3))
+
+
 def _signal_health(entries: list[dict]) -> dict:
     """Report whether the ordering signals can actually discriminate.
 
-    `last_applied` is stamped by the per-turn citation scan, which searches the
-    transcript for each memory's filename. The transcript CONTAINS the injected
-    index, which names every memory — so every memory is "cited" every turn and
-    the field saturates to a single value. Measured on this store: 103 files,
-    ONE distinct value; and `hits` correlates with file age at r=0.85, i.e. it
-    counts turns elapsed, not usefulness.
+    `last_applied` saturates: 103 files on this store, ONE distinct value. `hits`
+    correlates with file age at r=0.85 — it counts turns elapsed, not usefulness.
 
-    That is a closed loop — the system reads its own output back as evidence of
-    use. The ordering below is written to survive it, but a degenerate signal
-    must be REPORTED, because ordering by a field that cannot discriminate
-    produces output that still looks ordered. See MS4CC #91.
+    THE CAUSE IS THE SCAN WINDOW, not the injected index.
+
+    An earlier version of this docstring blamed the index: the transcript contains
+    the injected index, the index names every memory, so every memory looks cited.
+    That is real, and it is NOT the mechanism. Stripping every injected region
+    removes 48.2% of a 616 MB transcript and changes the credited count by zero —
+    103/103 either way. Cairn reproduced the same null result independently.
+
+    The actual cause: the citation scan re-read the ENTIRE cumulative transcript
+    every turn, so a memory mentioned once was re-credited on every turn forever
+    after. Fixed in #93 with a per-transcript watermark. Corrected here because a
+    comment that teaches a disproven cause — with numbers attached to lend it
+    weight — is worse than no comment; the next reader inherits the wrong model
+    and goes looking in the wrong file. Flagged by Cairn (#95 P2).
+
+    The ordering below survives a dead signal, but the degeneracy is still
+    REPORTED, because sorting by a field that cannot discriminate produces output
+    that still looks sorted. See MS4CC #91.
     """
     la = {e["last_applied"] for e in entries if e["last_applied"]}
     return {
@@ -165,11 +214,10 @@ def collect(memories) -> list[dict]:
             "name": path.name,
             "desc": " ".join(str(fm.get("description") or "").split()),
             "critical": bool(fm.get("critical")),
-            "prevented": int(fm.get("prevented") or 0),
-            "hits": int(fm.get("hits") or 0),
+            "prevented": _int(fm.get("prevented")),
+            "hits": _int(fm.get("hits")),
             "last_applied": la,
-            # ISO dates sort lexically; invert for descending without parsing.
-            "last_applied_key": "".join(chr(255 - ord(c)) for c in la) if la else "￿",
+            "last_applied_key": _recency_key(la),
         })
     return out
 
@@ -210,9 +258,22 @@ def build_index(memories, allocation: int, *, width: int = ENTRY_WIDTH) -> tuple
     # charged when a tail is actually inevitable: if every description fits,
     # no footnote is emitted and reserving for one would shrink the index for
     # no reason.
+    #
+    # `ceiling` is the space available for ENTRIES — allocation minus whatever the
+    # footnote will cost. It must NOT be floored back up to `roster_cost`: an
+    # earlier version wrote `max(allocation - reserve, roster_cost)`, so whenever
+    # the roster fit the allocation but roster+footnote did not, the max() handed
+    # the reserve back and the footnote was emitted on top of a fully-spent
+    # allocation. Measured by Cairn (#95 P1) at up to 13.6% over, in the window
+    # `allocation - 260 < roster_cost <= allocation`.
+    #
+    # Both of my existing assertions missed it for the same reason: the roster
+    # DOES fit the allocation there, and only the conjunction of roster+footnote
+    # does not. Third time this shape has cost me today — a fixture that never
+    # reaches the state its assertion describes.
     all_full_cost = roster_cost + sum(max(d, 0) for _l, d in upgrade.values())
     reserve = _FOOTNOTE_RESERVE if all_full_cost > allocation else 0
-    ceiling = max(allocation - reserve, roster_cost)
+    ceiling = max(allocation - reserve, 0)
 
     # Upgrade greedily in priority order while the WHOLE index still fits.
     used = roster_cost
@@ -238,10 +299,16 @@ def build_index(memories, allocation: int, *, width: int = ENTRY_WIDTH) -> tuple
     # all-or-nothing cliff at scale is the failure this system keeps relearning.
     listed = entries
     dropped = 0
-    if roster_cost > allocation:
+    if roster_cost > ceiling:
         keep, running = [], header_cost
         for e in entries:                      # already in priority order
-            if running + name_cost[e["name"]] > max(allocation - _FOOTNOTE_RESERVE, 0):
+            # Strict priority: STOP at the first name that does not fit rather
+            # than skipping ahead to shorter ones further down. A catalogue that
+            # silently reorders itself by name length would be harder to reason
+            # about than one that is honestly truncated, and `unlisted` counts
+            # entries that could individually have fitted. Deliberate — Cairn
+            # flagged it as worth stating rather than as a defect (#95).
+            if running + name_cost[e["name"]] > ceiling:
                 break
             keep.append(e)
             running += name_cost[e["name"]]
@@ -292,7 +359,7 @@ def build_index(memories, allocation: int, *, width: int = ENTRY_WIDTH) -> tuple
 def _self_test() -> int:
     from pathlib import Path
 
-    def mem(name, desc, *, critical=False, prevented=0, hits=0, la="2026-01-01", type_="feedback"):
+    def mem(name, desc, *, critical=False, prevented=0, hits=0, la="2026-01-01", type_="feedback"):  # noqa: E501
         return (Path(name), {"description": desc, "critical": critical, "prevented": prevented,
                              "hits": hits, "last_applied": la, "type": type_}, "body")
 
@@ -384,6 +451,47 @@ def _self_test() -> int:
     ck("stays inside the allocation when the roster fits", st3["chars"] <= 18_000)
     ck("CONTROL the mid allocation is a genuine middle",
        0 < st3["full"] < 200 and st3["name_only"] > 0)
+
+    # --- #95 P1: the window where the roster fits the allocation but roster +
+    #     footnote does not. Swept rather than spot-checked, because the whole
+    #     defect was that a single fixture never landed inside the window.
+    forty = [mem(f"feedback_u_{i:02d}.md", "d " * 40) for i in range(40)]
+    roster = len(HEADER) + 1 + sum(len(_name_line(f"feedback_u_{i:02d}.md")) + 1 for i in range(40))
+    over = []
+    for alloc in range(roster - _FOOTNOTE_RESERVE - 40, roster + _FOOTNOTE_RESERVE + 40, 10):
+        _t, s = build_index(forty, alloc)
+        if s["chars"] > alloc:
+            over.append((alloc, s["chars"] - alloc))
+    ck("#95 P1 the index NEVER exceeds its allocation across the whole window",
+       over == [], True)
+    if over:  # pragma: no cover - diagnostic only
+        print(f"       overruns: {over[:6]}")
+    # CONTROL: the sweep must actually cross the boundary, or it proves nothing.
+    shapes = {build_index(forty, a)[1]["roster_truncated"]
+              for a in (roster - _FOOTNOTE_RESERVE - 40, roster + _FOOTNOTE_RESERVE + 30)}
+    ck("#95 P1 CONTROL the sweep spans both truncated and untruncated", shapes, {True, False})
+
+    # --- #95 P0: hand-edited frontmatter must never raise out of this module.
+    for bad in ("2026–01–01", "2026-01-01 ✅", "", None, "not a date", "2026-01-01 да"):
+        try:
+            build_index([mem("a.md", "d", la=bad)], 10_000)
+            ok = True
+        except Exception:  # noqa: BLE001
+            ok = False
+        ck(f"#95 P0 last_applied={bad!r:20.20} does not raise", ok)
+    try:
+        build_index([(Path("z.md"), {"description": "d", "critical": False,
+                                     "prevented": "lots", "hits": "many",
+                                     "last_applied": "2026-01-01", "type": "feedback"}, "b")],
+                    10_000)
+        ok = True
+    except Exception:  # noqa: BLE001
+        ok = False
+    ck("#95 P0 non-numeric hits/prevented do not raise", ok)
+    ck("#95 P0 CONTROL recency order still holds for real dates",
+       [e["name"] for e in sorted(collect([mem("old.md", "d", la="2026-01-01"),
+                                           mem("new.md", "d", la="2026-08-27")]), key=_priority)],
+       ["new.md", "old.md"])
 
     # --- signal degeneracy must be detected, not silently ordered by.
     same = [mem(f"a_{i}.md", "d", la="2026-08-27") for i in range(5)]
