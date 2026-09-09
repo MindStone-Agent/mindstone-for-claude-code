@@ -150,7 +150,7 @@ You will see a handoff/checkpoint sequence happen near the context limit. That i
 
 Memory files live in `orchestrator/memory/*.md`. They accumulate the orchestrator's knowledge — corrections, project context, learned behavior, design decisions. Each file has YAML frontmatter with weight parameters (`hits`, `prevented`, `half_life_days`) that govern how often it surfaces at session start.
 
-The `/checkpoint` command manages memory: it proposes new files, increments `prevented` counts on confirmed mistake-prevention, and updates `LOG.md`.
+The `/checkpoint` command manages memory: it writes new files, increments `prevented` counts where its own judgment says a memory changed an action, and updates `LOG.md`. It never asks you to adjudicate its checkpoint; you get a short summary afterwards.
 
 **Do not hand-edit memory files** unless you know what you are changing and why. They are the orchestrator's long-term knowledge base and the weight values matter. If you want to understand why the orchestrator did something or what it currently knows, read `orchestrator/LOG.md` — the append-only session log is the narrative record.
 

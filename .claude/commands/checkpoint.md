@@ -4,11 +4,30 @@ description: Dream-cycle checkpoint — synthesize this session, update LOG.md, 
 
 # Checkpoint — persist this session to the orchestrator's memory
 
-The dream-cycle moment where session experience becomes persistent memory. Run at natural breaks, pre-compaction, session end, or when Clint asks.
+The dream-cycle moment where session experience becomes persistent memory. Run at natural breaks, pre-compaction, session end, or when the user asks.
 
 **`/checkpoint` is self-sufficient for persistence.** Step 7 explicitly runs the archive + vectorize pass (the same code path the Stop hook uses), so the session's texture is persisted at checkpoint time regardless of whether the Stop hook fires later. `/checkpoint` covers both the *judgment* parts (synthesis, new-memory proposals, drift detection, prevented-confirmation) AND the *mechanical* parts (archive, vectorize, re-index changed memory files).
 
 The Stop hook still fires per-turn-completion and still does the same archive + vectorize work — that's the belt; step 7 is the suspenders. The redundancy matters because `/exit` skips the Stop hook entirely (it doesn't fire when the session is closed via `/exit` rather than naturally completing), and image-dimension errors (or other substrate-level errors) can block model calls without giving the Stop hook a clean exit. After /checkpoint runs, the session texture is on disk and in vectors regardless of what happens to the session afterward.
+
+## HARD RULE: THIS IS NOT COLLABORATIVE. NEVER ASK THE USER ANYTHING.
+
+Checkpointing is mine, end to end. The user is **never** the one to answer a
+question about my own checkpoint. Not the LOG draft, not which memories
+prevented a mistake, not whether a new memory should be written, not whether
+drift needs action. I know my session; they do not, and making them read and
+adjudicate it defeats the entire purpose.
+
+**Do not ask. Do not offer options. Do not wait for approval.** Decide every
+call myself, write everything, run step 7, and surface a SHORT summary
+afterwards saying what I did. Questions before, never. Summary after, always.
+
+Clint Bodungen, the framework's author, 2026-05-31 and again 2026-08-06, the
+second time because this file still told the orchestrator to ask: *"I am never the one to answer questions about your checkpoint.
+Never. Ever. You always use your own judgement and answer your own questions.
+Checkpointing is not a collaborative activity. Ever."*
+
+If any step below reads like an instruction to ask the user, this rule wins.
 
 ## Protocol
 
@@ -31,8 +50,8 @@ Draft an entry for `orchestrator/LOG.md` in this format:
 ### Memories cited (auto-tracked by Stop hook, verify and annotate)
 - filename.md — why it was useful
 
-### Prevented confirmations (Option D — ask if anything genuinely prevented a mistake)
-- filename.md — confirmed by Clint
+### Prevented confirmations (my judgment, never the user's)
+- filename.md — the specific mistake it stopped me making
 
 ### New memories proposed
 - (from step 3)
@@ -44,15 +63,22 @@ Draft an entry for `orchestrator/LOG.md` in this format:
 - (from step 5)
 ```
 
-Show Clint the draft. Let him edit or approve.
+Write it. Do not show it for approval, do not ask for edits. It is appended in
+step 6 on my own judgment.
 
-### 2. Prevented confirmations (Option D, terse)
+### 2. Prevented confirmations (decided by me)
 
-Pull the list of memories that were `hits` in this session (the Stop hook writes them to LOG automatically once it fires; until then, enumerate from your citations in the session). Ask Clint:
+Pull the list of memories that were `hits` in this session (the Stop hook writes
+them to LOG automatically once it fires; until then, enumerate from your
+citations in the session).
 
-> *"Which of these prevented a mistake? ('1, 3, 5' works, or 'none'.)"*
+**Decide this myself. Never ask.** A memory counts as having prevented a mistake
+when I can name the specific wrong thing I would otherwise have done: a check I
+would have skipped, a claim I would have made unverified, a file I would have
+put in the wrong place. Not "it was relevant" — "it changed an action".
 
-Increment `prevented` by 1 for each confirmed. Note the confirmations in the LOG entry.
+Increment `prevented` by 1 for each I judge qualifies, and say which in the LOG
+entry with the one-line reason.
 
 **When to skip this step:** If no memories were obviously cited, or the session was low-stakes. Don't force the ritual.
 
@@ -69,10 +95,10 @@ If a similar memory exists (similarity > ~0.55), propose *updating* the existing
 - File at `orchestrator/memory/<type>_<short_name>.md`
 - v0.2 frontmatter schema (see `CAIRN_DESIGN_v0.2.md` §6)
 - `type` ∈ {feedback, project, reference, design}
-- `tags` and `projects` — **infer from content and filename; do NOT ask Clint** (he doesn't tag)
+- `tags` and `projects` — **infer from content and filename; do NOT ask the user** (they do not tag)
 - Critical flag only for load-bearing rules (rarely)
 
-Show Clint the draft before writing. On accept: write file, add pointer to `MEMORY.md`. The Stop hook will vectorize it on next session end (or you can manually index it now via `orchestrator/.venv/bin/python orchestrator/hooks/indexer.py backfill`).
+Write it. No approval step. Add the pointer to `MEMORY.md` in the same pass. The Stop hook will vectorize it on next session end (or you can manually index it now via `orchestrator/.venv/bin/python orchestrator/hooks/indexer.py backfill`).
 
 ### 4. Drift detection
 
@@ -93,15 +119,17 @@ Use the vector store to surface issues:
 - **Duplicate/redundant content:** After a new memory is proposed, run a semantic search for it; if top-3 matches are all existing memories with high sim, consider merging rather than adding.
 - **Outdated claims:** A project sprint memo from months ago no longer reflecting current state — note for refresh.
 
-Observations, not actions. Clint can act on them later.
+Observations, recorded in the LOG. I do not raise them as questions; if one is
+worth acting on I act on it or note it as follow-up work.
 
 ### 6. Append to LOG.md
 
-Once the user approves the entry, append to the end of `orchestrator/LOG.md`. Preserve chronological order.
+Append to the end of `orchestrator/LOG.md`. Preserve chronological order. There
+is no approval gate: step 1 wrote it, this step files it.
 
 ### 7. Archive + vectorize the session (mandatory, not skippable)
 
-Run the archive + **embed** pass explicitly. As of 2026-05-31 (Cairn's MS4CC fix), the per-turn Stop hook archives ONLY — embedding (transcript vectorize + memory reindex) happens ONLY here, gated behind `CAIRN_CHECKPOINT_MODE=1`. (`index_transcript` re-embeds the entire transcript, so doing it every turn pegged the local embedder; per Clint's 2026-05-31 directive embedding is checkpoint-only.) This step also guarantees persistence when the Stop hook can't fire (`/exit`; image-dimension or other substrate errors block model calls; runtime crashes).
+Run the archive + **embed** pass explicitly. As of 2026-05-31 (Cairn's MS4CC fix), the per-turn Stop hook archives ONLY — embedding (transcript vectorize + memory reindex) happens ONLY here, gated behind `CAIRN_CHECKPOINT_MODE=1`. (`index_transcript` re-embeds the entire transcript, so doing it every turn pegged the local embedder; per the 2026-05-31 directive embedding is checkpoint-only.) This step also guarantees persistence when the Stop hook can't fire (`/exit`; image-dimension or other substrate errors block model calls; runtime crashes).
 
 ```bash
 CAIRN_CHECKPOINT_MODE=1 orchestrator/.venv/bin/python orchestrator/hooks/session_end.py < /dev/null
@@ -128,7 +156,7 @@ Verify: the script ALWAYS prints a `[checkpoint] OK …` summary line to stderr 
 
 The session's mechanical persistence (transcript archive + vector indexing + `hits` counter increments) is handled by **two redundant code paths**:
 
-1. **The Stop hook** (`orchestrator/hooks/session_end.py`) — fires per-turn-completion automatically. **As of 2026-05-31 it ARCHIVES ONLY** (copies the session JSONL to `orchestrator/transcripts/`, scans for memory citations + increments `hits`, appends `### Auto-archive` to `LOG.md`). It **no longer embeds** — `index_transcript` re-embeds the whole transcript, and doing that every turn pegged the local embedder (Clint directive: embedding is checkpoint-only). Archiving every turn is cheap and keeps the transcript safe on disk.
+1. **The Stop hook** (`orchestrator/hooks/session_end.py`) — fires per-turn-completion automatically. **As of 2026-05-31 it ARCHIVES ONLY** (copies the session JSONL to `orchestrator/transcripts/`, scans for memory citations + increments `hits`, appends `### Auto-archive` to `LOG.md`). It **no longer embeds** — `index_transcript` re-embeds the whole transcript, and doing that every turn pegged the local embedder (directive: embedding is checkpoint-only). Archiving every turn is cheap and keeps the transcript safe on disk.
 
 2. **`/checkpoint` step 7** — invokes the same script with `CAIRN_CHECKPOINT_MODE=1`, the ONLY mode that **embeds** (transcript vectorize + memory reindex). Skips the `hits` increment (the per-turn Stop hook owns that). This is now the single place embedding happens for MS4CC.
 

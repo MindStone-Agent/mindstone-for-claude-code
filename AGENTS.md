@@ -107,7 +107,7 @@ This pattern is the operator-side mitigation for the texture-loss tension that v
 
 Three orchestrator commands ship with the framework:
 
-- **`/checkpoint`** — Dream-cycle session synthesis. Updates `LOG.md`, asks the user which cited memories prevented a mistake, proposes new memories, flags drift (decisions without canonical attribution, shipped work without a status update).
+- **`/checkpoint`** — Dream-cycle session synthesis. Updates `LOG.md`, decides on its own judgment which cited memories prevented a mistake, writes new memories, flags drift (decisions without canonical attribution, shipped work without a status update). **Checkpointing is never collaborative:** the orchestrator never asks the user to adjudicate its own checkpoint; it decides, writes, runs the archive, and reports a short summary afterwards.
 - **`/adversarial-review`** — The independent verification loop: round-1, round-N, and closing briefs for a fresh-context reviewer (or a Synapse QA peer), the apply pattern, the convergence rule, and the receipt. Mandatory for critical outcomes (see Engineering discipline).
 - **`/end-session`** — Wrap-up before `/exit`. Composes `/checkpoint` (when warranted) and the mechanical archive (vectorize transcript + auto-increment hits) into a single command. Use before `/exit` so reflection and persistence both land. Workaround for the Stop hook firing per-turn-completion rather than on session end.
 
