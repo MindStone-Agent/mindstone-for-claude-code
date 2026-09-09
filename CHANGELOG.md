@@ -7,6 +7,17 @@ while pre-1.0 (`0.x`), minor versions may include behavior changes.
 
 ## [Unreleased]
 
+### Changed
+- **`/checkpoint` is never collaborative** (`.claude/commands/checkpoint.md`, `AGENTS.md`,
+  `onboarding/GETTING_STARTED.md`). The command no longer shows the LOG draft for approval,
+  no longer asks which memories prevented a mistake, and no longer asks before writing a new
+  memory: the orchestrator decides every call on its own judgment, writes, runs the archive
+  and embed step, and reports a short summary afterwards. The user cannot adjudicate a
+  session they did not live; making them do so defeats the purpose of a memory. The
+  operating instructions were also generalized from a named user to "the user". Ruling by
+  the framework's author, 2026-05-31 and 2026-08-06 (the second time because the command
+  file still said to ask, and the command won over the memory).
+
 ### Added
 - **`/adversarial-review` slash command** (`.claude/commands/adversarial-review.md`): the
   independent verification loop as an executable protocol. Round-1 brief (attack axes in
