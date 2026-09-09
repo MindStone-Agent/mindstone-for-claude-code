@@ -105,9 +105,10 @@ This pattern is the operator-side mitigation for the texture-loss tension that v
 
 ## Slash commands
 
-Two orchestrator commands ship with the framework:
+Three orchestrator commands ship with the framework:
 
 - **`/checkpoint`** — Dream-cycle session synthesis. Updates `LOG.md`, asks the user which cited memories prevented a mistake, proposes new memories, flags drift (decisions without canonical attribution, shipped work without a status update).
+- **`/adversarial-review`** — The independent verification loop: round-1, round-N, and closing briefs for a fresh-context reviewer (or a Synapse QA peer), the apply pattern, the convergence rule, and the receipt. Mandatory for critical outcomes (see Engineering discipline).
 - **`/end-session`** — Wrap-up before `/exit`. Composes `/checkpoint` (when warranted) and the mechanical archive (vectorize transcript + auto-increment hits) into a single command. Use before `/exit` so reflection and persistence both land. Workaround for the Stop hook firing per-turn-completion rather than on session end.
 
 These are framework-internal commands. Users define their own subagents (under `.claude/agents/`), any role-adoption commands, and workflow commands per their use case.
@@ -191,6 +192,8 @@ Before critical work is declared done — deploys, customer-facing changes, data
 - **Self-review does not satisfy this gate, regardless of model tier** — the author carries the reasoning that produced the bug, and green tests are not evidence for paths the suite doesn't cover.
 - Confirmed defects **block the ship**; residuals are ticketed with owners.
 - Record the QA outcome in the ship receipt (commit / PR / board comment) — the gate is auditable, not vibes.
+- **It is a loop, not a pass.** Re-attack the fixes with a new fresh context each round; once fixes start adding mechanism, narrow the brief to text that is wrong, contradicts the document, or cannot work; stop when a round returns no severity-1 or severity-2 findings. Fixes spawn mechanisms and mechanisms have defects. The briefs and the apply pattern are `/adversarial-review`.
+- **Two transports, one contract:** an ephemeral clean-room reviewer (a fresh subagent; the default) or a persistent QA peer with its own identity over Synapse (for boundary-crossing work, model diversity, or when the reviewer must run the product). A persona switch inside the author's own session is neither.
 
 ### Recon & thoroughness
 
