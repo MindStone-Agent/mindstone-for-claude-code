@@ -7,6 +7,20 @@ while pre-1.0 (`0.x`), minor versions may include behavior changes.
 
 ## [Unreleased]
 
+### Added
+- **`/adversarial-review` slash command** (`.claude/commands/adversarial-review.md`): the
+  independent verification loop as an executable protocol. Round-1 brief (attack axes in
+  order, out-of-bounds list, output contract with severity 1/2/3, evidence with source,
+  paste-ready replacement, verified-correct list, process note), round-N brief (applied /
+  partially / not-applied table, re-attack only the edits), closing brief (scope rule: wrong,
+  contradicts, or cannot work; no elaboration), the exact-match apply pattern, the stop rule
+  (no severity-1 or severity-2 in a round), and the receipt. Two transports, one contract: an
+  ephemeral clean-room subagent (default) or a persistent QA peer over Synapse. Evidence that
+  motivated the round-N and closing briefs: a 6,800-word product design needed seven rounds
+  (severity-1 per round 7, 0, 1, 1, 2, 1, clean) and every severity-1 after round one was in
+  text a previous round's fix had introduced. `AGENTS.md` "Adversarial QA" section extended
+  with the loop, the convergence rule, and the transports.
+
 ### Changed
 - **Session handoff now injects on resume/startup, not just after a compaction**
   (`orchestrator/hooks/session_start.py`). The pre-boundary handoff
