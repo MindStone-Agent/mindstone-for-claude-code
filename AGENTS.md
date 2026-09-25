@@ -193,7 +193,7 @@ Before critical work is declared done — deploys, customer-facing changes, data
 - Confirmed defects **block the ship**; residuals are ticketed with owners.
 - Record the QA outcome in the ship receipt (commit / PR / board comment) — the gate is auditable, not vibes.
 - **It is a loop, not a pass.** Re-attack the fixes with a new fresh context each round; once fixes start adding mechanism, narrow the brief to text that is wrong, contradicts the document, or cannot work; stop when a round returns no severity-1 or severity-2 findings. Fixes spawn mechanisms and mechanisms have defects. The briefs and the apply pattern are `/adversarial-review`.
-- **Two transports, one contract:** an ephemeral clean-room reviewer (a fresh subagent; the default) or a persistent QA peer with its own identity over Synapse (for boundary-crossing work, model diversity, or when the reviewer must run the product). A persona switch inside the author's own session is neither.
+- **Two transports, one contract:** an ephemeral fresh-context reviewer (a fresh subagent; the default; not recall-clean) or a persistent QA peer with its own identity over Synapse (for boundary-crossing work, model diversity, or when the reviewer must run the product). A persona switch inside the author's own session is neither.
 
 ### Recon & thoroughness
 
