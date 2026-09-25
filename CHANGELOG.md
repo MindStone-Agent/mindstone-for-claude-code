@@ -8,6 +8,15 @@ while pre-1.0 (`0.x`), minor versions may include behavior changes.
 ## [Unreleased]
 
 ### Changed
+- **`/adversarial-review` defers to a TestFlight skill when one is installed**
+  (`.claude/commands/adversarial-review.md`): resolves `$TESTFLIGHT_HOME` (then the
+  `TESTFLIGHT_HOME =` line of `~/.claude/CLAUDE.md`, then the checkout root) and, if
+  `.claude/skills/adversarial-review/SKILL.md` exists there, follows it and records the path,
+  the skill's last commit and any uncommitted edits in the receipt; installs without TestFlight
+  are unchanged. Also corrects the Blue View round counts (round 7 had one severity-2),
+  "inherits nothing" in the command (a Claude Code subagent loads CLAUDE.md and has been
+  observed to receive the author's auto-memory index), and "clean-room" in the command's
+  Transports, in `AGENTS.md` and in this changelog.
 - **`/checkpoint` is never collaborative** (`.claude/commands/checkpoint.md`, `AGENTS.md`,
   `onboarding/GETTING_STARTED.md`). The command no longer shows the LOG draft for approval,
   no longer asks which memories prevented a mistake, and no longer asks before writing a new
@@ -26,10 +35,11 @@ while pre-1.0 (`0.x`), minor versions may include behavior changes.
   partially / not-applied table, re-attack only the edits), closing brief (scope rule: wrong,
   contradicts, or cannot work; no elaboration), the exact-match apply pattern, the stop rule
   (no severity-1 or severity-2 in a round), and the receipt. Two transports, one contract: an
-  ephemeral clean-room subagent (default) or a persistent QA peer over Synapse. Evidence that
-  motivated the round-N and closing briefs: a 6,800-word product design needed seven rounds
-  (severity-1 per round 7, 0, 1, 1, 2, 1, clean) and every severity-1 after round one was in
-  text a previous round's fix had introduced. `AGENTS.md` "Adversarial QA" section extended
+  ephemeral fresh-context subagent (default; not recall-clean) or a persistent QA peer over
+  Synapse. Evidence that motivated the round-N and closing briefs: a 6,800-word product design
+  needed seven rounds (severity-1 per round 7, 0, 1, 1, 2, 1, 0; round 7's one severity-2 was
+  applied without a further round) and every severity-1 after round one was in text a previous
+  round's fix had introduced. `AGENTS.md` "Adversarial QA" section extended
   with the loop, the convergence rule, and the transports.
 
 ### Changed
