@@ -551,3 +551,15 @@ def test_random_mixed_case_after_unquoted_lowercase_colon_is_redacted() -> None:
         if w in scrub(f"password: {w}"):
             missed += 1
     assert missed == 0
+
+
+def test_scrub_collect_reports_context_proven_values() -> None:
+    from scrubber import scrub_collect
+
+    pw = "#K9" + _rand(10) + "!"
+    url_pw = _rand(12)
+    tok = _rand(20)
+    text = f"Password: {pw}\npostgres://app:{url_pw}@db/x\nmysql --password={tok}"
+    out, found = scrub_collect(text)
+    assert pw not in out and url_pw not in out and tok not in out
+    assert {pw, url_pw, tok} <= found

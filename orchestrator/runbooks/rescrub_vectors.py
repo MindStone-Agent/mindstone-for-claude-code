@@ -42,7 +42,7 @@ from pathlib import Path
 HOOKS = Path(__file__).resolve().parents[1] / "hooks"
 sys.path.insert(0, str(HOOKS))
 
-from scrubber import scrub  # noqa: E402
+from scrubber import scrub, scrub_collect  # noqa: E402
 from vectorstore import VectorStore, _vec_to_blob  # noqa: E402
 
 PLACEHOLDER = re.compile(r"\[REDACTED-[A-Z0-9-]+\]")
@@ -79,6 +79,15 @@ def secret_like(v: str) -> bool:
     return _entropy(v) >= _BARE_MIN_ENTROPY and _switch_rate(v) >= _BARE_MIN_SWITCH_RATE
 
 
+def strong(v: str) -> bool:
+    """A context-proven value distinctive enough to hunt store-wide (8+ chars
+    with a digit or symbol, or mixed case). Weaker values are not hunted, so a
+    context false positive can't spread across the store."""
+    if len(v) < 8 or re.fullmatch(r"[a-z]+|[A-Z]+", v):
+        return False
+    return bool(re.search(r"[^A-Za-z]", v)) or bool(re.search(r"[a-z]", v) and re.search(r"[A-Z]", v))
+
+
 def checkable(v: str) -> bool:
     """A removed value worth byte-checking: 6+ chars with a digit or a symbol
     (short passwords and URL passwords included); plain words are skipped."""
@@ -103,6 +112,12 @@ def main() -> int:
     ap.add_argument("--db", default=str(Path(__file__).resolve().parents[1] / "vectors.db"))
     ap.add_argument("--apply", action="store_true", help="snapshot, rewrite, re-embed, VACUUM, byte-check (default: dry run)")
     ap.add_argument("--batch", type=int, default=32)
+    ap.add_argument(
+        "--seed-from",
+        metavar="SNAPSHOT",
+        help="an earlier (pre-scrub) snapshot to learn context-proven secrets from; "
+        "needed when a previous run already redacted the rows that proved them",
+    )
     args = ap.parse_args()
 
     db = Path(args.db)
@@ -116,16 +131,28 @@ def main() -> int:
         "SELECT rowid, chunk_id, source_type, source_path, start_line, end_line, text FROM chunks"
     ).fetchall()
 
+    seeded = set()
+    if args.seed_from:
+        snap = sqlite3.connect(f"file:{args.seed_from}?mode=ro", uri=True)
+        for (t,) in snap.execute("SELECT text FROM chunks"):
+            new, known = scrub_collect(t)
+            if new != t:
+                seeded |= {v for v in known if strong(v)} | {v for v in removed_values(t, new) if secret_like(v)}
+        snap.close()
+        print(f"[rescrub] seeded {len(seeded)} known secret values from the snapshot")
     # Pass 1: scrub each row. Pass 2: a value redacted in one row (where its
     # context gave it away) is replaced in every other row too; the scrubber
     # sees one chunk at a time, so it can't do this itself.
     scrubbed = {}
-    hunt: set[str] = set()
+    hunt: set[str] = set(seeded)
     for rowid, cid, stype, spath, start, end, text in rows:
-        new = scrub(text)
+        new, known = scrub_collect(text)
         if new != text:
             scrubbed[rowid] = new
             hunt |= {v for v in removed_values(text, new) if secret_like(v)}
+            # Values redacted because of their context (after a password
+            # key, in a URL, a CLI flag...) are secrets wherever they appear.
+            hunt |= {v for v in known if strong(v)}
     changed = []
     kinds: collections.Counter[str] = collections.Counter()
     by_source: collections.Counter[str] = collections.Counter()
@@ -134,6 +161,9 @@ def main() -> int:
         new = scrubbed.get(rowid, text)
         for v in sorted(hunt, key=len, reverse=True):
             if v in new:
+                # Hunted values are known secrets and distinctive (strong() or
+                # secret_like()), so every occurrence goes, embedded ones too:
+                # the byte check would still find an embedded copy.
                 new = new.replace(v, "[REDACTED-SECRET]")
                 if rowid not in scrubbed:
                     cross_row += 1
@@ -229,7 +259,9 @@ def main() -> int:
         conn.commit()
 
     left = sum(
-        1 for (t,) in conn.execute("SELECT text FROM chunks") if scrub(t) != t or any(v in t for v in hunt)
+        1
+        for (t,) in conn.execute("SELECT text FROM chunks")
+        if scrub(t) != t or any(v in t for v in hunt)
     )
     still_pending = conn.execute("SELECT count(*) FROM _rescrub_pending").fetchone()[0]
     if not still_pending:
@@ -250,7 +282,10 @@ def main() -> int:
         "SELECT count(*) FROM chunks c WHERE NOT EXISTS (SELECT 1 FROM vec_chunks v WHERE v.rowid = c.rowid)"
     ).fetchone()[0]
     store.close()
-    in_bytes = byte_check(db, {v for v in removed if checkable(v)} | hunt)
+    # Byte-check the values known to be secrets: the context-proven ones and
+    # the secret-shaped ones. Fragments a redaction swallowed (a key name, a
+    # "-----BEGIN" header) legitimately appear elsewhere and are not checked.
+    in_bytes = byte_check(db, hunt)
     print(
         f"[rescrub] rewrote={rewrote} raced={raced} refreshed={refreshed} vector_pending={still_pending} "
         f"remaining_unscrubbed_rows={left} vacuumed={vacuumed} freelist_pages={freelist} chunks_without_vector={orphans} "

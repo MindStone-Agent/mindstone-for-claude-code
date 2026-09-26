@@ -204,7 +204,7 @@ def _looks_like_code(v: str, call: bool) -> bool:
     return bool(_DOTTED_IDENT.fullmatch(v)) and not any(ch.isdigit() for ch in v)
 
 
-def _kv_pass(text: str) -> str:
+def _kv_pass(text: str, sink: set[str] | None = None) -> str:
     """Redact key=value secrets, then every other exact occurrence of those
     values in the same text (a value quoted twice must not survive once)."""
     found: set[str] = set()
@@ -243,6 +243,8 @@ def _kv_pass(text: str) -> str:
     text = _KV_PASSWORD_QUOTED.sub(_pwq, text)
     text = _KV_PASSWORD.sub(_pw, text)
     text = _KV.sub(_sub, text)
+    if sink is not None:
+        sink |= {v for v in found if len(v) >= 6}
     # Propagate only secret-shaped values, and only as whole tokens, so a
     # redaction can never eat part of an ordinary word.
     for v in sorted(found, key=len, reverse=True):
@@ -260,20 +262,47 @@ def _propagatable(v: str) -> bool:
     return not re.fullmatch(r"[a-z]+", v)
 
 
-def _one_pass(text: str) -> str:
+def _capture(sink: set[str] | None, group: int, template: str):
+    """A re.sub replacement that also records the secret group's value."""
+
+    def repl(m: re.Match[str]) -> str:
+        if sink is not None and len(m.group(group)) >= 6:
+            sink.add(m.group(group))
+        return m.expand(template)
+
+    return repl
+
+
+def _one_pass(text: str, sink: set[str] | None = None) -> str:
     for pattern, placeholder in SECRET_PATTERNS:
         text = pattern.sub(placeholder, text)
-    text = _URL_USERINFO.sub(r"\1[REDACTED-SECRET]@", text)
-    text = _CLI_FLAG.sub(r"\1\2[REDACTED-SECRET]", text)
-    text = _CURL_USER.sub(r"\1[REDACTED-SECRET]", text)
-    text = _MYSQL_P.sub(r"\1[REDACTED-SECRET]", text)
-    text = _PLIST_XML.sub(r"\1[REDACTED-SECRET]\3", text)
-    text = _AWS_SECRET.sub(r"\1[REDACTED-AWS-SECRET-KEY]", text)
+    text = _URL_USERINFO.sub(_capture(sink, 2, r"\1[REDACTED-SECRET]@"), text)
+    text = _CLI_FLAG.sub(_capture(sink, 3, r"\1\2[REDACTED-SECRET]"), text)
+    text = _CURL_USER.sub(_capture(sink, 2, r"\1[REDACTED-SECRET]"), text)
+    text = _MYSQL_P.sub(_capture(sink, 2, r"\1[REDACTED-SECRET]"), text)
+    text = _PLIST_XML.sub(_capture(sink, 2, r"\1[REDACTED-SECRET]\3"), text)
+    text = _AWS_SECRET.sub(_capture(sink, 2, r"\1[REDACTED-AWS-SECRET-KEY]"), text)
     text = _HEX_IN_CONTEXT.sub(r"\1[REDACTED-HEX-TOKEN]", text)
     text = _BARE_HEX_LINE.sub(r"\1[REDACTED-HEX-TOKEN]\3", text)
-    text = _kv_pass(text)
+    text = _kv_pass(text, sink)
     text = _URLSAFE_43.sub("[REDACTED-URLSAFE-TOKEN]", text)
     return _BARE.sub(_bare_sub, text)
+
+
+def scrub_collect(text: str) -> tuple[str, set[str]]:
+    """scrub(), plus the values that were redacted because of their CONTEXT
+    (a password/token key, URL userinfo, a CLI flag, a plist key, an AWS
+    secret key). Those are known secrets even where they later appear without
+    that context, so a store-wide rescrub hunts them in every row."""
+    sink: set[str] = set()
+    if not isinstance(text, str):
+        return text, sink
+    for _ in range(3):
+        new = _one_pass(text, sink)
+        if new == text:
+            break
+        text = new
+    return text, sink
 
 
 def scrub(text: str) -> str:

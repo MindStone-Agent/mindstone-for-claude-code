@@ -384,3 +384,47 @@ def test_freelist_gate_fails_a_run_that_leaves_free_pages(tmp_path, monkeypatch,
     assert rb.main() == 1
     out = capsys.readouterr().out
     assert "freelist_pages=0" not in out and "vacuumed=True" in out
+
+
+def test_runbook_hunts_context_proven_passwords_into_bare_mentions(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    pw = "#K9" + "".join(_rng.choice(string.ascii_letters + string.digits) for _ in range(11)) + "!"
+    _raw_insert(db, f"Username: clintbodungen\nPassword: {pw}\nnext line")  # context proves it
+    _raw_insert(db, f"then I ran echo {pw} | sudo -S true", source_path="u.jsonl")  # bare mention
+    _raw_insert(db, f"glued x{pw}y still contains it", source_path="v.jsonl")
+    weak = "required"  # a weak context value is never hunted store-wide
+    _raw_insert(db, f"Password: {weak}!9\nfield is {weak} here", source_path="w.jsonl")
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    assert rb.main() == 0
+    capsys.readouterr()
+    c = sqlite3.connect(db)
+    texts = [t for (t,) in c.execute("SELECT text FROM chunks")]
+    assert not any(pw in t for t in texts), "a known secret goes everywhere, embedded copies too"
+    assert pw.encode() not in db.read_bytes()
+    assert any("field is required here" in t for t in texts), "ordinary words are never hunted"
+
+
+def test_seed_from_snapshot_finds_values_whose_proof_was_already_redacted(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    pw = "#K9" + "".join(_rng.choice(string.ascii_letters + string.digits) for _ in range(11)) + "!"
+    _raw_insert(db, f"Password: {pw}")
+    snap = tmp_path / "snapshot.db"
+    import shutil
+
+    shutil.copy(db, snap)
+    # A first run redacts the proving row; a bare mention added later is
+    # invisible to a second run without the snapshot.
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    rb.main()
+    _raw_insert(db, f"echo {pw} | sudo -S true", source_path="u.jsonl")
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply", "--seed-from", str(snap)])
+    assert rb.main() == 0
+    assert "seeded 1 known secret" in capsys.readouterr().out
+    assert pw.encode() not in db.read_bytes()
