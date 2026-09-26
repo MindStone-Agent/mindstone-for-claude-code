@@ -48,7 +48,9 @@ def log(path_kind: str, query: str, records: list[dict]) -> None:
         if not records:
             return
         ts = datetime.now(tz=timezone.utc).isoformat()
-        q = _scrub((query or "")[:QUERY_CAP])
+        # Scrub THEN truncate: a token straddling the cap would otherwise
+        # survive as an unmatched prefix.
+        q = _scrub(query or "")[:QUERY_CAP]
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         lines = []
         for rec in records:
