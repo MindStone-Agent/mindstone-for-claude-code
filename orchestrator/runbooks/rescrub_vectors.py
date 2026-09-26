@@ -11,8 +11,11 @@ Output is COUNT-ONLY. No chunk text or matched value is ever printed.
   dry run (default):  python orchestrator/runbooks/rescrub_vectors.py
   apply:              python orchestrator/runbooks/rescrub_vectors.py --apply
 
---apply copies the DB to `<db>.bak-rescrub-<UTC>` first (a 600-mode file; it
-still holds the unscrubbed text, so delete it once the rescan is clean).
+--apply first snapshots the DB with SQLite's online backup API into
+`<db>.bak-rescrub-<UTC>`, a file created 0600 (it still holds the unscrubbed
+text: gitignored, and delete it once the rescan is clean). Rows whose new
+embedding comes back as a zero vector (embedder down) are NOT written; the
+run exits non-zero and a re-run picks them up.
 Idempotent: a second run finds nothing to change.
 """
 
@@ -23,7 +26,6 @@ import collections
 import hashlib
 import os
 import re
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -93,7 +95,17 @@ def main() -> int:
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     backup = db.with_name(f"{db.name}.bak-rescrub-{stamp}")
     conn.commit()
-    shutil.copy2(db, backup)
+    # Online backup (consistent even if a hook writes concurrently) into a
+    # file that is 0600 from creation, never briefly world-readable.
+    fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(fd)
+    import sqlite3
+
+    dest = sqlite3.connect(backup)
+    try:
+        conn.backup(dest)
+    finally:
+        dest.close()
     os.chmod(backup, 0o600)
     print(f"[rescrub] snapshot: {backup}")
 
@@ -101,10 +113,17 @@ def main() -> int:
 
     embedder = Embedder()
     done = 0
+    skipped_zero = 0
     for i in range(0, len(changed), args.batch):
         batch = changed[i : i + args.batch]
         vectors = embedder.embed_batch([t for *_, t in batch])
         for (rowid, cid, spath, start, end, new), vec in zip(batch, vectors):
+            # embed_batch never raises: when the embedder is down it returns
+            # zero vectors. Writing one would store clean text with a dead
+            # vector that no re-run would ever revisit, so skip the row.
+            if not any(vec):
+                skipped_zero += 1
+                continue
             new_id = chunk_id(spath, start, end, new)
             clash = conn.execute("SELECT 1 FROM chunks WHERE chunk_id = ? AND rowid != ?", (new_id, rowid)).fetchone()
             conn.execute(
@@ -116,8 +135,8 @@ def main() -> int:
             done += 1
         conn.commit()
     left = sum(1 for (t,) in conn.execute("SELECT text FROM chunks") if scrub(t) != t)
-    print(f"[rescrub] rewrote={done} remaining_unscrubbed={left}")
-    return 0 if left == 0 else 1
+    print(f"[rescrub] rewrote={done} skipped_zero_vector={skipped_zero} remaining_unscrubbed={left}")
+    return 0 if left == 0 and skipped_zero == 0 else 1
 
 
 if __name__ == "__main__":

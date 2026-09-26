@@ -377,7 +377,9 @@ class Indexer:
         """Chunk + embed + store a single memory file. Returns number of new chunks."""
         if not path.exists():
             return 0
-        text = path.read_text()
+        # Scrub before chunking: a split can cut a secret across two chunks,
+        # and a half-token matches no rule (upsert scrubs each chunk again).
+        text = scrub(path.read_text())
         chunks = chunk_markdown(text, str(path))
         if not chunks:
             return 0

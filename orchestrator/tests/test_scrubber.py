@@ -107,3 +107,82 @@ def test_idempotent() -> None:
 
 def test_non_string_passthrough() -> None:
     assert scrub(None) is None  # type: ignore[arg-type]
+
+
+# --- Review round 1 (adversarial QA of 7e0d294) -----------------------------
+
+@pytest.mark.parametrize(
+    "key",
+    ["HF_TOKEN", "OPENAI_API_KEY", "OLLAMA_API_KEY", "TELEGRAM_BOT_TOKEN", "SYNAPSE_TOKEN", "token", "secret"],
+)
+def test_env_var_style_assignments(key: str) -> None:
+    val = _rand(30)
+    out = scrub(f"export {key}={val}")
+    assert val not in out
+    assert f"{key}=[REDACTED-SECRET]" in out
+
+
+def test_hf_token_shape() -> None:
+    tok = "hf" + "_" + _rand(34)
+    out = scrub(f"login with {tok} now")
+    assert tok not in out and "[REDACTED-HF-TOKEN]" in out
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "password = get_password_from_env()",
+        "api_key = config.get_api_key_for_provider(name)",
+        "access_token = session.refresh_access_token_now()",
+        "max_tokens: 4096",
+    ],
+)
+def test_code_is_not_corrupted(code: str) -> None:
+    assert scrub(code) == code
+
+
+def test_prose_after_private_key_header_survives() -> None:
+    note = "-----BEGIN OPENSSH " + "PRIVATE KEY----- is the header line and then the body follows in this memory note"
+    assert scrub(note) == note
+
+
+def test_bearer_prose_survives() -> None:
+    for text in ["the bearer of bad news", "Bearer authentication/authorization is described here"]:
+        assert scrub(text) == text
+
+
+@pytest.mark.parametrize(
+    "blob",
+    [
+        "sk-x-" * 200_000,
+        "anthropic-" * 100_000,
+        "-----BEGIN OPENSSH " + "PRIVATE KEY-----" * 1,
+        ("-----BEGIN RSA " + "PRIVATE KEY-----\n") * 30_000,
+        "a-" * 500_000,
+    ],
+    ids=["sk-x", "anthropic", "one-header", "repeated-headers", "a-dash"],
+)
+def test_large_adversarial_inputs_are_fast(blob: str) -> None:
+    import time
+
+    t = time.perf_counter()
+    scrub(blob)
+    assert time.perf_counter() - t < 1.5
+
+
+def test_fixed_point_on_glued_tokens() -> None:
+    for _ in range(2000):
+        parts = [s for s, _ in _rng.sample(list(POSITIVE.values()), 3)]
+        blob = "".join(parts)
+        once = scrub(blob)
+        assert scrub(once) == once
+
+
+def test_private_key_in_cat_n_tool_output() -> None:
+    lines = [_rand(70, string.ascii_letters + string.digits + "+/") for _ in range(3)]
+    header = "-----BEGIN OPENSSH " + "PRIVATE KEY-----"
+    for sep in ("\t", "\u2192"):
+        shown = header + "".join(f"\n{i + 2}{sep}{ln}" for i, ln in enumerate(lines)) + "\n6" + sep + "[truncated]"
+        out = scrub(shown)
+        assert all(ln not in out for ln in lines), sep
+        assert "[REDACTED-PRIVATE-KEY]" in out
