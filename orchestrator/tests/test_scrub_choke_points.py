@@ -344,3 +344,43 @@ def test_runbook_hunts_a_redacted_value_across_rows(tmp_path, monkeypatch, capsy
     out = capsys.readouterr().out
     assert "rows changed only by that hunt=1" in out and val not in out
     assert val.encode() not in db.read_bytes()
+
+
+def test_freelist_gate_fails_a_run_that_leaves_free_pages(tmp_path, monkeypatch, capsys):
+    """If VACUUM silently does nothing, free pages (with old text) remain; the
+    run must fail on freelist_count even though every other check is clean."""
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    _raw_insert(db, f"old turn with {_tg_token()}")
+    c = sqlite3.connect(db)
+    c.execute("PRAGMA secure_delete=OFF")
+    c.execute(
+        "INSERT INTO chunks (chunk_id, source_type, source_path, start_line, end_line, text, metadata_json, created_at, last_seen_at)"
+        " VALUES ('old', 'memory', 'old.md', 1, 1, ?, '{}', 0, 0)",
+        ("y" * 20000,),
+    )
+    c.commit()
+    c.execute("DELETE FROM chunks WHERE chunk_id = 'old'")
+    c.commit()
+    c.close()
+
+    class NoVacuum:
+        def __init__(self, conn):
+            self._c = conn
+
+        def execute(self, sql, *a):
+            if sql.strip().upper() == "VACUUM":
+                return self._c.execute("SELECT 1")
+            return self._c.execute(sql, *a)
+
+        def __getattr__(self, name):
+            return getattr(self._c, name)
+
+    real = VectorStore._conn_or_init
+    monkeypatch.setattr(VectorStore, "_conn_or_init", lambda self: NoVacuum(real(self)))
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    assert rb.main() == 1
+    out = capsys.readouterr().out
+    assert "freelist_pages=0" not in out and "vacuumed=True" in out

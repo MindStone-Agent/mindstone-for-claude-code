@@ -126,10 +126,14 @@ _KV_PASSWORD = re.compile(
     r"(?i)((?:" + _PASSWORD_TAIL + r"))" + _SEP + r"(?!\[REDACTED)"
     r"(?=(?P<v>[^\s\"'`<>\\]{6,256}))(?P=v)"
 )
-# Plain words and type names: all letters (optionally one Word[...] generic,
-# a GraphQL "!", or a | union). A password needs a digit or a symbol; an
-# all-letter "password" (correcthorsebattery) is left to the other rules.
-_TYPE_OR_WORD = re.compile(r"[A-Za-z_]+(?:\[[A-Za-z_, .|\[\]]*\])?!?(?:\|[A-Za-z_]+)*[;,]?")
+# Plain words and type names: all letters (optionally one Word[...] generic
+# or a | union), or a GraphQL non-null scalar/type name (String!, UserInput!).
+# Skipped ONLY after a colon (a declaration: `password: string`); after `=`
+# (an assignment: PGPASSWORD=abcdef) the value is always a secret.
+_TYPE_OR_WORD = re.compile(
+    r"(?:[A-Za-z_]+(?:\[[A-Za-z_, .|\[\]]*\])?(?:\|[A-Za-z_]+)*"
+    r"|(?:String|Int|Float|Boolean|ID|[A-Z][A-Za-z]*(?:Input|Type|Enum))!)[;,]?"
+)
 # A quoted password may contain spaces: PASSWORD: 'p@ss w0rd'.
 _KV_PASSWORD_QUOTED = re.compile(
     r"(?i)((?:" + _PASSWORD_TAIL + r")[ \t]{0,8}\\?[\"']?[ \t]{0,8}(?:=>|[:=])[ \t]{0,8})([\"'])([^\"'\n]{6,256})\2"
@@ -199,7 +203,8 @@ def _kv_pass(text: str) -> str:
 
     def _pw(m: re.Match[str]) -> str:
         v = m.group("v").rstrip(".,;)")
-        if "(" in v or _looks_like_code(v, False) or _TYPE_OR_WORD.fullmatch(v):
+        declaration = ":" in m.group(2) and "=" not in m.group(2)
+        if "(" in v or _looks_like_code(v, False) or (declaration and _TYPE_OR_WORD.fullmatch(v)):
             # password = user.password_hash / get_pw() / a type annotation or
             # schema keyword (string, Optional[str], String!, required).
             return m.group(0)
@@ -232,9 +237,12 @@ def _kv_pass(text: str) -> str:
 
 
 def _propagatable(v: str) -> bool:
-    if len(v) < 8 or _TYPE_OR_WORD.fullmatch(v):
+    """Every redacted value of 6+ chars is removed elsewhere in the chunk too
+    (at token boundaries), unless it is a plain lowercase word that could be
+    ordinary text."""
+    if len(v) < 6:
         return False
-    return any(ch.isdigit() for ch in v) or bool(re.search(r"[^A-Za-z0-9_]", v))
+    return not re.fullmatch(r"[a-z]+", v)
 
 
 def _one_pass(text: str) -> str:

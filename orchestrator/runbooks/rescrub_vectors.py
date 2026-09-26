@@ -243,6 +243,9 @@ def main() -> int:
         print(f"[rescrub] VACUUM failed ({err}); freed pages may still hold old text. Re-run when no session holds the store.")
     # Every chunk must still have its vector (rowids are not guaranteed stable
     # across VACUUM without an INTEGER PRIMARY KEY).
+    # After VACUUM no free page may remain: free pages are where deleted rows'
+    # old text survives, and the byte check can't tell them apart.
+    freelist = conn.execute("PRAGMA freelist_count").fetchone()[0]
     orphans = conn.execute(
         "SELECT count(*) FROM chunks c WHERE NOT EXISTS (SELECT 1 FROM vec_chunks v WHERE v.rowid = c.rowid)"
     ).fetchone()[0]
@@ -250,10 +253,10 @@ def main() -> int:
     in_bytes = byte_check(db, {v for v in removed if checkable(v)} | hunt)
     print(
         f"[rescrub] rewrote={rewrote} raced={raced} refreshed={refreshed} vector_pending={still_pending} "
-        f"remaining_unscrubbed_rows={left} vacuumed={vacuumed} chunks_without_vector={orphans} "
+        f"remaining_unscrubbed_rows={left} vacuumed={vacuumed} freelist_pages={freelist} chunks_without_vector={orphans} "
         f"removed_values_still_in_file_bytes={in_bytes}"
     )
-    ok = left == 0 and in_bytes == 0 and still_pending == 0 and vacuumed and orphans == 0
+    ok = left == 0 and in_bytes == 0 and still_pending == 0 and vacuumed and freelist == 0 and orphans == 0
     return 0 if ok else 1
 
 

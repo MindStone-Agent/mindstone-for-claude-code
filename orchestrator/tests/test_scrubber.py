@@ -474,7 +474,24 @@ def test_propagation_respects_token_boundaries() -> None:
     assert "but [REDACTED-SECRET] again" in out
 
 
-def test_short_values_are_not_propagated() -> None:
-    out = scrub("password: a1b2c3\nthe build tag a1b2c3 is unrelated")
+def test_short_passwords_are_propagated_too() -> None:
+    out = scrub("password: a1b2c3\nlater a1b2c3 again and xa1b2c3 stays")
     assert out.startswith("password: [REDACTED-SECRET]")
-    assert "tag a1b2c3 is" in out
+    assert "later [REDACTED-SECRET] again" in out and "xa1b2c3" in out
+
+
+@pytest.mark.parametrize(
+    "fmt",
+    ["PGPASSWORD={w}", "export DB_PASS={w}", "password = {w}", "password: Welcome!", "password: Summer!"],
+)
+def test_letters_only_values_after_equals_are_secrets(fmt: str) -> None:
+    w = _rand(12, string.ascii_letters)
+    text = fmt.format(w=w)
+    out = scrub(text)
+    secret = w if "{w}" in fmt else text.split(": ", 1)[1]
+    assert secret not in out, (text, out)
+
+
+def test_graphql_types_after_colon_still_skipped() -> None:
+    for t in ["password: String!", "password: UserInput!", "password: string", "password: Optional[str]"]:
+        assert scrub(t) == t
