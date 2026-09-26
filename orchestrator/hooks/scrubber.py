@@ -130,6 +130,14 @@ _KV_PASSWORD = re.compile(
 # or a | union), or a GraphQL non-null scalar/type name (String!, UserInput!).
 # Skipped ONLY after a colon (a declaration: `password: string`); after `=`
 # (an assignment: PGPASSWORD=abcdef) the value is always a secret.
+# What an unquoted declaration may name: a lowercase word, a strict PascalCase
+# name (String, Optional[str], UserProfile), a known type, or a GraphQL
+# non-null. Random mixed-case letters are not strict PascalCase.
+_TYPE_DECL = re.compile(
+    r"(?:[a-z_]+(?:\[[A-Za-z_, .|\[\]]*\])?(?:[ ]?\|[ ]?[A-Za-z_]+)*"
+    r"|(?:[A-Z][a-z]+)+(?:\[[A-Za-z_, .|\[\]]*\])?(?:[ ]?\|[ ]?[A-Za-z_]+)*"
+    r"|(?:String|Int|Float|Boolean|ID|[A-Z][A-Za-z]*(?:Input|Type|Enum))!)[;,]?"
+)
 _TYPE_OR_WORD = re.compile(
     r"(?:[A-Za-z_]+(?:\[[A-Za-z_, .|\[\]]*\])?(?:\|[A-Za-z_]+)*"
     r"|(?:String|Int|Float|Boolean|ID|[A-Z][A-Za-z]*(?:Input|Type|Enum))!)[;,]?"
@@ -203,8 +211,15 @@ def _kv_pass(text: str) -> str:
 
     def _pw(m: re.Match[str]) -> str:
         v = m.group("v").rstrip(".,;)")
-        declaration = ":" in m.group(2) and "=" not in m.group(2)
-        if "(" in v or _looks_like_code(v, False) or (declaration and _TYPE_OR_WORD.fullmatch(v)):
+        sep = m.group(2)
+        # A type/schema word is only plausible in an unquoted declaration
+        # (`password: string`) under a lower-case key. Quoted values ("…": "…"),
+        # assignments (=, =>) and upper-case env keys (POSTGRES_PASSWORD:) are
+        # always values.
+        declaration = (
+            ":" in sep and "=" not in sep and not re.search(r"[\"'`]", sep) and not m.group(1).isupper()
+        )
+        if "(" in v or _looks_like_code(v, False) or (declaration and _TYPE_DECL.fullmatch(v)):
             # password = user.password_hash / get_pw() / a type annotation or
             # schema keyword (string, Optional[str], String!, required).
             return m.group(0)

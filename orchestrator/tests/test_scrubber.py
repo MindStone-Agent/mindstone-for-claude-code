@@ -495,3 +495,43 @@ def test_letters_only_values_after_equals_are_secrets(fmt: str) -> None:
 def test_graphql_types_after_colon_still_skipped() -> None:
     for t in ["password: String!", "password: UserInput!", "password: string", "password: Optional[str]"]:
         assert scrub(t) == t
+
+
+
+@pytest.mark.parametrize(
+    "fmt",
+    [
+        '"password": "{w}"',
+        "POSTGRES_PASSWORD: {w}",
+        "  DB_PASSWORD: {w}",
+        "password: '{w}'",
+        "password: {mixed}",
+    ],
+)
+def test_letters_only_values_in_values_positions(fmt: str) -> None:
+    w = _rand(14, string.ascii_letters)
+    mixed = "xK" + _rand(10, string.ascii_letters) + "Qz"  # not strict PascalCase
+    text = fmt.format(w=w, mixed=mixed)
+    out = scrub(text)
+    assert w not in out and mixed not in out, (text, out)
+
+
+@pytest.mark.parametrize(
+    "decl",
+    ["password: string", "password: Optional[str]", "password: UserPassword", "password: str | None", "password: required"],
+)
+def test_unquoted_lowercase_key_declarations_still_skipped(decl: str) -> None:
+    assert scrub(decl) == decl
+
+
+@pytest.mark.parametrize(
+    "fmt",
+    ['"password": "{w}"', "password: '{w}'", "POSTGRES_PASSWORD: {w}", "  DB_PASSWORD: {w}"],
+    ids=["json-quoted", "yaml-quoted", "compose-env", "env-indented"],
+)
+def test_lowercase_letters_in_value_positions_are_redacted(fmt: str) -> None:
+    # Lowercase letters look like a type word; only the quote / upper-case env
+    # key marks them as a value.
+    w = _rand(12, string.ascii_lowercase)
+    out = scrub(fmt.format(w=w))
+    assert w not in out, (fmt, out)
