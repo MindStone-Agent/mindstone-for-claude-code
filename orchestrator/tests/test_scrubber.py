@@ -389,3 +389,92 @@ def test_review_quadratic_inputs(blob: str) -> None:
     t = time.perf_counter()
     scrub(blob)
     assert time.perf_counter() - t < 1.5
+
+
+# --- Cairn's re-review of 778647f -------------------------------------------
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "interface Login {\n  username: string;\n  password: string;\n}\nconst x = s.substring(1)",
+        "def login(username: Optional[str], password: Optional[str]) -> bool: ...",
+        "type User {\n  email: String!\n  password: String!\n}",
+        "password: {\n  type: String,\n  required: true\n}\nfield is required",
+        'schema = {"password": {"type": "string", "required": True}}',
+        "password: required\npassword: disabled\npassword: hidden\npassword: boolean",
+        "passwd: list[str] | None",
+    ],
+    ids=["ts", "py-optional", "graphql", "mongoose", "jsonschema", "keywords", "py-union"],
+)
+def test_type_annotations_and_schema_words_untouched(code: str) -> None:
+    assert scrub(code) == code
+
+
+def test_propagation_never_eats_part_of_a_word() -> None:
+    pw = "W1nter!" + _rand(8)
+    text = f"password: {pw}\nreused {pw} and prefix{pw}suffix but substring and required stay"
+    out = scrub(text)
+    assert pw + " and" not in out
+    assert "substring" in out and "required" in out
+
+
+@pytest.mark.parametrize(
+    "fmt",
+    [
+        "mysql -u root -p{pw} db",
+        "PASSWORD: 'p@ss {w} w0rd'",
+        "X-Gateway-Key: {h48}",
+        "aws s3 ls --aws-secret-access-key {aws}",
+    ],
+)
+def test_round2_minor_shapes(fmt: str) -> None:
+    pw, w, h48 = "Zq9" + _rand(9), _rand(5), _hex(48)
+    aws = _rand(20) + "/" + _rand(19)
+    text = fmt.format(pw=pw, w=w, h48=h48, aws=aws)
+    out = scrub(text)
+    for secret in (pw, h48, aws, f"p@ss {w} w0rd"):
+        if secret in text:
+            assert secret not in out, (fmt, out)
+
+
+@pytest.mark.parametrize(
+    "benign",
+    [
+        "Author: " + _hex(40),
+        "authentication " + _hex(40),
+        "session_id: " + _hex(32),
+        "tokenizer_sha256: " + _hex(64),
+    ],
+)
+def test_hex_context_words_are_whole_words(benign: str) -> None:
+    assert scrub(benign) == benign
+
+
+# Loosening-direction boundaries (a mutant that loosens a threshold fails).
+def test_kv_value_length_boundary() -> None:
+    assert scrub("api_key = " + "Ab1" * 5) == "api_key = " + "Ab1" * 5  # 15 chars: kept
+    assert "[REDACTED" in scrub("api_key = " + "Ab1" * 5 + "Z")  # 16 chars: redacted
+
+
+def test_password_length_boundary() -> None:
+    assert scrub("password: a1b2c") == "password: a1b2c"  # 5 chars: kept
+    assert "[REDACTED" in scrub("password: a1b2c3")  # 6 chars: redacted
+
+
+def test_bare_rule_needs_two_digits_and_entropy() -> None:
+    one_digit = "QwErTyUiOpAsDfGhJkLz7"  # 21 chars, 1 digit
+    assert scrub(f"value {one_digit} end") == f"value {one_digit} end"
+    low_entropy = "Ab12" * 6  # digits, mixed case, but entropy 2.0
+    assert scrub(f"value {low_entropy} end") == f"value {low_entropy} end"
+
+
+def test_propagation_respects_token_boundaries() -> None:
+    out = scrub("password: temp1234\nsee temp12345678 and temp1234_backup, but temp1234 again")
+    assert "temp12345678" in out and "temp1234_backup" in out
+    assert "but [REDACTED-SECRET] again" in out
+
+
+def test_short_values_are_not_propagated() -> None:
+    out = scrub("password: a1b2c3\nthe build tag a1b2c3 is unrelated")
+    assert out.startswith("password: [REDACTED-SECRET]")
+    assert "tag a1b2c3 is" in out

@@ -79,6 +79,14 @@ def secret_like(v: str) -> bool:
     return _entropy(v) >= _BARE_MIN_ENTROPY and _switch_rate(v) >= _BARE_MIN_SWITCH_RATE
 
 
+def checkable(v: str) -> bool:
+    """A removed value worth byte-checking: 6+ chars with a digit or a symbol
+    (short passwords and URL passwords included); plain words are skipped."""
+    if len(v) < 6 or v.startswith("[REDACTED"):
+        return False
+    return any(ch.isdigit() for ch in v) or bool(re.search(r"[^A-Za-z0-9_]", v))
+
+
 def byte_check(db: Path, values: set[str]) -> int:
     """How many removed values still occur anywhere in the DB file bytes
     (including a leftover -journal/-wal). Count only."""
@@ -141,11 +149,25 @@ def main() -> int:
     print(f"[rescrub] secret-like values hunted across rows={len(hunt)}; rows changed only by that hunt={cross_row}")
     if backups:
         print(f"[rescrub] existing raw backups: {len(backups)} (delete them all once the byte check is clean)")
-    if not args.apply or not changed:
+    pending = []
+    if conn.execute("SELECT name FROM sqlite_master WHERE name = '_rescrub_pending'").fetchone():
+        pending = [r for (r,) in conn.execute("SELECT rowid FROM _rescrub_pending")]
+    if pending:
+        print(f"[rescrub] rows with a stale vector from an earlier run: {len(pending)}")
+    if not args.apply or (not changed and not pending):
         print("[rescrub] dry run: nothing written" if not args.apply else "[rescrub] nothing to do")
-        return 0
+        return 1 if pending else 0
 
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    # Preflight: refuse to write anything if the embedder is down.
+    from embedder import Embedder as _PreflightEmbedder  # noqa: E402
+
+    probe = _PreflightEmbedder().embed_batch(["rescrub preflight"])
+    if not probe or not any(probe[0]):
+        print("[rescrub] embedder preflight FAILED (zero vector): nothing written; start the embedder and re-run")
+        return 3
+
+    # Nanosecond suffix: two runs in the same second must not collide (O_EXCL).
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{time.time_ns() % 10**9:09d}"
     backup = db.with_name(f"{db.name}.bak-rescrub-{stamp}")
     conn.commit()
     fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -161,8 +183,26 @@ def main() -> int:
     from embedder import Embedder  # lazy: dry runs need no embedder
 
     embedder = Embedder()
+    conn.execute("CREATE TABLE IF NOT EXISTS _rescrub_pending (rowid INTEGER PRIMARY KEY)")
+    conn.commit()
     rewrote = vector_pending = raced = 0
     removed: set[str] = set()
+    refreshed = 0
+    if pending:
+        rows_p = conn.execute(
+            f"SELECT rowid, text FROM chunks WHERE rowid IN ({','.join('?' * len(pending))})", pending
+        ).fetchall()
+        for i in range(0, len(rows_p), args.batch):
+            part = rows_p[i : i + args.batch]
+            for (rid, text), vec in zip(part, embedder.embed_batch([t for _, t in part])):
+                if any(vec):
+                    conn.execute("DELETE FROM vec_chunks WHERE rowid = ?", (rid,))
+                    conn.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES (?, ?)", (rid, _vec_to_blob(vec)))
+                    conn.execute("DELETE FROM _rescrub_pending WHERE rowid = ?", (rid,))
+                    refreshed += 1
+        # rows that vanished (re-indexed) need no refresh
+        conn.execute("DELETE FROM _rescrub_pending WHERE rowid NOT IN (SELECT rowid FROM chunks)")
+        conn.commit()
     for i in range(0, len(changed), args.batch):
         batch = changed[i : i + args.batch]
         vectors = embedder.embed_batch([new for *_, new in batch])
@@ -180,7 +220,10 @@ def main() -> int:
                 conn.execute("DELETE FROM vec_chunks WHERE rowid = ?", (rowid,))
                 conn.execute("INSERT INTO vec_chunks(rowid, embedding) VALUES (?, ?)", (rowid, _vec_to_blob(vec)))
             else:
-                vector_pending += 1  # embedder down: text is scrubbed, vector refreshes on a re-run
+                # Embedder went down mid-run: the text is scrubbed now; the
+                # stale vector is recorded and refreshed on the next run.
+                conn.execute("INSERT OR IGNORE INTO _rescrub_pending(rowid) VALUES (?)", (rowid,))
+                vector_pending += 1
             removed |= removed_values(old, new)
             rewrote += 1
         conn.commit()
@@ -188,16 +231,30 @@ def main() -> int:
     left = sum(
         1 for (t,) in conn.execute("SELECT text FROM chunks") if scrub(t) != t or any(v in t for v in hunt)
     )
-    conn.execute("VACUUM")
+    still_pending = conn.execute("SELECT count(*) FROM _rescrub_pending").fetchone()[0]
+    if not still_pending:
+        conn.execute("DROP TABLE IF EXISTS _rescrub_pending")
+    conn.commit()
+    vacuumed = True
+    try:
+        conn.execute("VACUUM")
+    except sqlite3.OperationalError as err:
+        vacuumed = False
+        print(f"[rescrub] VACUUM failed ({err}); freed pages may still hold old text. Re-run when no session holds the store.")
+    # Every chunk must still have its vector (rowids are not guaranteed stable
+    # across VACUUM without an INTEGER PRIMARY KEY).
+    orphans = conn.execute(
+        "SELECT count(*) FROM chunks c WHERE NOT EXISTS (SELECT 1 FROM vec_chunks v WHERE v.rowid = c.rowid)"
+    ).fetchone()[0]
     store.close()
-    # Only secret-shaped removed values are checked: a key name or prose word
-    # that a redaction swallowed can legitimately appear elsewhere.
-    in_bytes = byte_check(db, {v for v in removed if secret_like(v)} | hunt)
+    in_bytes = byte_check(db, {v for v in removed if checkable(v)} | hunt)
     print(
-        f"[rescrub] rewrote={rewrote} raced={raced} vector_pending={vector_pending} "
-        f"remaining_unscrubbed_rows={left} secret_like_values_still_in_file_bytes={in_bytes}"
+        f"[rescrub] rewrote={rewrote} raced={raced} refreshed={refreshed} vector_pending={still_pending} "
+        f"remaining_unscrubbed_rows={left} vacuumed={vacuumed} chunks_without_vector={orphans} "
+        f"removed_values_still_in_file_bytes={in_bytes}"
     )
-    return 0 if left == 0 and in_bytes == 0 else 1
+    ok = left == 0 and in_bytes == 0 and still_pending == 0 and vacuumed and orphans == 0
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

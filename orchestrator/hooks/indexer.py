@@ -312,6 +312,9 @@ def chunk_transcript(jsonl_text: str, source_path: str, start_line_offset: int =
     flush()
     return chunks
 
+_BASH_OUTPUT = re.compile(r"<(bash-stdout|bash-stderr|local-command-stdout)>[\s\S]*?</\1>")
+
+
 def _extract_turn(obj: dict, line_num: int) -> dict | None:
     """Flatten a Claude Code transcript line into {role, content, line_num}."""
     # Claude Code JSONL format varies by version. Try common shapes.
@@ -358,6 +361,9 @@ def _extract_turn(obj: dict, line_num: int) -> dict | None:
         return None
 
     content = "\n".join(p for p in content_parts if p).strip()
+    # Bash-mode output pasted into a user turn is tool output too: keep a
+    # marker, never the body (MS4CC#117).
+    content = _BASH_OUTPUT.sub(r"<\1>[output omitted]</\1>", content).strip()
     if not content:
         return None
 

@@ -165,7 +165,7 @@ def test_runbook_apply_leaves_no_bytes_and_is_idempotent(tmp_path, monkeypatch, 
     monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
     assert rb.main() == 0
     out = capsys.readouterr().out
-    assert "secret_like_values_still_in_file_bytes=0" in out and tok not in out
+    assert "removed_values_still_in_file_bytes=0" in out and tok not in out
     assert tok.encode() not in db.read_bytes()
     monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db)])
     rb.main()
@@ -196,18 +196,110 @@ def test_runbook_does_not_clobber_a_row_changed_mid_run(tmp_path, monkeypatch, c
     assert c.execute("SELECT text FROM chunks").fetchone()[0] == "reindexed meanwhile"
 
 
-def test_runbook_scrubs_text_even_when_embedder_is_down(tmp_path, monkeypatch, capsys):
+def _install_embedder(monkeypatch, factory):
+    monkeypatch.setitem(sys.modules, "embedder", type(sys)("embedder"))
+    sys.modules["embedder"].Embedder = factory
+
+
+def test_runbook_preflight_refuses_when_embedder_is_down(tmp_path, monkeypatch, capsys):
     db = tmp_path / "vectors.db"
     VectorStore(db).init_schema()
     tok = _tg_token()
     _raw_insert(db, f"old turn with {tok}")
     rb = _load_runbook()
-    monkeypatch.setitem(sys.modules, "embedder", type(sys)("embedder"))
-    sys.modules["embedder"].Embedder = lambda: _FakeEmbedder(zero=True)
+    _install_embedder(monkeypatch, lambda: _FakeEmbedder(zero=True))
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    assert rb.main() == 3
+    assert "preflight FAILED" in capsys.readouterr().out
+    assert tok.encode() in db.read_bytes(), "nothing may be written when the preflight fails"
+
+
+def test_runbook_outage_mid_run_is_resumable(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    tok = _tg_token()
+    _raw_insert(db, f"old turn with {tok}")
+    rb = _load_runbook()
+
+    class Flaky(_FakeEmbedder):
+        calls = 0
+
+        def embed_batch(self, texts):
+            Flaky.calls += 1
+            self.zero = Flaky.calls > 1  # preflight OK, then the embedder dies
+            return super().embed_batch(texts)
+
+    _install_embedder(monkeypatch, Flaky)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    assert rb.main() == 1
+    out = capsys.readouterr().out
+    assert "vector_pending=1" in out
+    assert tok.encode() not in db.read_bytes(), "text is scrubbed even when the vector could not be refreshed"
+    # A dry run still reports the stale vector and exits non-zero.
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db)])
+    assert rb.main() == 1
+    capsys.readouterr()
+    # Embedder back: the pending vector is refreshed and the run is clean.
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    assert rb.main() == 0
+    out = capsys.readouterr().out
+    assert "refreshed=1" in out and "vector_pending=0" in out
+
+
+def test_byte_gate_can_fail(tmp_path, monkeypatch, capsys):
+    """A copy of a removed secret outside `chunks` (here a stray table) must
+    fail the byte check and the exit code."""
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    pw = "Zq9!" + "".join(_rng.choice(string.ascii_letters + string.digits) for _ in range(8))
+    _raw_insert(db, f"config password: {pw}")
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE stray (t TEXT)")
+    c.execute("INSERT INTO stray VALUES (?)", (f"copy {pw}",))
+    c.commit()
+    c.close()
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    assert rb.main() == 1
+    assert "removed_values_still_in_file_bytes=1" in capsys.readouterr().out
+
+
+def test_backup_is_owner_only(tmp_path, monkeypatch, capsys):
+    import stat
+
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    _raw_insert(db, f"old turn with {_tg_token()}")
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
     monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
     rb.main()
-    assert "vector_pending=1" in capsys.readouterr().out
-    assert tok.encode() not in db.read_bytes()
+    capsys.readouterr()
+    backups = list(tmp_path.glob("vectors.db.bak-rescrub-*"))
+    assert len(backups) == 1
+    # A second apply in the same second must not collide with the first backup.
+    _raw_insert(db, f"another old turn with {_tg_token()}")
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    rb.main()
+    capsys.readouterr()
+    assert len(list(tmp_path.glob("vectors.db.bak-rescrub-*"))) == 2
+    assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
+
+
+def test_extract_turn_scrubs_each_turn():
+    tok = _tg_token()
+    turn = indexer._extract_turn({"type": "user", "message": {"role": "user", "content": f"my bot is {tok}"}}, 1)
+    assert tok not in turn["content"] and "[REDACTED-TELEGRAM-BOT-TOKEN]" in turn["content"]
+
+
+def test_extract_turn_drops_bash_mode_output():
+    turn = indexer._extract_turn(
+        {"type": "user", "message": {"role": "user", "content": "<bash-stdout>\"TOKEN\" => \"secretplistvalue\"</bash-stdout> ok"}},
+        1,
+    )
+    assert "secretplistvalue" not in turn["content"] and "[output omitted]" in turn["content"]
 
 
 def test_runbook_vacuum_purges_legacy_free_pages(tmp_path, monkeypatch, capsys):

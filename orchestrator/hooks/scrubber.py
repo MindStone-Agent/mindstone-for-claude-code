@@ -73,19 +73,22 @@ SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 _URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]{1,20}://[^\s:/@'\"]{0,64}:)([^\s@/'\"]{4,200})@")
 # CLI flags: --password X, --password=X, --token X, --api-key X, and curl -u user:X.
 _CLI_FLAG = re.compile(
-    r"(?i)(--(?:password|passwd|pass|token|api[-_]key|secret|auth[-_]token|access[-_]token|client[-_]secret)(?:=|[ \t]{1,8}))"
+    r"(?i)(--(?:password|passwd|pass|token|api[-_]key|secret|auth[-_]token|access[-_]token|client[-_]secret|aws[-_]secret[-_]access[-_]key|secret[-_]access[-_]key)(?:=|[ \t]{1,8}))"
     r"([\"']?)([^\s\"']{4,512})"
 )
+# mysql/mariadb/psql style -pSECRET (no space) after a db client name.
+_MYSQL_P = re.compile(r"(?i)(\b(?:mysql|mysqldump|mariadb|mysqladmin)\b[^\n]{0,120}?[ \t]-p)([^\s'\"-][^\s'\"]{3,256})")
 _CURL_USER = re.compile(r"(?<!\S)(-u[ \t]{1,8}[^\s:'\"]{1,64}:)([^\s'\"]{3,512})")
 # Raw plist XML: <key>…TOKEN|SECRET|KEY|PASS…</key><string>value</string>.
 _PLIST_XML = re.compile(
     r"(?i)(<key>[^<]{0,80}(?:token|secret|key|pass(?:word)?|credential)[^<]{0,40}</key>\s{0,40}<string>)([^<]{4,1024})(</string>)"
 )
 # Hex tokens right after a secret word (token: <hex>, --token <hex>, a
-# markdown code span, Cookie: session=<hex>, escaped JSON). Git SHAs and
-# digests appear next to other words ("commit", "sha256") and stay.
+# markdown code span, Cookie: session=<hex>, X-Gateway-Key: <hex>, escaped
+# JSON). Whole words only, so Author:, authentication, session_id: and
+# tokenizer_sha256 are not contexts; git SHAs and digests stay.
 _HEX_IN_CONTEXT = re.compile(
-    r"(?i)((?:token|secret|session|cookie|auth|api[-_]?key|password|passwd|bearer)[\w\-]{0,30}[\\\"'`]{0,3}[ \t]{0,8}(?:=>|[:=])?[ \t]{0,8}[\\\"'`]{0,3})"
+    r"(?i)(\b(?:token|secret|cookie|api[-_]?key|password|passwd|bearer|auth[-_]?token|access[-_]?token|[a-z]*[-_](?:token|key|secret)|session(?==))\b[\\\"'`]{0,3}[ \t]{0,8}(?:=>|[:=])?[ \t]{0,8}[\\\"'`]{0,3})"
     r"([0-9a-f]{32,128})(?![0-9a-z])"
 )
 # A line that is nothing but 32-128 hex characters (e.g. a token printed by
@@ -122,6 +125,14 @@ _KV = re.compile(
 _KV_PASSWORD = re.compile(
     r"(?i)((?:" + _PASSWORD_TAIL + r"))" + _SEP + r"(?!\[REDACTED)"
     r"(?=(?P<v>[^\s\"'`<>\\]{6,256}))(?P=v)"
+)
+# Plain words and type names: all letters (optionally one Word[...] generic,
+# a GraphQL "!", or a | union). A password needs a digit or a symbol; an
+# all-letter "password" (correcthorsebattery) is left to the other rules.
+_TYPE_OR_WORD = re.compile(r"[A-Za-z_]+(?:\[[A-Za-z_, .|\[\]]*\])?!?(?:\|[A-Za-z_]+)*[;,]?")
+# A quoted password may contain spaces: PASSWORD: 'p@ss w0rd'.
+_KV_PASSWORD_QUOTED = re.compile(
+    r"(?i)((?:" + _PASSWORD_TAIL + r")[ \t]{0,8}\\?[\"']?[ \t]{0,8}(?:=>|[:=])[ \t]{0,8})([\"'])([^\"'\n]{6,256})\2"
 )
 _DOTTED_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+")
 # A filesystem path (/…, ~/…, ./…, ../…) is where a secret lives, not a secret.
@@ -188,8 +199,10 @@ def _kv_pass(text: str) -> str:
 
     def _pw(m: re.Match[str]) -> str:
         v = m.group("v").rstrip(".,;)")
-        if "(" in v or _looks_like_code(v, False) or _IDENT.fullmatch(v) and v.islower() and "_" in v:
-            return m.group(0)  # password = user_password_var / user.password_hash
+        if "(" in v or _looks_like_code(v, False) or _TYPE_OR_WORD.fullmatch(v):
+            # password = user.password_hash / get_pw() / a type annotation or
+            # schema keyword (string, Optional[str], String!, required).
+            return m.group(0)
         found.add(v)
         return m.group(1) + m.group(2) + "[REDACTED-SECRET]" + m.group("v")[len(v):]
 
@@ -200,12 +213,28 @@ def _kv_pass(text: str) -> str:
         found.add(v)
         return m.group(1) + m.group(2) + "[REDACTED-SECRET]" + (m.group("call") or "")
 
+    def _pwq(m: re.Match[str]) -> str:
+        v = m.group(3)
+        if " " not in v or _TYPE_OR_WORD.fullmatch(v) or not _propagatable(v.replace(" ", "")):
+            return m.group(0)  # no space: the unquoted rule handles it
+        found.add(v)
+        return m.group(1) + m.group(2) + "[REDACTED-SECRET]" + m.group(2)
+
+    text = _KV_PASSWORD_QUOTED.sub(_pwq, text)
     text = _KV_PASSWORD.sub(_pw, text)
     text = _KV.sub(_sub, text)
+    # Propagate only secret-shaped values, and only as whole tokens, so a
+    # redaction can never eat part of an ordinary word.
     for v in sorted(found, key=len, reverse=True):
-        if len(v) >= 6:
-            text = text.replace(v, "[REDACTED-SECRET]")
+        if _propagatable(v):
+            text = re.sub(r"(?<![A-Za-z0-9_])" + re.escape(v) + r"(?![A-Za-z0-9_])", "[REDACTED-SECRET]", text)
     return text
+
+
+def _propagatable(v: str) -> bool:
+    if len(v) < 8 or _TYPE_OR_WORD.fullmatch(v):
+        return False
+    return any(ch.isdigit() for ch in v) or bool(re.search(r"[^A-Za-z0-9_]", v))
 
 
 def _one_pass(text: str) -> str:
@@ -214,6 +243,7 @@ def _one_pass(text: str) -> str:
     text = _URL_USERINFO.sub(r"\1[REDACTED-SECRET]@", text)
     text = _CLI_FLAG.sub(r"\1\2[REDACTED-SECRET]", text)
     text = _CURL_USER.sub(r"\1[REDACTED-SECRET]", text)
+    text = _MYSQL_P.sub(r"\1[REDACTED-SECRET]", text)
     text = _PLIST_XML.sub(r"\1[REDACTED-SECRET]\3", text)
     text = _AWS_SECRET.sub(r"\1[REDACTED-AWS-SECRET-KEY]", text)
     text = _HEX_IN_CONTEXT.sub(r"\1[REDACTED-HEX-TOKEN]", text)
