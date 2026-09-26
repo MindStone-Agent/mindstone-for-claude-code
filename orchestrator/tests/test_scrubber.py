@@ -7,6 +7,7 @@ secret-shaped string lives in the repo (and push protection stays quiet).
 from __future__ import annotations
 
 import random
+import re
 import string
 import sys
 from pathlib import Path
@@ -535,3 +536,18 @@ def test_lowercase_letters_in_value_positions_are_redacted(fmt: str) -> None:
     w = _rand(12, string.ascii_lowercase)
     out = scrub(fmt.format(w=w))
     assert w not in out, (fmt, out)
+
+
+def test_random_mixed_case_after_unquoted_lowercase_colon_is_redacted() -> None:
+    # Random mixed-case values starting with a capital are not strict
+    # PascalCase (runs of capitals, a capital after a capital), so they are
+    # values, not type names. Loosening PascalCase to [A-Z][A-Za-z]+ would
+    # skip roughly half of these.
+    missed = 0
+    for _ in range(400):
+        w = _rng.choice(string.ascii_uppercase) + _rand(13, string.ascii_letters)
+        if re.fullmatch(r"(?:[A-Z][a-z]+)+", w):
+            continue  # genuinely strict PascalCase: indistinguishable from a type name
+        if w in scrub(f"password: {w}"):
+            missed += 1
+    assert missed == 0
