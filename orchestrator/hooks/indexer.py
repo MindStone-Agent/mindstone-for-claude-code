@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 
-from embedder import Embedder, scrub
+from embedder import Embedder, is_failed_vector, scrub
 try:
     from embedder import SAFE_INPUT_CHARS as _SAFE_INPUT_CHARS
 except ImportError:  # older embedder build without the constant
@@ -381,9 +382,15 @@ class Indexer:
         chunks = chunk_markdown(text, str(path))
         if not chunks:
             return 0
+        # Embed BEFORE deleting: if any chunk failed, keep the previous chunks and
+        # raise, so the caller doesn't record this file's hash and retries it.
+        vectors = self.embedder.embed_batch([c.text for c in chunks])
+        failed = sum(1 for v in vectors if is_failed_vector(v))
+        if failed:
+            raise RuntimeError(f"embedding failed for {failed}/{len(chunks)} chunk(s) of "
+                               f"{path.name}; kept the previous chunks, will retry")
         # Delete any existing chunks for this path (handles file updates)
         self.store.delete_by_source_path(str(path))
-        vectors = self.embedder.embed_batch([c.text for c in chunks])
         n = self.store.upsert(chunks, vectors)
         self._log(f"  indexed memory: {path.name} → {n} chunks")
         return n
@@ -416,7 +423,8 @@ class Indexer:
             chunks = chunk_transcript(tail, str(path), start_line_offset=last_embedded)
             if not chunks:
                 return 0
-            vectors = self.embedder.embed_batch([c.text for c in chunks])
+            chunks, vectors = self._storable(
+                chunks, self.embedder.embed_batch([c.text for c in chunks]))
             n = self.store.upsert(chunks, vectors)
             self._log(f"  indexed transcript (incremental): {path.name} +{n} chunks "
                       f"(from line {last_embedded + 1})")
@@ -432,10 +440,38 @@ class Indexer:
         if not chunks:
             return 0
         self.store.delete_by_source_path(str(path))
-        vectors = self.embedder.embed_batch([c.text for c in chunks])
+        chunks, vectors = self._storable(
+            chunks, self.embedder.embed_batch([c.text for c in chunks]))
         n = self.store.upsert(chunks, vectors)
         self._log(f"  indexed transcript (full baseline): {path.name} → {n} chunks")
         return n
+
+    def _storable(self, chunks: list, vectors: list) -> tuple[list, list]:
+        """Drop failed embeds without moving the resume point past a retryable one.
+
+        Transcript indexing resumes from the highest stored end_line. A failure
+        that runs to the END of the pass looks like an outage: stop before it so
+        the next checkpoint retries it. A failure with a success AFTER it means
+        the embedder was up, so the chunk itself is the problem: drop just that
+        one (counted in failed=N), or it would wedge the transcript and re-embed
+        the whole growing tail every checkpoint.
+        """
+        n = len(vectors)
+        tail = n
+        while tail and is_failed_vector(vectors[tail - 1]):
+            tail -= 1
+        # A long turn is hard-split into chunks that share its line number. Back
+        # off to a chunk that ENDS before the retried one starts, or resuming
+        # from max(end_line) would skip the rest of that turn.
+        if tail < n:
+            while tail and chunks[tail - 1].end_line >= chunks[tail].start_line:
+                tail -= 1
+        keep = [i for i in range(tail) if not is_failed_vector(vectors[i])]
+        if len(keep) < n:
+            print(f"[indexer] {n - len(keep)}/{n} chunk(s) not stored "
+                  f"({tail - len(keep)} failed mid-pass and dropped, "
+                  f"{n - tail} retry next run)", file=sys.stderr)
+        return [chunks[i] for i in keep], [vectors[i] for i in keep]
 
     def backfill(self, memory_dir: Path | None, transcripts_dir: Path | None) -> dict:
         """Re-index everything in the given directories. Returns counts."""

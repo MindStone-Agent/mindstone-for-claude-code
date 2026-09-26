@@ -212,6 +212,16 @@ class Embedder:
                     out.append(self._embed_one_safe(client, c))
         return out
 
+def is_failed_vector(vec) -> bool:
+    """True for the zero vector the embedder returns when it could not embed.
+
+    A zero vector is not "no match": against unit vectors it sits at L2 distance
+    1.0, similarity exactly 0.500, which passes the recall floor. Stored, it
+    matches every query forever; as a query, it matches everything equally. So
+    callers treat it as a failure: never store it, never search with it.
+    """
+    return not any(vec)
+
 # ---------------------------------------------------------------------------
 # Self-test (run as `python3 embedder.py`)
 # ---------------------------------------------------------------------------
