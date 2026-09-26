@@ -32,6 +32,7 @@ import argparse
 import collections
 import glob
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -162,11 +163,10 @@ def main() -> int:
     )
     ap.add_argument(
         "--accept-unhunted",
-        type=int,
-        default=0,
-        metavar="N",
-        help="accept exactly N proven values that are not hunted (strong() rejects their shape) but still "
-        "sit bare in live rows, after reviewing the masked shapes the run prints (default 0: any fails)",
+        metavar="FINGERPRINT",
+        help="accept the exact set of proven-but-not-hunted values still present in live rows, by the "
+        "declined_set_fingerprint a failed run printed after you reviewed its masked shapes; any change "
+        "to the set (even a same-shape swap) changes the fingerprint",
     )
     args = ap.parse_args()
 
@@ -343,6 +343,21 @@ def rewrite(conn, db: Path, args, changed: list, pending: list):
     return rewrote, raced, refreshed, removed
 
 
+def declined_fingerprint(db: Path, values: list[str]) -> str:
+    """A keyed fingerprint of the exact declined set. The key is random, 0600
+    and local to the store, so the printed fingerprint can't be brute-forced
+    back to a dictionary-word value."""
+    key_path = db.with_name(f"{db.name}.rescrub-key")
+    try:
+        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(os.urandom(32))
+    except FileExistsError:
+        pass
+    key = key_path.read_bytes()
+    return hmac.new(key, "\x00".join(sorted(values)).encode(), hashlib.sha256).hexdigest()[:20]
+
+
 def mask(v: str) -> str:
     """A value's shape with no content: letters -> a, digits -> 9, symbols kept."""
     return re.sub(r"[A-Za-z]", "a", re.sub(r"[0-9]", "9", v))
@@ -350,7 +365,7 @@ def mask(v: str) -> str:
 
 def gates(
     conn, store, db: Path, hunt: set[str], proven: set[str], removed: set[str],
-    rewrote: int, raced: int, refreshed: int, accept_unhunted: int = 0,
+    rewrote: int, raced: int, refreshed: int, accept_unhunted: str | None = None,
 ) -> int:
     """The acceptance gates, run on every --apply. Counts only are printed."""
     live = [t for (t,) in conn.execute("SELECT text FROM chunks")]
@@ -373,10 +388,14 @@ def gates(
             # Any copy counts, glued ones too: a proven value is never excused.
             n = sum(1 for t in live if any(f in t for f in forms))
             if n:
-                unhunted.append((mask(v), n))
+                unhunted.append((mask(v), n, v))
         byte_set |= {f for f in variants(v) if f not in live_blob}
-    for shape, n in unhunted:
+    for shape, n, _ in unhunted:
         print(f"[rescrub] proven but not hunted, bare in live rows: shape={shape} rows={n}")
+    fingerprint = declined_fingerprint(db, [v for *_, v in unhunted]) if unhunted else None
+    if fingerprint:
+        print(f"[rescrub] declined_set_fingerprint={fingerprint} (review the shapes, then re-run with --accept-unhunted {fingerprint})")
+    declined_ok = not unhunted or (accept_unhunted is not None and hmac.compare_digest(accept_unhunted, fingerprint))
     has_pending = conn.execute("SELECT 1 FROM sqlite_master WHERE name = '_rescrub_pending'").fetchone()
     still_pending = conn.execute("SELECT count(*) FROM _rescrub_pending").fetchone()[0] if has_pending else 0
     if not still_pending:
@@ -405,9 +424,9 @@ def gates(
         f"[rescrub] rewrote={rewrote} raced={raced} refreshed={refreshed} vector_pending={still_pending} "
         f"remaining_unscrubbed_rows={left} vacuumed={vacuumed} freelist_pages={freelist} chunks_without_vector={orphans} "
         f"removed_values_still_in_file_bytes={in_bytes} proven_values_not_hunted_but_bare={len(unhunted)} "
-        f"accepted={accept_unhunted}"
+        f"declined_set_accepted={declined_ok and bool(unhunted)}"
     )
-    ok = len(unhunted) == accept_unhunted and left == 0 and in_bytes == 0 and still_pending == 0 and vacuumed and freelist == 0 and orphans == 0
+    ok = declined_ok and left == 0 and in_bytes == 0 and still_pending == 0 and vacuumed and freelist == 0 and orphans == 0
     return 0 if ok else 1
 
 
