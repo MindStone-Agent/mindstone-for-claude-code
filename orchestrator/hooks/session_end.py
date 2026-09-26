@@ -424,8 +424,8 @@ def reindex_changed_memory() -> tuple[int, int, int, int]:
 # fails OPEN on every record type added later; an allowlist fails closed.
 #
 # A citation is text a human or the model WROTE:
-#   - assistant records: `text`, `thinking`, and `tool_use` input (reading or
-#     editing a memory by name is using it);
+#   - assistant records: `text`, `thinking`, and `tool_use` input, except a
+#     write whose target is a memory file (see _writes_memory below);
 #   - user records: human-typed text only — not `tool_result` blocks, not
 #     `isMeta` records, not compaction summaries (`isCompactSummary`: the old
 #     context read back, 86% of user-record credits when they were counted), and
@@ -433,6 +433,35 @@ def reindex_changed_memory() -> tuple[int, int, int, int]:
 #     local or `!` shell output, system reminders);
 #   - `queued_command` attachments in prompt mode: messages the human typed while
 #     the model was busy (#107), filtered by the same harness prefixes.
+# Writing a memory file is not using it (Cairn, #112): the Write that created
+# it, index edits naming every memory, and checkpoint counter edits would
+# otherwise credit it, so nothing could ever recount to zero. The rule is the
+# same for every tool: a write whose TARGET is a memory file doesn't count;
+# writing another file that names a memory (a LOG entry, a handoff) is authored
+# text and does.
+_WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+# A shell command that writes to a memory file. Linear-time on any input: no
+# unbounded bridge between "memory/" and the write operation.
+_SHELL_MEMORY_WRITE = re.compile(
+    r"(?<![\w>=-])>>?\s*[\"']?\S*memory/\S*\.md"   # > / >> into memory/*.md (not `->`, not `<dir>/memory`)
+    r"|\btee\b[^\n]*memory/\S*\.md"                # | tee [-a] memory/x.md
+    r"|\b(?:sed\s+-i|perl\s+-\w*i\b)[^\n]*memory/" # in-place edit
+)
+_OPEN_W = r"write_text\(|open\([^()\n]*,\s*(?:mode\s*=\s*)?[\"'][rbt+]*[wax]"  # the mode arg, not a path
+_SCRIPT_WRITE = re.compile(_OPEN_W)
+_ANY_WRITE = re.compile(r"(?<![\w>=-])>>?\s*[\"']?[^\s\"'|;&]+\.md\b|\btee\b|\bsed\s+-i|\bperl\s+-\w*i\b|" + _OPEN_W)
+_CD_MEMORY = re.compile(r"\bcd\s+[\"']?\S*memory/?[\"']?(?=[\s;&|]|$)", re.M)
+
+
+def _writes_memory(cmd: str) -> bool:
+    if _SHELL_MEMORY_WRITE.search(cmd):
+        return True
+    if "memory/" in cmd and _SCRIPT_WRITE.search(cmd):
+        return True
+    # `cd .../memory && cat >> x.md`: the target is a bare name relative to it.
+    return bool(_CD_MEMORY.search(cmd) and _ANY_WRITE.search(cmd))
+
+
 _HARNESS_USER_PREFIXES = (
     "<task-notification>",
     "<command-name>",
@@ -479,7 +508,15 @@ def _authored_strings(rec: dict) -> list[str]:
             elif bt == "thinking" and isinstance(b.get("thinking"), str):
                 out.append(b["thinking"])
             elif bt == "tool_use":
-                out.append(json.dumps(b.get("input", {}), ensure_ascii=False))
+                inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+                target = inp.get("file_path") or inp.get("notebook_path")
+                if (b.get("name") in _WRITE_TOOLS and isinstance(target, str)
+                        and "/memory/" in target and target.endswith(".md")):
+                    continue
+                cmd = inp.get("command")
+                if isinstance(cmd, str) and _writes_memory(cmd):
+                    continue
+                out.append(json.dumps(inp, ensure_ascii=False))
         elif bt == "text" and isinstance(b.get("text"), str):
             text = b["text"]
             if not text.lstrip().startswith(_HARNESS_USER_PREFIXES):
@@ -636,6 +673,8 @@ def cited_memories(authored: str) -> dict[str, Path]:
     cited: dict[str, Path] = {}
     for path in MEMORY_DIR.glob("*.md"):
         name = path.name
+        if name == "MEMORY.md":
+            continue  # the index names every memory; it is not one
         stem = name.replace(".md", "")
         # Match either `name.md` or just `stem` (to avoid false positives,
         # require the stem be "underscore-shaped" — generic English words
