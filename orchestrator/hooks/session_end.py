@@ -410,9 +410,81 @@ def reindex_changed_memory() -> tuple[int, int, int, int]:
 # Auto-increment hits based on memory filenames appearing in the transcript
 # ---------------------------------------------------------------------------
 
-# The transcript is JSONL: one RECORD per physical line. Hook injections arrive
-# as a specific record shape, and that is the anchor — not the tag text.
-_HOOK_ATTACHMENT_TYPES = ("hook_additional_context",)
+# The transcript is JSONL: one RECORD per physical line. Record SHAPE is the
+# anchor — not the tag text (#96).
+#
+# ALLOWLIST, NOT DENYLIST. The first structural version dropped only
+# `hook_additional_context` records and credited everything else. Claude Code
+# writes many other record types that name memory files without anyone using
+# them — `file-history-snapshot` (whose trackedFileBackups list up to 91 memory
+# paths), `hook_success` (the SessionStart output, i.e. the whole memory index),
+# `edited_text_file`, `file`, `system`, tool results. Measured 2026-09-25: 447 of
+# 729 Stop runs credited 102–116 of 117 memories, so `hits` was counting turns
+# again (#91 by another route) and `last_applied` pinned decay at ~1.0. A denylist
+# fails OPEN on every record type added later; an allowlist fails closed.
+#
+# A citation is text a human or the model WROTE:
+#   - assistant records: `text`, `thinking`, and `tool_use` input (reading or
+#     editing a memory by name is using it);
+#   - user records: human-typed text only — not `tool_result` blocks, not
+#     `isMeta` records, not compaction summaries (`isCompactSummary`: the old
+#     context read back, 86% of user-record credits when they were counted), and
+#     not harness-generated strings (task notifications, slash-command wrappers,
+#     local or `!` shell output, system reminders);
+#   - `queued_command` attachments in prompt mode: messages the human typed while
+#     the model was busy (#107), filtered by the same harness prefixes.
+_HARNESS_USER_PREFIXES = (
+    "<task-notification>",
+    "<command-name>",
+    "<command-message>",
+    "<command-args>",
+    "<local-command-",
+    "<bash-stdout>",
+    "<bash-stderr>",
+    "<system-reminder>",
+    "<user-prompt-submit-hook>",
+    "Caveat: The messages below were generated",
+)
+
+
+def _authored_strings(rec: dict) -> list[str]:
+    """The human- or model-written text in one transcript record (allowlist)."""
+    rtype = rec.get("type")
+    att = rec.get("attachment")
+    if rtype == "attachment" and isinstance(att, dict) and att.get("type") == "queued_command":
+        if att.get("commandMode") != "prompt":
+            return []
+        prompt = att.get("prompt")
+        blocks = [{"type": "text", "text": prompt}] if isinstance(prompt, str) else prompt
+        return [b["text"] for b in (blocks if isinstance(blocks, list) else [])
+                if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
+                and not b["text"].lstrip().startswith(_HARNESS_USER_PREFIXES)]
+    msg = rec.get("message")
+    if rtype not in ("assistant", "user") or not isinstance(msg, dict):
+        return []
+    if rtype == "user" and (rec.get("isMeta") or rec.get("isCompactSummary")):
+        return []
+    content = msg.get("content")
+    blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content
+    if not isinstance(blocks, list):
+        return []
+    out: list[str] = []
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        bt = b.get("type")
+        if rtype == "assistant":
+            if bt == "text" and isinstance(b.get("text"), str):
+                out.append(b["text"])
+            elif bt == "thinking" and isinstance(b.get("thinking"), str):
+                out.append(b["thinking"])
+            elif bt == "tool_use":
+                out.append(json.dumps(b.get("input", {}), ensure_ascii=False))
+        elif bt == "text" and isinstance(b.get("text"), str):
+            text = b["text"]
+            if not text.lstrip().startswith(_HARNESS_USER_PREFIXES):
+                out.append(text)
+    return out
 
 
 def authored_text(chunk: str) -> str:
@@ -446,6 +518,10 @@ def authored_text(chunk: str) -> str:
     EVERY user turn and names the memories it recalled, all of it inside the
     watermark window. Without this, every recalled memory is credited every turn
     and #91 returns in a milder form.
+
+    Parsed records go through `_authored_strings` (an allowlist; see the comment
+    above it). Only the authored TEXT is returned, not the raw record, so names in
+    metadata fields (paths, file backups, tool results) cannot match.
     """
     out = []
     for line in chunk.splitlines():
@@ -463,10 +539,9 @@ def authored_text(chunk: str) -> str:
         except Exception:  # noqa: BLE001
             out.append(line)
             continue
-        att = rec.get("attachment")
-        if isinstance(att, dict) and att.get("type") in _HOOK_ATTACHMENT_TYPES:
-            continue          # a hook printing its own output. Not a citation.
-        out.append(line)
+        if not isinstance(rec, dict):
+            continue
+        out.extend(_authored_strings(rec))
     return "\n".join(out)
 
 
@@ -543,11 +618,24 @@ def auto_increment_hits(archived_path: Path) -> list[str]:
     if not transcript_text.strip():
         return []
 
-    memory_names = {p.name: p for p in MEMORY_DIR.glob("*.md")}
     incremented: list[str] = []
-
     today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
-    for name, path in memory_names.items():
+    for name, path in cited_memories(transcript_text).items():
+        if _bump_memory_hits(path, today):
+            incremented.append(name)
+
+    return incremented
+
+
+def cited_memories(authored: str) -> dict[str, Path]:
+    """Memory files whose name appears in already-filtered authored text.
+
+    Shared by the per-turn counter and the runbook's recount, so both credit by
+    exactly the same rule.
+    """
+    cited: dict[str, Path] = {}
+    for path in MEMORY_DIR.glob("*.md"):
+        name = path.name
         stem = name.replace(".md", "")
         # Match either `name.md` or just `stem` (to avoid false positives,
         # require the stem be "underscore-shaped" — generic English words
@@ -558,12 +646,9 @@ def auto_increment_hits(archived_path: Path) -> list[str]:
             patterns = [re.escape(name)]
         else:
             patterns = [re.escape(name), re.escape(stem)]
-
-        if any(re.search(p, transcript_text) for p in patterns):
-            if _bump_memory_hits(path, today):
-                incremented.append(name)
-
-    return incremented
+        if any(re.search(p, authored) for p in patterns):
+            cited[name] = path
+    return cited
 
 def _bump_memory_hits(path: Path, today: str) -> bool:
     """Increment `hits` and set `last_applied` in a memory file's frontmatter.
