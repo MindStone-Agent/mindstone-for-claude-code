@@ -133,7 +133,12 @@ def main() -> int:
 
     seeded = set()
     if args.seed_from:
-        snap = sqlite3.connect(f"file:{args.seed_from}?mode=ro", uri=True)
+        seed = Path(args.seed_from).expanduser().resolve()
+        if not seed.is_file():
+            print(f"[rescrub] --seed-from snapshot not found: {seed}", file=sys.stderr)
+            return 2
+        # as_uri() percent-encodes '?' and '#', so mode=ro can't be cut off.
+        snap = sqlite3.connect(f"{seed.as_uri()}?mode=ro", uri=True)
         for (t,) in snap.execute("SELECT text FROM chunks"):
             new, known = scrub_collect(t)
             if new != t:

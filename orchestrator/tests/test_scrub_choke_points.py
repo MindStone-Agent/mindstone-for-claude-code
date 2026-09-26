@@ -428,3 +428,26 @@ def test_seed_from_snapshot_finds_values_whose_proof_was_already_redacted(tmp_pa
     assert rb.main() == 0
     assert "seeded 1 known secret" in capsys.readouterr().out
     assert pw.encode() not in db.read_bytes()
+
+
+def test_seed_from_is_read_only_and_safe_on_odd_paths(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    _raw_insert(db, "Password: #K9vQ2mZr8LpX4w!")
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    missing = tmp_path / "no such#snap?.db"
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply", "--seed-from", str(missing)])
+    assert rb.main() == 2
+    assert not missing.exists()
+    odd = tmp_path / "snap#1?x.db"
+    import shutil
+
+    shutil.copy(db, odd)
+    before = odd.read_bytes()
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--seed-from", str(odd)])
+    rb.main()
+    out = capsys.readouterr().out
+    assert "seeded 1 known secret" in out
+    assert "K9vQ2mZr8LpX4w" not in out
+    assert odd.read_bytes() == before
