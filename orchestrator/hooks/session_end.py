@@ -310,6 +310,25 @@ def _save_index_state(state: dict) -> None:
         print(f"[session_end] Could not save memory-index state: {e}", file=sys.stderr)
 
 
+def prune_deleted_memory_chunks(store, memory_dir: Path, stored_paths, live: set[str]) -> int:
+    """Delete stored chunks of memory files that no longer exist. Returns files pruned.
+
+    Dropping a deleted file's hash entry left its chunks in the store, so a
+    deleted memory stayed recallable forever (#111: design_synapse.md, deleted,
+    still had 4 chunks). Judged against the SAME `live` snapshot the hash state
+    was filtered with, so state and chunks always agree: re-checking the disk
+    here would race a non-atomic save or a git stash, deleting chunks whose hash
+    is still recorded, and the file would never be re-embedded. Only paths
+    directly under memory_dir are considered.
+    """
+    pruned = 0
+    for sp in stored_paths:
+        if Path(sp).parent == memory_dir and sp not in live:
+            store.delete_by_source_path(sp)
+            pruned += 1
+    return pruned
+
+
 def reindex_changed_memory() -> tuple[int, int, int, int]:
     """Re-index memory files whose CONTENT changed since their stored chunks.
 
@@ -394,10 +413,14 @@ def reindex_changed_memory() -> tuple[int, int, int, int]:
         except Exception as e:
             print(f"[session_end] Failed to re-index {p.name}: {e}", file=sys.stderr)
 
-    # Drop state entries for deleted memory files.
+    # Drop state entries for deleted memory files, and their chunks.
     live = {str(p) for p in MEMORY_DIR.glob("*.md")}
     state = {k: v for k, v in state.items() if k in live}
     _save_index_state(state)
+    try:
+        prune_deleted_memory_chunks(store, MEMORY_DIR, stored.keys(), live)
+    except Exception as e:
+        print(f"[session_end] Could not prune deleted memories' chunks ({e})", file=sys.stderr)
 
     return (
         files_reindexed,
