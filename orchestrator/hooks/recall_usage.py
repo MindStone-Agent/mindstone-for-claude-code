@@ -30,6 +30,12 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:  # hooks dir is on sys.path for every caller
+    from scrubber import scrub as _scrub
+except Exception:  # pragma: no cover - fail closed: never log a raw query
+    def _scrub(_text: str) -> str:
+        return ""
+
 ORCHESTRATOR_DIR = Path(__file__).resolve().parent.parent
 LOG_PATH = ORCHESTRATOR_DIR / "transcripts" / "recall_usage.jsonl"
 QUERY_CAP = 300
@@ -42,7 +48,9 @@ def log(path_kind: str, query: str, records: list[dict]) -> None:
         if not records:
             return
         ts = datetime.now(tz=timezone.utc).isoformat()
-        q = (query or "")[:QUERY_CAP]
+        # Scrub THEN truncate: a token straddling the cap would otherwise
+        # survive as an unmatched prefix.
+        q = _scrub(query or "")[:QUERY_CAP]
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         lines = []
         for rec in records:

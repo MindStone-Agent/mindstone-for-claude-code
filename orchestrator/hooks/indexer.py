@@ -312,6 +312,9 @@ def chunk_transcript(jsonl_text: str, source_path: str, start_line_offset: int =
     flush()
     return chunks
 
+_BASH_OUTPUT = re.compile(r"<(bash-stdout|bash-stderr|local-command-stdout)>[\s\S]*?</\1>")
+
+
 def _extract_turn(obj: dict, line_num: int) -> dict | None:
     """Flatten a Claude Code transcript line into {role, content, line_num}."""
     # Claude Code JSONL format varies by version. Try common shapes.
@@ -336,7 +339,11 @@ def _extract_turn(obj: dict, line_num: int) -> dict | None:
                         name = item.get("name", "?")
                         content_parts.append(f"[tool-call: {name}]")
                     elif item.get("type") == "tool_result":
-                        content_parts.append(f"[tool-result]: {str(item.get('content', ''))[:300]}")
+                        # Marker only, never the body: tool output is where
+                        # pasted configs, plist dumps and env files arrive
+                        # (MS4CC#117). The model's own reply carries what
+                        # mattered about the result.
+                        content_parts.append("[tool-result]")
 
     # Shape 2: {"role": ..., "content": ...}
     elif "role" in obj:
@@ -354,6 +361,9 @@ def _extract_turn(obj: dict, line_num: int) -> dict | None:
         return None
 
     content = "\n".join(p for p in content_parts if p).strip()
+    # Bash-mode output pasted into a user turn is tool output too: keep a
+    # marker, never the body (MS4CC#117).
+    content = _BASH_OUTPUT.sub(r"<\1>[output omitted]</\1>", content).strip()
     if not content:
         return None
 
@@ -377,7 +387,9 @@ class Indexer:
         """Chunk + embed + store a single memory file. Returns number of new chunks."""
         if not path.exists():
             return 0
-        text = path.read_text()
+        # Scrub before chunking: a split can cut a secret across two chunks,
+        # and a half-token matches no rule (upsert scrubs each chunk again).
+        text = scrub(path.read_text())
         chunks = chunk_markdown(text, str(path))
         if not chunks:
             return 0

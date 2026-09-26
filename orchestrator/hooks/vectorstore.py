@@ -33,6 +33,8 @@ from typing import Iterable
 
 import sqlite_vec
 
+from scrubber import scrub
+
 EMBEDDING_DIMS = 768  # nomic-embed-text via local Ollama (8K context)
 
 # sqlite-vec refuses a KNN k above this — "k value in knn query too large,
@@ -76,6 +78,9 @@ class VectorStore:
     def _conn_or_init(self) -> sqlite3.Connection:
         if self._conn is None:
             self._conn = sqlite3.connect(self.db_path)
+            # Freed pages are zeroed, so a deleted or rewritten (scrubbed)
+            # chunk doesn't linger in the file's bytes (MS4CC#117).
+            self._conn.execute("PRAGMA secure_delete=ON")
             self._conn.enable_load_extension(True)
             sqlite_vec.load(self._conn)
             self._conn.enable_load_extension(False)
@@ -126,6 +131,13 @@ class VectorStore:
 
         inserted = 0
         for chunk, vec in zip(chunks, vectors):
+            # Single choke point: nothing reaches `chunks.text` (what recall
+            # returns) unscrubbed, whatever the ingest path. Scrub before the id
+            # so an unchanged scrubbed chunk keeps a stable id.
+            clean = scrub(chunk.text)
+            if clean != chunk.text:
+                chunk.text = clean
+                chunk.chunk_id = None
             chunk_id = chunk.chunk_id or chunk.compute_id()
             # Check if already indexed
             existing = conn.execute(
