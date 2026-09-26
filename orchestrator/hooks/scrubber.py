@@ -244,7 +244,7 @@ def _kv_pass(text: str, sink: set[str] | None = None) -> str:
     text = _KV_PASSWORD.sub(_pw, text)
     text = _KV.sub(_sub, text)
     if sink is not None:
-        sink |= {v for v in found if len(v) >= 6}
+        sink |= {v for v in found if len(v) >= 6 and "[REDACTED" not in v}
     # Propagate only secret-shaped values, and only as whole tokens, so a
     # redaction can never eat part of an ordinary word.
     for v in sorted(found, key=len, reverse=True):
@@ -266,7 +266,9 @@ def _capture(sink: set[str] | None, group: int, template: str):
     """A re.sub replacement that also records the secret group's value."""
 
     def repl(m: re.Match[str]) -> str:
-        if sink is not None and len(m.group(group)) >= 6:
+        # A later pass can match an earlier pass's own placeholder; that is
+        # not a secret value.
+        if sink is not None and len(m.group(group)) >= 6 and "[REDACTED" not in m.group(group):
             sink.add(m.group(group))
         return m.expand(template)
 

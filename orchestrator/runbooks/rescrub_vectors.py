@@ -32,6 +32,7 @@ import argparse
 import collections
 import glob
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -80,12 +81,49 @@ def secret_like(v: str) -> bool:
 
 
 def strong(v: str) -> bool:
-    """A context-proven value distinctive enough to hunt store-wide (8+ chars
-    with a digit or symbol, or mixed case). Weaker values are not hunted, so a
-    context false positive can't spread across the store."""
-    if len(v) < 8 or re.fullmatch(r"[a-z]+|[A-Z]+", v):
+    """A context-proven value safe to hunt store-wide: 6+ chars with a digit or
+    a symbol. Shapes that are code or placeholders rather than secrets are
+    never hunted, because a store-wide rewrite of them is destructive and
+    permanent once the backups go: identifiers (word chars with '_'), lowercase
+    kebab/dotted names, key=value fragments, ${...}/{{...}}/[...]/<...> templates, runs of one character, and
+    our own [REDACTED-...] placeholders."""
+    if len(v) < 6 or "[REDACTED" in v:
         return False
-    return bool(re.search(r"[^A-Za-z]", v)) or bool(re.search(r"[a-z]", v) and re.search(r"[A-Z]", v))
+    if not re.search(r"[0-9]|[^A-Za-z0-9_]", v):
+        return False
+    if re.fullmatch(r"\w+", v) and "_" in v:
+        return False
+    if re.fullmatch(r"(.)\1*", v) or not re.search(r"[A-Za-z0-9]", v):
+        return False
+    # Lowercase kebab/dotted names (model names, hostnames, bundle ids) and
+    # key=value fragments. Measured on the live store: these were the only
+    # false positives among 106 learned values, hitting 129 rows.
+    if re.fullmatch(r"[a-z0-9]+([-.][a-z0-9]+)+", v):
+        return False
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", v):
+        return False
+    if re.search(r"\$\{|\{\{|%\(|^\[.*\]|^<.*>$|^\$[A-Za-z_]", v):
+        return False
+    return True
+
+
+def variants(v: str) -> set[str]:
+    """The value as stored raw and as it appears JSON-escaped (with and
+    without escaped slashes), so neither the hunt nor the byte gate misses a
+    transcript copy."""
+    esc = json.dumps(v)[1:-1]
+    return {v, esc, esc.replace("/", "\\/")}
+
+
+def hunt_re(v: str) -> re.Pattern[str]:
+    """v at token boundaries only (a JSON-escaped \\n/\\t/\\r counts as a
+    boundary). An embedded copy is left in place and fails the leftover and
+    byte gates instead: rewriting inside a longer word can corrupt code."""
+    return re.compile(
+        r"(?:(?<![A-Za-z0-9_])|(?<=\\n)|(?<=\\t)|(?<=\\r))"
+        + re.escape(v)
+        + r"(?![A-Za-z0-9_])"
+    )
 
 
 def checkable(v: str) -> bool:
@@ -131,7 +169,8 @@ def main() -> int:
         "SELECT rowid, chunk_id, source_type, source_path, start_line, end_line, text FROM chunks"
     ).fetchall()
 
-    seeded = set()
+    seeded: set[str] = set()
+    seed_removed: set[str] = set()
     if args.seed_from:
         seed = Path(args.seed_from).expanduser().resolve()
         if not seed.is_file():
@@ -143,6 +182,7 @@ def main() -> int:
             new, known = scrub_collect(t)
             if new != t:
                 seeded |= {v for v in known if strong(v)} | {v for v in removed_values(t, new) if secret_like(v)}
+                seed_removed |= {v for v in removed_values(t, new) if checkable(v)}
         snap.close()
         print(f"[rescrub] seeded {len(seeded)} known secret values from the snapshot")
     # Pass 1: scrub each row. Pass 2: a value redacted in one row (where its
@@ -164,14 +204,13 @@ def main() -> int:
     cross_row = 0
     for rowid, cid, stype, spath, start, end, text in rows:
         new = scrubbed.get(rowid, text)
+        before = new
         for v in sorted(hunt, key=len, reverse=True):
-            if v in new:
-                # Hunted values are known secrets and distinctive (strong() or
-                # secret_like()), so every occurrence goes, embedded ones too:
-                # the byte check would still find an embedded copy.
-                new = new.replace(v, "[REDACTED-SECRET]")
-                if rowid not in scrubbed:
-                    cross_row += 1
+            for form in variants(v):
+                if form in new:
+                    new = hunt_re(form).sub("[REDACTED-SECRET]", new)
+        if new != before and rowid not in scrubbed:
+            cross_row += 1
         if new == text:
             continue
         kinds.update(collections.Counter(PLACEHOLDER.findall(new)) - collections.Counter(PLACEHOLDER.findall(text)))
@@ -189,9 +228,25 @@ def main() -> int:
         pending = [r for (r,) in conn.execute("SELECT rowid FROM _rescrub_pending")]
     if pending:
         print(f"[rescrub] rows with a stale vector from an earlier run: {len(pending)}")
-    if not args.apply or (not changed and not pending):
-        print("[rescrub] dry run: nothing written" if not args.apply else "[rescrub] nothing to do")
+    if not args.apply:
+        print("[rescrub] dry run: nothing written")
         return 1 if pending else 0
+    rewrote = raced = refreshed = 0
+    removed: set[str] = set()
+    if changed or pending:
+        res = rewrite(conn, db, args, changed, pending)
+        if isinstance(res, int):
+            return res
+        rewrote, raced, refreshed, removed = res
+    else:
+        # Still run every gate: "nothing to change" must not mean "clean".
+        print("[rescrub] nothing to rewrite; running the gates")
+    return gates(conn, store, db, hunt, removed | seed_removed, rewrote, raced, refreshed)
+
+
+def rewrite(conn, db: Path, args, changed: list, pending: list):
+    """Snapshot, then rewrite and re-embed the changed rows. Returns an exit
+    code on a preflight failure, else (rewrote, raced, refreshed, removed)."""
 
     # Preflight: refuse to write anything if the embedder is down.
     from embedder import Embedder as _PreflightEmbedder  # noqa: E402
@@ -262,13 +317,22 @@ def main() -> int:
             removed |= removed_values(old, new)
             rewrote += 1
         conn.commit()
+    return rewrote, raced, refreshed, removed
 
-    left = sum(
-        1
-        for (t,) in conn.execute("SELECT text FROM chunks")
-        if scrub(t) != t or any(v in t for v in hunt)
-    )
-    still_pending = conn.execute("SELECT count(*) FROM _rescrub_pending").fetchone()[0]
+
+def gates(conn, store, db: Path, hunt: set[str], removed: set[str], rewrote: int, raced: int, refreshed: int) -> int:
+    """The acceptance gates, run on every --apply. Counts only are printed."""
+    live = [t for (t,) in conn.execute("SELECT text FROM chunks")]
+    hunted = {form for v in hunt for form in variants(v)}
+    left = sum(1 for t in live if scrub(t) != t or any(f in t for f in hunted))
+    # Byte-check the hunted secrets, plus every other removed value that is
+    # 6+ chars with a digit or symbol. A removed fragment that still appears in
+    # a live row is ordinary text the scrubber keeps (the leftover gate judges
+    # live rows), so only its absence from the rest of the file is checked.
+    live_blob = "\x00".join(live)
+    byte_set = hunted | {f for v in removed if checkable(v) for f in variants(v) if f not in live_blob}
+    has_pending = conn.execute("SELECT 1 FROM sqlite_master WHERE name = '_rescrub_pending'").fetchone()
+    still_pending = conn.execute("SELECT count(*) FROM _rescrub_pending").fetchone()[0] if has_pending else 0
     if not still_pending:
         conn.execute("DROP TABLE IF EXISTS _rescrub_pending")
     conn.commit()
@@ -290,7 +354,7 @@ def main() -> int:
     # Byte-check the values known to be secrets: the context-proven ones and
     # the secret-shaped ones. Fragments a redaction swallowed (a key name, a
     # "-----BEGIN" header) legitimately appear elsewhere and are not checked.
-    in_bytes = byte_check(db, hunt)
+    in_bytes = byte_check(db, byte_set)
     print(
         f"[rescrub] rewrote={rewrote} raced={raced} refreshed={refreshed} vector_pending={still_pending} "
         f"remaining_unscrubbed_rows={left} vacuumed={vacuumed} freelist_pages={freelist} chunks_without_vector={orphans} "
