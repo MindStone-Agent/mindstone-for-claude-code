@@ -312,8 +312,56 @@ def chunk_transcript(jsonl_text: str, source_path: str, start_line_offset: int =
     flush()
     return chunks
 
+# Scaffolding fields of a <task-notification>, each on its own line. Matched only
+# as a whole line, so a tag quoted inside a result or event body is left alone.
+_TASK_SCAFFOLDING = re.compile(
+    r"^[ \t]*<(task-id|tool-use-id|output-file|status|note|usage)>[^\n]*</\1>[ \t]*\n?", re.M)
+
+
+def _tag(text: str, name: str) -> str:
+    m = re.search(rf"<{name}>(.*?)</{name}>", text, re.DOTALL)
+    return m.group(1).strip() if m else ""
+
+
+def _clean_user_text(text: str) -> str:
+    """Reduce a harness-generated user turn to what's worth recalling (#111 M5).
+
+    Only text that STARTS with an envelope is touched; a tag mentioned inside
+    real prose is left alone (a tag regex over free text is how #96 deleted real
+    citations). Measured: <task-notification> in 14.4% of transcript chunks,
+    <command-name> in 12.9%, so chunks matched each other on the scaffolding.
+      - a background-task notification keeps everything except its scaffolding
+        fields (ids, output path, status, note, usage), each dropped only as a
+        whole line. The payload stays whole: 1,179 of 1,315 notifications are
+        Monitor events whose <event> body carries Synapse messages, and a
+        keep-list of summary/result would have thrown those away;
+      - a slash-command wrapper becomes "/name args";
+      - local command output and caveats are dropped;
+      - leading <system-reminder> blocks (e.g. a queued prompt's timestamp) are
+        dropped, keeping the prompt after them.
+    """
+    t = text.lstrip()
+    while t.startswith("<system-reminder>") and "</system-reminder>" in t:
+        t = t.split("</system-reminder>", 1)[1].lstrip()
+    if t.startswith("<task-notification>"):
+        body = _TASK_SCAFFOLDING.sub("", t)
+        body = body.replace("<task-notification>", "", 1).replace("</task-notification>", "").strip()
+        return f"[task notification]\n{body}" if body else ""
+    if t.startswith(("<command-message>", "<command-name>")):
+        return f"{_tag(t, 'command-name')} {_tag(t, 'command-args')}".strip()
+    if t.startswith(("<local-command-stdout>", "<local-command-caveat>", "<local-command-stderr>")):
+        return ""
+    return t
+
+
 def _extract_turn(obj: dict, line_num: int) -> dict | None:
     """Flatten a Claude Code transcript line into {role, content, line_num}."""
+    # Harness-injected records (skill bodies, command caveats) are not
+    # conversation. The /loop skill body alone was re-injected on every wakeup:
+    # 63 copies of ~7.9 KB in one 30 MB tail, more text than every real user
+    # turn in it combined (#111 M5).
+    if obj.get("isMeta"):
+        return None
     # Claude Code JSONL format varies by version. Try common shapes.
     role = None
     content_parts: list[str] = []
@@ -352,6 +400,9 @@ def _extract_turn(obj: dict, line_num: int) -> dict | None:
     # Shape 3: {"type": "summary", ...} or other system types — skip
     if role not in ("user", "assistant", "system"):
         return None
+    if role == "user":
+        content_parts = [_clean_user_text(p) if not p.startswith("[tool-result]") else p
+                         for p in content_parts]
 
     content = "\n".join(p for p in content_parts if p).strip()
     if not content:
