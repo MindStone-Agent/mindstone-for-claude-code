@@ -126,6 +126,10 @@ class VectorStore:
 
         inserted = 0
         for chunk, vec in zip(chunks, vectors):
+            if not any(vec):
+                # A failed embed. Stored, it would score 0.500 against every
+                # query forever. Callers retry these (see indexer.py).
+                continue
             chunk_id = chunk.chunk_id or chunk.compute_id()
             # Check if already indexed
             existing = conn.execute(
@@ -221,6 +225,13 @@ class VectorStore:
         If `mmr=True`, applies Maximal Marginal Relevance to diversify results.
         `mmr_lambda` ∈ [0,1]: 1.0 = pure similarity, 0.0 = pure diversity.
         """
+        # A failed embed (zero vector) scores exactly 0.500 against every chunk,
+        # which passes the recall floor: an embedder outage would inject
+        # arbitrary chunks that look like matches. Fail closed instead.
+        if not any(query_vec):
+            self.last_search_stats = {"requested": k, "returned": 0, "degenerate_query": True}
+            return []
+
         conn = self._conn_or_init()
         blob = _vec_to_blob(query_vec)
 
