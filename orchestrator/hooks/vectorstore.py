@@ -78,6 +78,9 @@ class VectorStore:
     def _conn_or_init(self) -> sqlite3.Connection:
         if self._conn is None:
             self._conn = sqlite3.connect(self.db_path)
+            # Freed pages are zeroed, so a deleted or rewritten (scrubbed)
+            # chunk doesn't linger in the file's bytes (MS4CC#117).
+            self._conn.execute("PRAGMA secure_delete=ON")
             self._conn.enable_load_extension(True)
             sqlite_vec.load(self._conn)
             self._conn.enable_load_extension(False)

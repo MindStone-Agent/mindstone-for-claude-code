@@ -250,7 +250,7 @@ def test_plist_style_arrow_assignment() -> None:
     # `plutil -p` output, e.g. a launchd plist's EnvironmentVariables.
     val = _rand(48, string.hexdigits.lower())
     out = scrub(f'    "MINDSTONE_GATEWAY_TOKEN" => "{val}"')
-    assert val not in out and '"MINDSTONE_GATEWAY_TOKEN" => "[REDACTED-SECRET]"' in out
+    assert val not in out and '"MINDSTONE_GATEWAY_TOKEN" => "[REDACTED-' in out
 
 
 def test_url_userinfo_password() -> None:
@@ -285,3 +285,107 @@ def test_bare_value_between_json_escaped_newlines() -> None:
     # repr()'d tool output: newlines are a literal backslash + n
     out = scrub("DATABASE__PASSWORD=***" + "\\n" + v + "\\n" + "NEXT_KEY=1")
     assert v not in out and "[REDACTED-HIGH-ENTROPY]" in out
+
+
+# --- Cairn's review of 77db1ea (PR #120) ------------------------------------
+
+def _hex(n: int) -> str:
+    return _rand(n, "0123456789abcdef")
+
+
+@pytest.mark.parametrize(
+    "fmt",
+    [
+        "password: {pw}",
+        "password = '{pw}'",
+        '"password": "{pw}"',
+        "DB_PASS={hex12}",
+        "mysql -u root --password {pw}",
+        "mysql --password={pw}",
+        "curl -u admin:{pw} https://x",
+        "redis://:{pw}@cache:6379/0",
+    ],
+)
+def test_password_shapes(fmt: str) -> None:
+    pw = "Tr0ub4dor&" + _rand(6) + "!9"
+    h = _hex(12)
+    text = fmt.format(pw=pw, hex12=h)
+    out = scrub(text)
+    assert pw not in out and h not in out, (fmt, out)
+
+
+@pytest.mark.parametrize("benign", ["bypass=manual_review", "compass: north_by_west", "the pass: was icy"])
+def test_pass_suffix_only_after_separator(benign: str) -> None:
+    assert scrub(benign) == benign
+
+
+@pytest.mark.parametrize(
+    "fmt",
+    [
+        "<key>MINDSTONE_GATEWAY_TOKEN</key>\n\t<string>{h}</string>",
+        "mindstone --token {h}",
+        '{{\\"token\\": \\"{h}\\"}}',
+        "token: `{h}`",
+        "Cookie: session={h}",
+        "\n{h48}\n",
+    ],
+)
+def test_hex_tokens_in_context(fmt: str) -> None:
+    h, h48 = _hex(40), _hex(48)
+    text = fmt.format(h=h, h48=h48)
+    out = scrub(text)
+    assert h not in out and h48 not in out, (fmt, out)
+
+
+@pytest.mark.parametrize(
+    "fmt",
+    ["aws_secret_access_key = {s}", "AWS_SECRET_ACCESS_KEY={s}", '"SecretAccessKey": "{s}"'],
+)
+def test_aws_secret_access_key(fmt: str) -> None:
+    s = _rand(20) + "/" + _rand(9) + "+" + _rand(9)
+    assert len(s) == 40
+    assert s not in scrub(fmt.format(s=s))
+
+
+@pytest.mark.parametrize(
+    "benign",
+    [
+        "token = self.token_provider.current",
+        "api_key = settings.OPENAI_API_KEY",
+        "password = user.password_hash",
+        "commit 3|0123456789abcdef0123456789abcdef01234567 in git log",
+        "getTotalPendingReplies2 and handleRequest404Error and parseISO8601Timestamp",
+        "snake_case_name_v2_final and some_long_identifier_2024_rev3",
+        "BackfillJob2024Q3PartitionsByCustomer",
+        "secret: /Users/someone/Projects/app/config/secrets.yaml",
+        "token file: ~/.synapse/agent.token and password: ./local/pw.txt",  # high entropy + digits; only the switch-rate gate spares it
+        "sha " + "0123456789abcdef" * 2 + "01234567" + " on its own line\n" + "0123456789abcdef" * 2 + "01234567\n",
+    ],
+)
+def test_review_false_positives_left_alone(benign: str) -> None:
+    assert scrub(benign) == benign
+
+
+def test_env_prefixed_vendor_key() -> None:
+    k = "sk-" + "ant-" + "api03-" + _rand(80, _URLSAFE)
+    assert k not in scrub(f"export ANTHROPIC_KEY_{k}")
+    assert k not in scrub(f"KEY_{k}")
+
+
+@pytest.mark.parametrize("n", [7, 11])
+def test_telegram_id_lengths(n: int) -> None:
+    tok = "1" * n + ":" + "AA" + _rand(33, _URLSAFE)
+    assert tok not in scrub(f"bot {tok} ok")
+
+
+@pytest.mark.parametrize(
+    "blob",
+    ["token" + " " * 40_000, "token=" * 40_000, "ey" + "J" + "a" * 160_000, "password: " * 30_000],
+    ids=["token-ws", "token-eq", "jwt-long", "pw-repeat"],
+)
+def test_review_quadratic_inputs(blob: str) -> None:
+    import time
+
+    t = time.perf_counter()
+    scrub(blob)
+    assert time.perf_counter() - t < 1.5

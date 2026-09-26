@@ -336,7 +336,11 @@ def _extract_turn(obj: dict, line_num: int) -> dict | None:
                         name = item.get("name", "?")
                         content_parts.append(f"[tool-call: {name}]")
                     elif item.get("type") == "tool_result":
-                        content_parts.append(f"[tool-result]: {str(item.get('content', ''))[:300]}")
+                        # Marker only, never the body: tool output is where
+                        # pasted configs, plist dumps and env files arrive
+                        # (MS4CC#117). The model's own reply carries what
+                        # mattered about the result.
+                        content_parts.append("[tool-result]")
 
     # Shape 2: {"role": ..., "content": ...}
     elif "role" in obj:
