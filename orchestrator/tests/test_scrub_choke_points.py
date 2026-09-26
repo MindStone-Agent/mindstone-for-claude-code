@@ -384,3 +384,307 @@ def test_freelist_gate_fails_a_run_that_leaves_free_pages(tmp_path, monkeypatch,
     assert rb.main() == 1
     out = capsys.readouterr().out
     assert "freelist_pages=0" not in out and "vacuumed=True" in out
+
+
+def test_runbook_hunts_context_proven_passwords_into_bare_mentions(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    pw = "#K9" + "".join(_rng.choice(string.ascii_letters + string.digits) for _ in range(11)) + "!"
+    short = "Qz7!pwX"  # 6-7 char proven passwords are hunted too (#120's 6+ rule)
+    slashy = "Ab9/xY2+q"
+    _raw_insert(db, f"Username: clintbodungen\nPassword: {pw}\nnext line")  # context proves it
+    _raw_insert(db, f"then I ran echo {pw} | sudo -S true", source_path="u.jsonl")  # bare mention
+    _raw_insert(db, '{"t": "typed\\n' + pw + '\\nthen"}', source_path="j.jsonl")  # JSON-escaped newline
+    _raw_insert(db, f"Password: {short}", source_path="s1.jsonl")
+    _raw_insert(db, f"it was {short} again", source_path="s2.jsonl")
+    _raw_insert(db, f"Password: {slashy}", source_path="e1.jsonl")
+    _raw_insert(db, '{"t": "x ' + slashy.replace("/", "\\/") + ' y"}', source_path="e2.jsonl")
+    weak = "required"  # a weak context value is never hunted store-wide
+    _raw_insert(db, f"Password: {weak}!9\nfield is {weak} here", source_path="w.jsonl")
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    assert rb.main() == 0
+    capsys.readouterr()
+    c = sqlite3.connect(db)
+    texts = [t for (t,) in c.execute("SELECT text FROM chunks")]
+    for v in (pw, short, slashy, slashy.replace("/", "\\/")):
+        assert not any(v in t for t in texts)
+        assert v.encode() not in db.read_bytes()
+    assert any("field is required here" in t for t in texts), "ordinary words are never hunted"
+
+
+def test_runbook_leaves_a_glued_copy_in_place_and_fails_the_gates(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    pw = "#K9" + "".join(_rng.choice(string.ascii_letters + string.digits) for _ in range(11)) + "!"
+    _raw_insert(db, f"Password: {pw}")
+    _raw_insert(db, f"glued x{pw}y still contains it", source_path="v.jsonl")
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    assert rb.main() == 1
+    out = capsys.readouterr().out
+    assert "remaining_unscrubbed_rows=1" in out and pw not in out
+    texts = [t for (t,) in sqlite3.connect(db).execute("SELECT text FROM chunks")]
+    assert any(f"x{pw}y" in t for t in texts), "never rewritten inside a longer word"
+
+
+def test_runbook_never_hunts_code_or_placeholders(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    pairs = [
+        ("password = pwd_hash", "x = old_pwd_hash_v1; y = pwd_hash"),
+        ("password=password_input", "the password_input widget"),
+        ("password: ${DB_PASSWORD}", "env is ${DB_PASSWORD} here"),
+        ("password: [String!]!", "field: [String!]!"),
+        ("api_key = YOUR_API_KEY_HERE", "set YOUR_API_KEY_HERE first"),
+        ("token: SynapseTokenResponseType;", "class SynapseTokenResponseType {"),
+        ("password: ********", "mask ******** shown"),
+        ("<key>ApiToken</key><string>com.example.app9</string>", "bundle com.example.app9 loaded"),
+    ]
+    for i, (proof, other) in enumerate(pairs):
+        _raw_insert(db, proof, source_path=f"p{i}.jsonl")
+        _raw_insert(db, other, source_path=f"o{i}.jsonl")
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    rb.main()
+    capsys.readouterr()
+    texts = {t for (t,) in sqlite3.connect(db).execute("SELECT text FROM chunks")}
+    for _, other in pairs:
+        assert other in texts, other
+
+
+def test_runbook_placeholder_is_not_a_secret_and_gates_always_run(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    _raw_insert(db, "DATABASE_URL=postgres://app:Pg7xQ2mWz9@db.local/app")
+    _raw_insert(db, "mysql -u root -pRt5kLm90xQ -h db", source_path="m.jsonl")
+    _raw_insert(db, "curl -u admin:Cu8nBv2Lq9 https://x.example", source_path="c.jsonl")
+    _raw_insert(db, "tool login --password Cl9zzQ1wEr", source_path="f.jsonl")
+    _raw_insert(db, "an old [REDACTED-SECRET] placeholder row", source_path="r.jsonl")
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    assert rb.main() == 0
+    capsys.readouterr()
+    # A second run has nothing to rewrite but must still run every gate.
+    assert rb.main() == 0
+    out = capsys.readouterr().out
+    assert "running the gates" in out and "freelist_pages=0" in out and "remaining_unscrubbed_rows=0" in out
+
+
+def test_runbook_second_run_gates_catch_a_leftover(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    _raw_insert(db, "nothing secret here")
+    (tmp_path / "vectors.db-leftover").write_text("old page: sk-live Zx81!mQ0pLw9")
+    pw = "Zx81!mQ0pLw9"
+    snap = tmp_path / "snap.db"
+    VectorStore(snap).init_schema()
+    _raw_insert(snap, f"Password: {pw}")
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply", "--seed-from", str(snap)])
+    assert rb.main() == 1, "nothing to rewrite, but the byte gate still finds the known secret"
+    out = capsys.readouterr().out
+    assert "removed_values_still_in_file_bytes=1" in out and pw not in out
+
+
+def test_byte_gate_checks_short_removed_values_that_are_not_hunted(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    _raw_insert(db, "password=Ab3_dEf9_x")  # an identifier shape: never hunted, still byte-checked
+    (tmp_path / "vectors.db-leftover").write_text("stale: password=Ab3_dEf9_x")
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    assert rb.main() == 1
+    assert "removed_values_still_in_file_bytes=0" not in capsys.readouterr().out
+
+
+def test_byte_gate_checks_removed_values_that_are_neither_proven_nor_hunted(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    _raw_insert(db, "key id AKIAQX7ZL2M4N8P3R5T6 here")  # a vendor shape: no context proof, not secret_like
+    (tmp_path / "vectors.db-leftover").write_text("stale: AKIAQX7ZL2M4N8P3R5T6")
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    assert rb.main() == 1
+    assert "removed_values_still_in_file_bytes=1" in capsys.readouterr().out
+
+
+def test_summer_2024x_style_passwords_are_hunted(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    vals = ["Summer_2024x", "$ecretPass9", "Abc=12345x"]
+    for i, v in enumerate(vals):
+        _raw_insert(db, f"password: {v}", source_path=f"p{i}.jsonl")
+        _raw_insert(db, f"later I typed {v} again", source_path=f"b{i}.jsonl")
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    assert rb.main() == 0
+    capsys.readouterr()
+    texts = [t for (t,) in sqlite3.connect(db).execute("SELECT text FROM chunks")]
+    for v in vals:
+        assert not any(v in t for t in texts), rb.mask(v)
+        assert v.encode() not in db.read_bytes()
+
+
+@pytest.mark.parametrize(
+    "v,ok",
+    [
+        ("#K9aB2cD3eF4gH!", True),
+        ("Qz7!pw", True),
+        ("hunter22", True),
+        ("Qz7!p", False),
+        ("[REDACTED-SECRET]", False),
+        ("a[REDACTED-SECRET]", False),
+        ("pwd_hash", False),
+        ("YOUR_API_KEY_HERE", False),
+        ("${DB_PASSWORD}", False),
+        ("{{ secret }}9", False),
+        ("[String!]!", False),
+        ("<your-token-1>", False),
+        ("$SECRET_KEY9", False),
+        ("********", False),
+        ("--------", False),
+        ("SynapseTokenResponseType", False),
+        ("passwordinput", False),
+        ("com.example.app9", False),
+        ("Summer_2024x", True),
+        ("pwd_hash_v2", False),
+        ("AWS_KEY_ID2", False),
+        ("$ecretPass9", True),
+        ("Abc=12345x", True),
+        ("pass=word9Z", True),
+        ("blue-sky-42x", False),
+        ("blue.sky.42", False),
+        ("mistral-7-instruct", False),
+        ("api.example.com", False),
+        ("code=1", False),
+        ("result=0x", False),
+        ("Ab-c9Def1g2", True),
+    ],
+)
+def test_strong_hunts_only_secret_shapes(v, ok):
+    assert _load_runbook().strong(v) is ok
+
+
+def test_scrub_collect_ignores_short_and_placeholder_values():
+    from scrubber import scrub_collect
+
+    text = "postgres://u:Ab1!x@h/db and mysql -pRt5kLm90xQ"
+    new, known = scrub_collect(text)
+    assert new != text and "Ab1!x" not in new
+    assert "Ab1!x" not in known and not any("[REDACTED" in v for v in known)
+    # The key=value pass sees the URL pass's placeholder inside its value.
+    _, known = scrub_collect("PGPASSWORD=postgres://app:Pg7xQ2mWz9@db/app")
+    assert known == {"Pg7xQ2mWz9"}
+
+
+def test_byte_gate_skips_fragments_that_live_rows_still_hold(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    _raw_insert(
+        db,
+        "key: -----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n"
+        "-----END OPENSSH PRIVATE KEY-----",
+    )
+    _raw_insert(db, "a cert starts -----BEGIN CERTIFICATE----- and ends -----END CERTIFICATE-----", source_path="c.jsonl")
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    assert rb.main() == 0, "a PEM header fragment that live rows still hold is not a leak"
+    assert "removed_values_still_in_file_bytes=0" in capsys.readouterr().out
+
+
+def test_seed_from_snapshot_finds_values_whose_proof_was_already_redacted(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    pw = "#K9" + "".join(_rng.choice(string.ascii_letters + string.digits) for _ in range(11)) + "!"
+    _raw_insert(db, f"Password: {pw}")
+    snap = tmp_path / "snapshot.db"
+    import shutil
+
+    shutil.copy(db, snap)
+    # A first run redacts the proving row; a bare mention added later is
+    # invisible to a second run without the snapshot.
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    rb.main()
+    _raw_insert(db, f"echo {pw} | sudo -S true", source_path="u.jsonl")
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply", "--seed-from", str(snap)])
+    assert rb.main() == 0
+    assert "seeded 1 known secret values from" in capsys.readouterr().out
+    assert pw.encode() not in db.read_bytes()
+
+
+def test_seed_from_is_read_only_and_safe_on_odd_paths(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    _raw_insert(db, "Password: #K9vQ2mZr8LpX4w!")
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    missing = tmp_path / "no such#snap?.db"
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply", "--seed-from", str(missing)])
+    assert rb.main() == 2
+    assert not missing.exists()
+    odd = tmp_path / "snap#1?x.db"
+    import shutil
+
+    shutil.copy(db, odd)
+    before = odd.read_bytes()
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--seed-from", str(odd)])
+    rb.main()
+    out = capsys.readouterr().out
+    assert "seeded 1 known secret values from" in out
+    assert "K9vQ2mZr8LpX4w" not in out
+    assert odd.read_bytes() == before
+
+
+@pytest.mark.parametrize("proof,bare", [
+    ("password: correct-horse-battery9", "I typed correct-horse-battery9 again"),
+    ("password=horsebattery", "the horsebattery thing"),
+    ("password: blue-sky-42x", "we said blue-sky-42x later"),
+    ("password: blue.sky.42", "it is blue.sky.42 again"),
+    ("password: blue-sky-42x", "glued xblue-sky-42xy here"),
+])
+def test_proven_value_strong_rejects_cannot_pass_silently(tmp_path, monkeypatch, capsys, proof, bare):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    _raw_insert(db, proof)
+    _raw_insert(db, bare, source_path="b.jsonl")
+    value = proof.split()[-1].split("=")[-1]
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    assert rb.main() == 1, "a proven value left bare fails the run"
+    out = capsys.readouterr().out
+    assert "proven_values_not_hunted_but_bare=1" in out and f"shape={rb.mask(value)} rows=1" in out
+    assert value not in out
+    # Re-runs remember the value through the first run's snapshot.
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    assert rb.main() == 1
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply", "--accept-unhunted", "2"])
+    assert rb.main() == 1, "the accepted count must match exactly"
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply", "--accept-unhunted", "1"])
+    assert rb.main() == 0
+
+
+def test_unhunted_proven_value_elsewhere_in_the_file_fails_the_byte_gate(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    _raw_insert(db, "password=horsebattery")  # letters only: not hunted, not checkable()
+    (tmp_path / "vectors.db-leftover").write_text("stale page: horsebattery")
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    assert rb.main() == 1
+    assert "removed_values_still_in_file_bytes=1" in capsys.readouterr().out
