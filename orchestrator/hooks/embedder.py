@@ -70,30 +70,9 @@ API_KEY_FILE = Path.home() / ".config" / "openai-api-key"  # only consulted if b
 # Secret scrubbing
 # ---------------------------------------------------------------------------
 
-SECRET_PATTERNS = [
-    (re.compile(r"sk-proj-[A-Za-z0-9_\-]{20,}"), "[REDACTED-OPENAI-KEY]"),
-    (re.compile(r"sk-[A-Za-z0-9_\-]{20,}"), "[REDACTED-OPENAI-KEY]"),
-    (re.compile(r"ghp_[A-Za-z0-9]{30,}"), "[REDACTED-GITHUB-TOKEN]"),
-    (re.compile(r"ghs_[A-Za-z0-9]{30,}"), "[REDACTED-GITHUB-TOKEN]"),
-    (re.compile(r"github_pat_[A-Za-z0-9_]{30,}"), "[REDACTED-GITHUB-PAT]"),
-    (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED-AWS-ACCESS-KEY]"),
-    (re.compile(r"xoxb-[A-Za-z0-9\-]{30,}"), "[REDACTED-SLACK-TOKEN]"),
-    (re.compile(r"voyage-[A-Za-z0-9_\-]{20,}"), "[REDACTED-VOYAGE-KEY]"),
-    (re.compile(r"anthropic-[A-Za-z0-9_\-]{20,}"), "[REDACTED-ANTHROPIC-KEY]"),
-    (re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----"), "[REDACTED-PRIVATE-KEY]"),
-    (re.compile(r"ssh-(?:rsa|ed25519|ecdsa)\s+[A-Za-z0-9+/=]{100,}"), "[REDACTED-SSH-KEY]"),
-]
-
-def scrub(text: str) -> str:
-    """Replace secret-shaped tokens in text with placeholders.
-
-    Applied before embedding or storing any text chunk. Irreversible.
-    """
-    if not isinstance(text, str):
-        return text
-    for pattern, placeholder in SECRET_PATTERNS:
-        text = pattern.sub(placeholder, text)
-    return text
+# Patterns and scrub() live in scrubber.py so every store writer shares them;
+# re-exported here for existing importers (`from embedder import scrub`).
+from scrubber import SECRET_PATTERNS, scrub  # noqa: E402,F401
 
 # ---------------------------------------------------------------------------
 # Embedder
