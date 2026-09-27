@@ -87,7 +87,7 @@ NEGATIVE = [
     "uuid 3ad7c136-9284-44c2-96c1-e03e93228762",
     "the task-management-framework-overview is here",  # prose with hyphens
     "risk-assessment and desk-research notes",
-    "use sk-learn-for-the-classifier-pipeline here",  # anchored sk- prose, no digit
+    "use sk-learn-for-the-classifier-pipeline here",  # anchored sk- prose, no digit  privacy-scan: allow
     "the anthropic-sdk-python-client-library docs",
     "timestamp 2026-09-26T19:54:56.994Z and port 11434",
     "a lowercase_only_identifier_that_is_quite_long_ok",  # no upper/digit mix
