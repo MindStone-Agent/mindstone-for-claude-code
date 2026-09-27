@@ -22,6 +22,8 @@ input at all.
 Usage:
     python3 hit_counter_audit.py              # report the live signal's health
     python3 hit_counter_audit.py --self-test  # prove the scan can return zero
+    python3 hit_counter_audit.py --recount    # recompute hits from all archives (dry run)
+    python3 hit_counter_audit.py --recount --apply   # ...and write it (backs up first)
 """
 
 from __future__ import annotations
@@ -205,6 +207,95 @@ def _self_test() -> int:
             got = se.auto_increment_hits(torn)
             ck("CONTROL the once-torn record is credited once it is complete",
                got, ["feedback_gamma_rule.md"])
+
+            # --- ALLOWLIST (2026-09-25): record types that NAME memories without
+            #     anyone using them. Each shape is copied from a real transcript.
+            #     With the old denylist every one of these credited the memory; 447
+            #     of 729 Stop runs credited 102-116 of 117 memories that way.
+            n = "feedback_alpha_rule.md"
+            not_citations = {
+                "file-history-snapshot": {"type": "file-history-snapshot", "snapshot": {
+                    "trackedFileBackups": {f"/x/orchestrator/memory/{n}": {"backupFileName": "b"}}}},
+                "hook_success (SessionStart index)": {"type": "attachment", "attachment": {
+                    "type": "hook_success", "content": f"## MEMORY INDEX\n- [{n}]({n})"}},
+                "edited_text_file": {"type": "attachment", "attachment": {
+                    "type": "edited_text_file", "filename": f"/x/memory/{n}", "snippet": n}},
+                "tool_result": {"type": "user", "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t", "content": f"memory/{n}"}]},
+                    "toolUseResult": {"file": {"filePath": f"/x/memory/{n}"}}},
+                "task-notification": {"type": "user", "message": {"role": "user",
+                    "content": f"<task-notification>\n<result>cited {n}</result>"}},
+                "isMeta user record": {"type": "user", "isMeta": True, "message": {
+                    "role": "user", "content": f"skill body mentioning {n}"}},
+                "system record": {"type": "system", "content": f"hook ran on {n}"},
+                "an unknown future record type": {"type": "brand-new-thing", "text": n},
+                "compaction summary": {"type": "user", "isCompactSummary": True, "message": {
+                    "role": "user", "content": f"This session is being continued... {n}"}},
+                "`!` shell output": {"type": "user", "message": {"role": "user",
+                    "content": f"<bash-stdout>memory/{n}</bash-stdout>"}},
+                "Write that creates the memory": {"type": "assistant", "message": {"role": "assistant",
+                    "content": [{"type": "tool_use", "name": "Write",
+                                 "input": {"file_path": f"/x/memory/{n}", "content": "body"}}]}},
+                "Edit of the memory": {"type": "assistant", "message": {"role": "assistant",
+                    "content": [{"type": "tool_use", "name": "Edit",
+                                 "input": {"file_path": f"/x/memory/{n}", "old_string": "a", "new_string": "b"}}]}},
+                "shell heredoc writing the memory": {"type": "assistant", "message": {"role": "assistant",
+                    "content": [{"type": "tool_use", "name": "Bash",
+                                 "input": {"command": f"cat > orchestrator/memory/{n} <<'EOF'\nbody\nEOF"}}]}},
+                "sed -i on the memory": {"type": "assistant", "message": {"role": "assistant",
+                    "content": [{"type": "tool_use", "name": "Bash",
+                                 "input": {"command": f"sed -i '' 's/a/b/' orchestrator/memory/{n}"}}]}},
+                "cd into memory, then append": {"type": "assistant", "message": {"role": "assistant",
+                    "content": [{"type": "tool_use", "name": "Bash",
+                                 "input": {"command": f"cd orchestrator/memory && cat >> {n} <<'EOF'\nx\nEOF"}}]}},
+                "cd into memory, then sed -i": {"type": "assistant", "message": {"role": "assistant",
+                    "content": [{"type": "tool_use", "name": "Bash",
+                                 "input": {"command": f"cd orchestrator/memory && sed -i '' 's/a/b/' {n}"}}]}},
+                "python writing the memory": {"type": "assistant", "message": {"role": "assistant",
+                    "content": [{"type": "tool_use", "name": "Bash",
+                                 "input": {"command": f"python3 - <<'EOF'\np='orchestrator/memory/{n}'\nopen(p,'w').write(s)\nEOF"}}]}},
+                "queued task-notification": {"type": "attachment", "attachment": {
+                    "type": "queued_command", "commandMode": "prompt",
+                    "prompt": f"<task-notification>{n}</task-notification>"}},
+            }
+            for label, rec in not_citations.items():
+                ck(f"allowlist: {label} is NOT a citation",
+                   n in se.authored_text(json.dumps(rec)), False)
+            citations = {
+                "assistant tool_use (Read by name)": {"type": "assistant", "message": {
+                    "role": "assistant", "content": [{"type": "tool_use", "name": "Read",
+                        "input": {"file_path": f"/x/memory/{n}"}}]}},
+                "Write of a LOG entry that names the memory": {"type": "assistant", "message": {
+                    "role": "assistant", "content": [{"type": "tool_use", "name": "Write",
+                        "input": {"file_path": "/x/orchestrator/LOG.md", "content": f"applied {n}"}}]}},
+                "a read next to open('agents.md').read()": {"type": "assistant", "message": {
+                    "role": "assistant", "content": [{"type": "tool_use", "name": "Bash",
+                        "input": {"command": f"python3 -c \"open('agents.md').read(); print(open('memory/{n}').read())\""}}]}},
+                "echo '-> memory/<name>'": {"type": "assistant", "message": {"role": "assistant",
+                    "content": [{"type": "tool_use", "name": "Bash",
+                                 "input": {"command": f"echo 'see -> orchestrator/memory/{n}'"}}]}},
+                "shell READ of the memory (cat)": {"type": "assistant", "message": {"role": "assistant",
+                    "content": [{"type": "tool_use", "name": "Bash",
+                                 "input": {"command": f"cat orchestrator/memory/{n}"}}]}},
+                "assistant thinking": {"type": "assistant", "message": {"role": "assistant",
+                    "content": [{"type": "thinking", "thinking": f"{n} says not to"}]}},
+                "human-typed user text": {"type": "user", "message": {
+                    "role": "user", "content": f"remember {n}?"}},
+                "human message queued while busy (#107)": {"type": "attachment", "attachment": {
+                    "type": "queued_command", "commandMode": "prompt",
+                    "prompt": [{"type": "text", "text": f"also check {n}"}]}},
+            }
+            for label, rec in citations.items():
+                ck(f"allowlist: {label} IS a citation",
+                   n in se.authored_text(json.dumps(rec)), True)
+            # End to end through the counter: a window of ONLY non-citations
+            # credits nothing.
+            quiet = tmp / "2026-01-02__quiet.jsonl"
+            quiet.write_text("\n".join(json.dumps(r) for r in not_citations.values()) + "\n")
+            before = hits("feedback_alpha_rule")
+            got = se.auto_increment_hits(quiet)
+            ck("a window of snapshots/index/tool output credits NOTHING", got, [])
+            ck("  and the counter really did not move", hits("feedback_alpha_rule"), before)
         finally:
             se.MEMORY_DIR, se.STATE_PATH = orig_mem, orig_state
 
@@ -299,17 +390,169 @@ def _seed_watermarks() -> int:
     return 0
 
 
+def _is_stop_boundary(rec: dict) -> bool:
+    """The record Claude Code writes after each Stop hook run.
+
+    The live counter credits once per Stop run, so a recount has to cut its
+    windows at the same place to stay on the same scale as the live increments
+    that follow it.
+    """
+    return rec.get("type") == "system" and rec.get("subtype") == "stop_hook_summary"
+
+
+def _recount(apply: bool) -> int:
+    """Recompute hits / last_applied from every archived session with the CURRENT filter.
+
+    The values on disk came from the denylist filter, which credited ~113 of 117
+    memories on every turn (2026-09-25). They measure turns, not use, and don't
+    become correct by accumulating more. Zeroing them throws away real history;
+    recounting keeps it. hits = number of Stop-run windows whose authored text
+    cites the memory; last_applied = the date of the last such window.
+    `prevented` (human-confirmed) is never touched.
+
+    Two hazards in the archives themselves:
+      - Claude Code sometimes writes history back into a session file (31,388
+        repeated record uuids in one archive), so records are de-duplicated by
+        uuid across ALL archives.
+      - archive_transcript rewrites an archive in place on every Stop run, so an
+        archive that changes while it is being read is an error, not a result.
+    Run --apply from a plain terminal with no Claude session active.
+
+    Dry run by default. --apply backs up the memory dir first, then re-seeds the
+    scan watermarks so the next Stop run starts at EOF.
+    """
+    import tarfile
+    from datetime import datetime, timezone
+    import session_end as se
+
+    counts: dict[str, int] = {}
+    last: dict[str, str] = {}
+    seen_uuids: set[str] = set()
+    windows = 0
+    archives = [p for p in sorted((ORCHESTRATOR_DIR / "transcripts").glob("*.jsonl"))
+                if _SESSION_JSONL.match(p.name)]
+    for p in archives:
+        before = (p.stat().st_size, p.stat().st_mtime_ns)
+        window: list[str] = []
+        stamp = ""
+
+        def flush():
+            nonlocal windows
+            if not window:
+                return
+            windows += 1
+            for name in se.cited_memories(se.authored_text("\n".join(window))):
+                counts[name] = counts.get(name, 0) + 1
+                if stamp and stamp > last.get(name, ""):
+                    last[name] = stamp
+            window.clear()
+
+        with p.open("r", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except Exception:  # noqa: BLE001
+                    window.append(line.rstrip("\n"))
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                uid = rec.get("uuid")
+                if isinstance(uid, str):
+                    if uid in seen_uuids:
+                        continue
+                    seen_uuids.add(uid)
+                ts = rec.get("timestamp")
+                if isinstance(ts, str) and len(ts) >= 10:
+                    stamp = ts[:10]
+                window.append(line.rstrip("\n"))
+                if _is_stop_boundary(rec):
+                    flush()
+        flush()
+        after = (p.stat().st_size, p.stat().st_mtime_ns)
+        if after != before:
+            print(f"ERROR: {p.name} was rewritten while it was being read. Re-run with no "
+                  f"Claude session active.")
+            return 1
+        print(f"  scanned {p.name}")
+
+    files = sorted(MEMORY_DIR.glob("*.md"))
+    changes = []
+    for path in files:
+        m = re.match(r"---\n(.*?)\n---\n(.*)", path.read_text(), re.DOTALL)
+        if not m:
+            continue
+        fm = dict(line.split(":", 1) for line in m.group(1).split("\n") if ":" in line)
+        changes.append((path, fm.get("hits", "").strip(), counts.get(path.name, 0),
+                        last.get(path.name, "null")))
+
+    # The index names every memory, so it is always the maximum; leave it out of
+    # the summary so the numbers describe the memories themselves.
+    rows = [c for c in changes if c[0].name != "MEMORY.md"]
+    olds = sorted(int(o) for _p, o, _n, _l in rows if o.isdigit())
+    news = sorted(n for _p, _o, n, _l in rows)
+    print(f"\nStop-run windows: {windows}   unique records: {len(seen_uuids):,}")
+    if olds:
+        print(f"hits before: median {statistics.median(olds)}, max {olds[-1]}")
+    if news:
+        print(f"hits after:  median {statistics.median(news)}, max {news[-1]}, "
+              f"zero {sum(1 for n in news if n == 0)} of {len(news)}")
+    print(f"distinct last_applied after: {len({la for *_x, la in rows})}")
+    if not apply:
+        print("\nDRY RUN. Re-run with --apply to write (backs up the memory dir first).")
+        return 0
+
+    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    bdir = ORCHESTRATOR_DIR / "transcripts" / ".memory-backups"  # gitignored with transcripts/
+    bdir.mkdir(parents=True, exist_ok=True)
+    backup = bdir / f"memory-pre-recount-{ts}.tgz"
+    with tarfile.open(backup, "w:gz") as tf:
+        tf.add(MEMORY_DIR, arcname="memory")
+    backup.chmod(0o600)
+    print(f"\nbackup: {backup}")
+
+    written = 0
+    for path, _o, new_h, new_la in changes:
+        m = re.match(r"---\n(.*?)\n---\n(.*)", path.read_text(), re.DOTALL)
+        out = []
+        seen_h = False
+        seen_l = False
+        for line in m.group(1).split("\n"):
+            if line.startswith("hits:"):
+                out.append(f"hits: {new_h}")
+                seen_h = True
+            elif line.startswith("last_applied:"):
+                out.append(f"last_applied: {new_la}")
+                seen_l = True
+            else:
+                out.append(line)
+        if not seen_h:
+            out.append(f"hits: {new_h}")
+        if not seen_l:
+            out.append(f"last_applied: {new_la}")
+        path.write_text("---\n" + "\n".join(out) + "\n---\n" + m.group(2))
+        written += 1
+    print(f"wrote {written} memory files")
+    return _seed_watermarks()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--seed-watermarks", action="store_true",
                     help="one-time: treat existing archived transcripts as already counted")
+    ap.add_argument("--recount", action="store_true",
+                    help="recompute hits/last_applied from all archives with the current filter (dry run)")
+    ap.add_argument("--apply", action="store_true", help="with --recount: write the result")
     args = ap.parse_args()
+    if args.apply and not args.recount:
+        ap.error("--apply only applies to --recount")
     if args.self_test:
         return _self_test()
     if args.seed_watermarks:
         return _seed_watermarks()
+    if args.recount:
+        return _recount(args.apply)
     return _report()
 
 
