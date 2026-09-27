@@ -224,7 +224,7 @@ wheels = [
 
 [[package]]
 name = "mindstone-for-claude-code"
-version = "0.3.0"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "openai" },

@@ -40,6 +40,8 @@ branch. If omitted, it updates to the latest on the default line.
    # or, to move to a specific ref:
    # git fetch origin && git checkout $ARGUMENTS
    ```
+   If `git pull` fails with "refusing to merge unrelated histories", this clone predates the 0.5.0 history rewrite: back up `orchestrator/memory/` and local edits, then `git fetch origin --tags --force && git reset --hard origin/main` in this checkout (don't re-clone).
+   Then restore `MEMORY.md` from the backup and follow the remaining CHANGELOG 0.5.0 upgrade steps (seed watermarks in this same turn, re-run bootstrap, restart, then rescrub).
    The hooks are wired in `~/.claude/settings.json` at this repo's path, so a pull
    updates the live hook **code** in place — there is no copy step.
 2. **Decide whether to re-run bootstrap.** If the pull added/removed a hook file or
