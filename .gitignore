@@ -51,6 +51,7 @@ orchestrator/transcripts/
 # The example templates (*.example.toml) ARE committed; copy them locally.
 orchestrator/config/synapse.toml
 orchestrator/config/project_hints.toml
+orchestrator/config/privacy_patterns.toml
 
 # MindStone for Claude Code — user-specific orchestrator content
 # Each developer's Cairn-like instance is private to them; the repo ships

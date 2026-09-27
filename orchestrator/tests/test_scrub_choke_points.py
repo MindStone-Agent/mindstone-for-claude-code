@@ -507,8 +507,8 @@ def test_byte_gate_checks_short_removed_values_that_are_not_hunted(tmp_path, mon
 def test_byte_gate_checks_removed_values_that_are_neither_proven_nor_hunted(tmp_path, monkeypatch, capsys):
     db = tmp_path / "vectors.db"
     VectorStore(db).init_schema()
-    _raw_insert(db, "key id AKIAQX7ZL2M4N8P3R5T6 here")  # a vendor shape: no context proof, not secret_like
-    (tmp_path / "vectors.db-leftover").write_text("stale: AKIAQX7ZL2M4N8P3R5T6")
+    _raw_insert(db, "key id AKIAQX7ZL2M4N8P3R5T6 here")  # a vendor shape: no context proof, not secret_like  privacy-scan: allow
+    (tmp_path / "vectors.db-leftover").write_text("stale: AKIAQX7ZL2M4N8P3R5T6")  # privacy-scan: allow
     rb = _load_runbook()
     _install_embedder(monkeypatch, _FakeEmbedder)
     monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
@@ -591,7 +591,7 @@ def test_byte_gate_skips_fragments_that_live_rows_still_hold(tmp_path, monkeypat
     VectorStore(db).init_schema()
     _raw_insert(
         db,
-        "key: -----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "key: -----BEGIN OPENSSH PRIVATE KEY-----\n"  # privacy-scan: allow
         "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n"
         "-----END OPENSSH PRIVATE KEY-----",
     )
