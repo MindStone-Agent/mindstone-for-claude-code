@@ -13,8 +13,13 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
 
 **Upgrading from 0.4.0.** `main`'s history was rewritten during this cycle to remove private
 data. A clone made before the rewrite (including any at the original v0.4.0) shares no history
-with `main`, so `git pull` fails with "refusing to merge unrelated histories", even though
-`/ms4cc-update` says to pull. In order:
+with `main`, and `/ms4cc-update`'s `git pull` goes wrong in a way that depends on your pull
+settings (checked with git 2.50): by default it stops with "Need to specify how to reconcile
+divergent branches"; with `pull.ff=only`, "Not possible to fast-forward"; with
+`pull.rebase=false`, "refusing to merge unrelated histories". With `pull.rebase=true` it can
+**succeed silently** by replaying your pre-rewrite commits on top of the new `main`; if
+`git log --oneline origin/main..HEAD` lists commits you didn't make yourself, that happened.
+Don't merge or rebase your way out. In any of these cases, in order:
 
 1. **Back up first.** Copy `orchestrator/memory/` (including `MEMORY.md`) and any local edits
    to tracked files somewhere outside the checkout. The next step deletes files that were
@@ -25,7 +30,8 @@ with `main`, so `git pull` fails with "refusing to merge unrelated histories", e
    (identity, user profile, LOG, vector store, transcripts, local config), and the hooks in
    `~/.claude/settings.json` point at the old checkout's path.
 3. **Seed the citation watermarks immediately:**
-   `orchestrator/runbooks/hit_counter_audit.py --seed-watermarks` (see Fixed). The Stop hook
+   `orchestrator/.venv/bin/python orchestrator/runbooks/hit_counter_audit.py --seed-watermarks`
+   (see Fixed; the runbooks aren't executable, so run them with the venv's python). The Stop hook
    runs `session_end.py` from the checkout, so the new citation scan runs at the end of the
    very turn that updated it. If you update from inside Claude Code (e.g. `/ms4cc-update`),
    seed in that same turn, before it ends. Otherwise each unseeded session re-credits every
@@ -33,8 +39,10 @@ with `main`, so `git pull` fails with "refusing to merge unrelated histories", e
 4. **Re-run `orchestrator/bootstrap.sh`, then restart Claude Code.** The new
    `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (see Fixed) reaches `~/.claude/settings.json` only through
    bootstrap.
-5. **Run the one-time rescrub** (`orchestrator/runbooks/rescrub_vectors.py`, see Security) once,
-   with the embedder running and no Claude Code session holding the vector store.
+5. **Run the one-time rescrub** (see Security) once, with the embedder running and no Claude
+   Code session holding the vector store:
+   `orchestrator/.venv/bin/python orchestrator/runbooks/rescrub_vectors.py --apply`. Without
+   `--apply` it is only a dry run and changes nothing.
 6. **Consumer installs:** `.ms4cc-version` records a commit SHA from the old history. Re-pin by
    re-running `install.sh --ref <new ref>` (or `/ms4cc-update`) and commit the new
    `.ms4cc-version`.
@@ -218,7 +226,7 @@ with `main`, so `git pull` fails with "refusing to merge unrelated histories", e
   re-credited forever and the time-decay term never fired. It now scans only the bytes added
   since a per-transcript, line-aligned watermark, and drops hook-injected records by record
   shape (not by tag text, which deleted real citations). **Upgrade:** run
-  `orchestrator/runbooks/hit_counter_audit.py --seed-watermarks` once, immediately after
+  `orchestrator/.venv/bin/python orchestrator/runbooks/hit_counter_audit.py --seed-watermarks` once, immediately after
   updating, so existing archives are marked as already counted. The Stop hook runs the new
   scan from the checkout at the end of every turn, including the turn that did the update, so
   if you update from inside Claude Code, seed in that same turn. Without a seeded watermark,
