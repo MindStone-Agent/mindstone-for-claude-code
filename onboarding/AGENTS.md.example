@@ -106,7 +106,7 @@ All work tracked on the board flows: **Backlog → In Progress → In Dev Review
 ## Destructive actions
 
 Always confirm before:
-- Git `stash` / `reset` / `rebase` / `checkout` (especially when uncommitted work exists)
+- Git `stash` / `reset` / `rebase` / `checkout` / `restore` (especially when uncommitted work exists)
 - Force pushes (especially to shared branches)
 - File or directory deletion
 - Database drops, migrations, or destructive data operations

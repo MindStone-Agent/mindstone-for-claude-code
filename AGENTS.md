@@ -178,11 +178,25 @@ Universal, always-on rules for any agent running this framework. These are behav
 - **No assumptions.** Never present an unverified assumption as a finding. Read the actual code or run the actual check first.
 - **Show the green run.** "Done / deployed / fixed" means the exact artifact the user checks is verified the way *they* verify it — not indirect proof (curl, logs, digests).
 - **Artifact-present ≠ feature-works.** Never claim done/shipped/testable, or advance a board status, on the strength of what you produced (code committed, assets parse, tests green, symbols verified). Only on the feature running end-to-end the way the user exercises it. When you can't verify end-to-end, name the exact gap and leave the status for the user to advance.
-- **Prove the tooling ran.** Gate on real exit codes, not empty error output (a missing binary exits non-zero with no errors = a false pass). Reproduce; don't reason from static cross-branch reads.
+- **Prove the tooling ran.** Gate on real exit codes, not empty error output (a missing binary exits non-zero with no errors = a false pass), and assert the *reason* for the exit, not just the code: a crash and a detection can both exit 1, and a traceback read as a pass is a false pass too. Reproduce; don't reason from static cross-branch reads.
 - **Debug from on-box evidence first.** Read the logs before theorizing; never ship a guess-fix when a log can name the culprit.
 - **No fix without a repro.** When a bug report lacks a reproduction or symptom, get one before designing a fix.
 - **Frontend: read the console before UAT.** Load the page in a real browser and check the console — key errors, 404s, hydration warnings don't show in `tsc`/lint/unit.
 - **Expensive builds: verify end-to-end before you trigger one.** Confirm field names, types, and data flow yourself before saying "fixed, rebuild."
+
+### Checks that can fail
+
+A check that cannot fail is worse than no check, because it reads as coverage. Most rules here began as a check that looked finished, printed green, and measured nothing. Apply them to tests, gates, smoke scripts, monitors and audits alike.
+
+- **Prove a check by making it fail, and watch it fail yourself.** Break what it checks: run it against the code without the fix (a scratch copy, or a worktree with the check copied in), or feed it a known-bad input (for a live system, only a known-bad input, and only with the user's go-ahead; see "Classify a command before you run it"). Never use stash, reset, rebase, checkout or restore in the shared checkout for this, even with confirmation (see "No destructive git near uncommitted work"). See the check go red for the reason it exists (the detection, not a crash; see "Prove the tooling ran"), then run it against the fixed code and see it go green. A repro proves the bug; this proves the check. Checks written to catch a case routinely pass against the broken implementation and look exactly like checks that work.
+- **When a check reports many problems, find out which are real before touching the check.** Open the cases, starting with one, and sort real from false. Loosening a check until it goes green is how matcher defects get built in the first place.
+- **A loose matcher is not just imprecise; it conceals.** A matcher keyed on too little (a first word, a prefix) reports coverage it does not have. Tightening one usually exposes real gaps it was hiding.
+- **An absent or unreadable input is a problem, not a skip.** A check that reports "source not present, skipped" switches itself off the day a path moves, while still reading as coverage. Fail loudly, unless it is a named exclusion (see "State exclusions by name").
+- **State exclusions by name, and print them on every run.** Unprinted, an exclusion and a silent gap look identical in a green result; only the printed one is honest.
+- **After one instance of a defect, run the same test across everything of that kind.** The instance you noticed is rarely the only one (see also "Fix every code path").
+- **Classify a command before you run it.** Decide whether it is read-only or side-effecting. When a test, check or smoke script would change production, post, send, or write to state other people or agents rely on outside your own scratch space, it is a deployment, not a test: check that the command and its target are right instead of running it, and report it as unrun (name the gap, per "Artifact-present ≠ feature-works"). Running it for real needs the user's go-ahead. Work the rest of this file asks for (commits, PRs, channel posts) follows its own rules.
+- **Search before you file or post.** Before filing an issue, card or doc, check whether it already exists; before posting, check where it will land, as whom, and who can read it.
+- **Fix the measurement before the assertion.** Ask what the check actually reads. A freshness check on a field that any run updates, including a manual one, can never see the dead schedule it was written to catch, however hard the assertion is made.
 
 ### Adversarial QA (mandatory for critical outcomes)
 
@@ -214,7 +228,7 @@ Before critical work is declared done — deploys, customer-facing changes, data
 
 - **Never `git add -A` in a shared clone.** Multiple agents share the checkout; stage explicit paths only.
 - **Subagents never commit / push / PR / comment.** They report back; the orchestrator is the sole committer, so one chokepoint enforces every attribution and voice rule.
-- **No destructive git near uncommitted work.** `stash` / `reset` / `rebase` / `checkout` can destroy uncommitted work (e.g. editor state that was never committed). Confirm with the user first.
+- **No destructive git near uncommitted work.** `stash` / `reset` / `rebase` / `checkout` / `restore` can destroy uncommitted work (e.g. editor state that was never committed). Confirm with the user first (and never use them to prove a check, even with confirmation; see "Prove a check by making it fail").
 - **Never enable `core.fsmonitor` / `untrackedCache`.** They can corrupt the index.
 - **Never push to an auto-deploy-prod `main` without explicit, in-the-moment permission.**
 - **Claim-stake before starting shared tickets.** On a multi-agent team, ping the channel before picking up a ticket another agent could grab.

@@ -29,7 +29,7 @@ This changes that. You clone the repo, run one script, and your Claude Code now:
 - **Surfaces relevant past context semantically** — when you ask a question, the orchestrator is given top-K chunks from memory and past transcripts that semantically match what you just asked. Not keyword matching. Actual similarity.
 - **Tracks which memories actually prevented mistakes** (Option D flow at `/checkpoint`) so memory weights sharpen over time.
 - **Survives machine migration** — everything lives in your repo; clone + bootstrap on a new machine and your orchestrator is alive.
-- **Carries engineering-discipline canon** — `AGENTS.md` ships an always-loaded set of universal discipline gates (recon-before-pickup, ticket-fidelity, mandatory independent adversarial QA, verify-before-done, git safety) that bind the orchestrator and every subagent. See the [Verification Loop](https://mindstoneagent.ai/verification-loop) for the gate-by-gate walkthrough and [MS4CC docs](https://mindstoneagent.ai/docs/ms4cc/verification-discipline) for the summary.
+- **Carries engineering-discipline canon** — `AGENTS.md` ships an always-loaded set of universal discipline gates (recon-before-pickup, ticket-fidelity, mandatory independent adversarial QA, verify-before-done, checks that can fail, git safety) that bind the orchestrator and every subagent. See the [Verification Loop](https://mindstoneagent.ai/verification-loop) for the gate-by-gate walkthrough and [MS4CC docs](https://mindstoneagent.ai/docs/ms4cc/verification-discipline) for the summary.
 
 The orchestrator has agency in the MindStone sense: it does work directly when judgment matters, and delegates to subagents when parallelism or context-isolation is the specific tool.
 
