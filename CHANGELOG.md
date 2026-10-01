@@ -9,6 +9,20 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
 
 ## [Unreleased]
 
+### Added
+- **Checks that can fail** (`AGENTS.md`) (#131): a new subsection under Engineering discipline with
+  nine verification rules: prove a check by breaking what it checks; sort a noisy check's
+  findings before loosening it; loose matchers conceal; absent input fails loudly; name
+  exclusions on every run; run the same test across everything of that kind; classify commands
+  before running them; search before you file or post; fix the measurement before the
+  assertion. Proposed by Aegis; adapted.
+
+### Changed
+- **Prove the tooling ran** (`AGENTS.md`) (#131): now also asks for the reason for an exit, not just
+  the code, since a crash and a detection can both exit 1.
+- **No destructive git near uncommitted work** (`AGENTS.md`) (#131): `restore` joins the listed commands;
+  never used to prove a check, even with confirmation.
+
 ## [0.5.0] — 2026-09-27
 
 **Upgrading from 0.4.0.** `main`'s history was rewritten during this cycle to remove private
