@@ -37,10 +37,14 @@ from .config import (
 )
 from .state import (
     activate,
+    current_session_id,
     deactivate,
     is_active,
+    load_session_cursors,
     read_cursor,
+    session_cursor_path,
     write_cursor,
+    write_session_cursors,
 )
 
 
@@ -409,6 +413,10 @@ def cmd_status(_args: argparse.Namespace) -> int:
     print(f"  token path     : {cfg.token_path}")
     cursor_path = cfg.cursor_path
     print(f"  cursor file    : {cursor_path}{' (present)' if cursor_path.exists() else ' (none)'}")
+    sid = current_session_id()
+    if sid:
+        session_path = session_cursor_path(cfg, sid)
+        print(f"  session cursor : {session_path}{' (present)' if session_path.exists() else ' (none yet)'}")
 
     token = cfg.read_token()
     if token:
@@ -484,6 +492,12 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
     Used by the hooks. Outputs JSON-line digest on stdout, one per
     message, plus a final empty line — easy to consume from a hook.
+
+    Inside a Claude Code session (CLAUDE_CODE_SESSION_ID set) the cursor is
+    that session's own, seeded from the shared one, so another open session
+    cannot consume this session's mentions or the other way round. Without a
+    session id the shared cursor is used, as before. Nothing is written unless
+    --advance-cursor is given.
     """
     cfg = _require_config()
     client = _client(cfg)
@@ -493,9 +507,14 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
     import json as _json
 
+    session_id = current_session_id()
+    session_cursors = load_session_cursors(cfg, session_id) if session_id else {}
+
     any_emitted = False
     for slug in channels:
-        cursor = read_cursor(cfg, slug)
+        cursor = session_cursors.get(slug) if session_id else None
+        if cursor is None:
+            cursor = read_cursor(cfg, slug)
         try:
             page = client.list_messages(
                 slug,
@@ -524,8 +543,22 @@ def cmd_fetch(args: argparse.Namespace) -> int:
             )
             any_emitted = True
 
-        if args.advance_cursor and page.head_cursor:
-            write_cursor(cfg, slug, page.head_cursor)
+        # With a session id, advancing also pins the seed on a first fetch that
+        # returned nothing, so later moves of the shared cursor cannot change
+        # what this session sees.
+        new_cursor = page.head_cursor or (cursor if session_id and slug not in session_cursors else None)
+        if args.advance_cursor and new_cursor:
+            if session_id:
+                previous = session_cursors.get(slug)
+                session_cursors[slug] = new_cursor
+                if not write_session_cursors(cfg, session_id, session_cursors):
+                    # Not saved: roll back so the mentions repeat next time.
+                    if previous is None:
+                        session_cursors.pop(slug, None)
+                    else:
+                        session_cursors[slug] = previous
+            else:
+                write_cursor(cfg, slug, new_cursor)
 
     if not any_emitted and args.verbose:
         print(_json.dumps({"info": "no new messages"}), flush=True)

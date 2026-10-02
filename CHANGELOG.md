@@ -64,6 +64,28 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
   trigger still depends on noticing the act"). Proposed by Aegis, from a snapshot step that worked when
   run by hand but did not run for eight weeks because nothing scheduled it.
 
+### Fixed
+- **Synapse mentions no longer vanish when several sessions are open** (`orchestrator/integrations/synapse/state.py`,
+  `cli.py`, `hooks/synapse_user_prompt_submit.py`, `hooks/synapse_session_start.py`) (#137, closes #136): all sessions
+  shared one cursor, so the first session to read a mention advanced it for every other open session, which then never
+  saw it. Each Claude Code session now keeps its own cursor, `~/.synapse/<handle>.cursor.<session_id>.json`. The
+  SessionStart and prompt hooks take the session id from their stdin JSON (`session_id`, or `sessionId`; a bounded read
+  that stops once a whole document has arrived, so a stalled writer cannot hold up a prompt) and the `fetch` CLI takes it
+  from `CLAUDE_CODE_SESSION_ID`. SessionStart pins each configured channel in its own session's file instead of moving
+  the shared cursor, so a second session starting later cannot hide mentions from the first. A channel SessionStart did
+  not pin (a member channel not listed in `channels`, or one with no mentions) is seeded from the shared cursor on that
+  session's first read. A failed cursor write is rolled back so those mentions repeat rather than being lost; session
+  files idle for 14 days are deleted; with no session id the shared cursor is used as before. `fetch` still writes
+  nothing without `--advance-cursor`. Known limits: with no session id, SessionStart and the hooks still move the shared
+  cursor, and the shared seed of an unpinned channel can be stale (older mentions replayed once); the hook and the CLI
+  must agree on the id (`CLAUDE_CODE_SESSION_ID` matched the hook's `session_id` when checked, also after a compaction;
+  with no env var the CLI falls back to the shared cursor); whether the id survives `--resume` and `/clear` is not
+  verified; the hooks and a CLI fetch in one session rewrite the same file without a lock, so at worst a cursor moves back
+  and a mention repeats; pruning runs only from the hooks; SessionStart still lists only the newest `limit_per_channel`
+  mentions (as before), so older unread ones are skipped, and on a resume or compact of the same session it lists them again,
+  so some repeat; the channel name in `channels` must match the server's slug exactly for SessionStart's pin to be found; a prompt whose stdin does not arrive in time falls back to,
+  and writes, the shared cursor for that prompt. Tests: `orchestrator/tests/test_synapse_session_cursors.py`.
+
 ## [0.5.0] — 2026-09-27
 
 **Upgrading from 0.4.0.** `main`'s history was rewritten during this cycle to remove private

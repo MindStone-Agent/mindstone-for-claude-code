@@ -26,6 +26,19 @@ ORCHESTRATOR_DIR = HOOK_FILE.parent.parent
 
 sys.path.insert(0, str(ORCHESTRATOR_DIR.parent))
 
+# Per-session cursors: see integrations/synapse/state.py. Each Claude Code
+# session keeps its own cursor so one session consuming a mention does not hide
+# it from the others. This hook never writes the shared cursor when a session id
+# is present; a prompt whose stdin yields no session id falls back to the shared
+# cursor for that prompt and writes it.
+
+
+def _read_session_id() -> str | None:
+    """The Claude Code session id from this hook's stdin JSON, or None (see state.py)."""
+    from orchestrator.integrations.synapse.state import read_session_id_from_stdin  # type: ignore
+
+    return read_session_id_from_stdin()
+
 
 def _emit(context: str) -> None:
     print(
@@ -50,6 +63,12 @@ def main() -> int:
             read_cursor,
             write_cursor,
         )
+        from orchestrator.integrations.synapse.state import (  # type: ignore
+            load_session_cursors,
+            prune_session_cursors,
+            touch_session_cursors,
+            write_session_cursors,
+        )
 
         cfg = load_config()
         if cfg is None or not is_active(cfg):
@@ -59,6 +78,16 @@ def main() -> int:
             return 0
 
         client = SynapseClient(cfg.base_url, token, timeout=cfg.http_timeout)
+
+        session_id = _read_session_id()
+        session_cursors: dict[str, str] = {}
+        if session_id:
+            session_cursors = load_session_cursors(cfg, session_id)
+            # Touch this session's file on every run so only sessions that have
+            # actually gone unused for SESSION_CURSOR_MAX_AGE_S are pruned, not
+            # a live session that simply received no mentions.
+            touch_session_cursors(cfg, session_id)
+            prune_session_cursors(cfg)
 
         # Channel discovery: ask the server which channels this account is
         # a member of, rather than relying on a hand-maintained `channels`
@@ -93,8 +122,20 @@ def main() -> int:
             return 0
 
         per_channel_blocks: list[str] = []
+        seeded = False
         for slug in slugs_to_poll:
-            cursor = read_cursor(cfg, slug)
+            # This session's own cursor if it has one. Otherwise seed from the
+            # shared cursor and PIN the seed into the session's file, so a later
+            # move of the shared cursor by another writer cannot make this
+            # session skip mentions. How recent the seed is depends on whatever
+            # last advanced the shared cursor (SessionStart, CLI fetch); with no
+            # shared entry the fetch has no lower bound.
+            cursor = session_cursors.get(slug) if session_id else None
+            if cursor is None:
+                cursor = read_cursor(cfg, slug)
+                if session_id and cursor is not None:
+                    session_cursors[slug] = cursor
+                    seeded = True
             try:
                 # Digest scope is controlled by `digest_mentions_only` in
                 # synapse.toml (default True). When True, only messages that
@@ -126,7 +167,21 @@ def main() -> int:
             per_channel_blocks.append("\n".join(block_lines))
 
             if page.head_cursor:
-                write_cursor(cfg, slug, page.head_cursor)
+                if session_id:
+                    previous = session_cursors.get(slug)
+                    session_cursors[slug] = page.head_cursor
+                    if not write_session_cursors(cfg, session_id, session_cursors):
+                        # Not saved: roll back so a later channel's write cannot
+                        # persist this channel's advance, and the mentions repeat.
+                        if previous is None:
+                            session_cursors.pop(slug, None)
+                        else:
+                            session_cursors[slug] = previous
+                else:
+                    write_cursor(cfg, slug, page.head_cursor)
+
+        if session_id and seeded:
+            write_session_cursors(cfg, session_id, session_cursors)
 
         if not per_channel_blocks:
             return 0

@@ -206,7 +206,7 @@ It also **additively merges** the two Synapse hooks (`synapse_session_start.py`,
 /synapse-deactivate      # disable per-turn surfacing
 ```
 
-While active, the `synapse_user_prompt_submit.py` hook surfaces any new `@<handle>` mentions on each turn as a `<synapse-digest>` block alongside semantic recall. The cursor advances on each fetch, so already-surfaced mentions don't repeat.
+While active, the `synapse_user_prompt_submit.py` hook surfaces any new `@<handle>` mentions on each turn as a `<synapse-digest>` block alongside semantic recall. The cursor advances on each fetch, so already-surfaced mentions don't repeat. Each Claude Code session has its own cursor file (`~/.synapse/<handle>.cursor.<session_id>.json`; the SessionStart hook pins each configured channel there, and any other channel is seeded from the shared `<handle>.cursor.json` on the first prompt, so it can replay older mentions once), so several sessions open at once no longer consume each other's mentions; idle session files are deleted after 14 days.
 
 ### Sync `await` primitive ([Synapse#7](https://github.com/R1ngZer0/synapse/issues/7))
 
@@ -240,7 +240,7 @@ orchestrator/
 ├── integrations/synapse/
 │   ├── client.py               # stdlib HTTP wrapper (urllib + tomllib only)
 │   ├── config.py               # load synapse.toml + per-handle token
-│   ├── state.py                # active flag + per-channel cursor (~/.synapse/)
+│   ├── state.py                # active flag + per-channel and per-session cursors (~/.synapse/)
 │   └── cli.py                  # the `python -m orchestrator.integrations.synapse` entry
 └── hooks/
     ├── synapse_session_start.py        # SessionStart greeting digest
