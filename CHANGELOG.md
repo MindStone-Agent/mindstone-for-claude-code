@@ -81,7 +81,9 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
   must agree on the id (`CLAUDE_CODE_SESSION_ID` matched the hook's `session_id` when checked, also after a compaction;
   with no env var the CLI falls back to the shared cursor); whether the id survives `--resume` and `/clear` is not
   verified; the hooks and a CLI fetch in one session rewrite the same file without a lock, so at worst a cursor moves back
-  and a mention repeats; pruning runs only from the hooks; a prompt whose stdin does not arrive in time falls back to,
+  and a mention repeats; pruning runs only from the hooks; SessionStart still lists only the newest `limit_per_channel`
+  mentions (as before), so older unread ones are skipped, and on a resume or compact of the same session it lists them again,
+  so some repeat; the channel name in `channels` must match the server's slug exactly for SessionStart's pin to be found; a prompt whose stdin does not arrive in time falls back to,
   and writes, the shared cursor for that prompt. Tests: `orchestrator/tests/test_synapse_session_cursors.py`.
 
 ## [0.5.0] — 2026-09-27

@@ -206,7 +206,7 @@ It also **additively merges** the two Synapse hooks (`synapse_session_start.py`,
 /synapse-deactivate      # disable per-turn surfacing
 ```
 
-While active, the `synapse_user_prompt_submit.py` hook surfaces any new `@<handle>` mentions on each turn as a `<synapse-digest>` block alongside semantic recall. The cursor advances on each fetch, so already-surfaced mentions don't repeat. Each Claude Code session has its own cursor file (`~/.synapse/<handle>.cursor.<session_id>.json`, seeded from the shared `<handle>.cursor.json`), so several sessions open at once no longer consume each other's mentions (a new session's starting point is the shared cursor, so it can replay older mentions once); idle session files are deleted after 14 days.
+While active, the `synapse_user_prompt_submit.py` hook surfaces any new `@<handle>` mentions on each turn as a `<synapse-digest>` block alongside semantic recall. The cursor advances on each fetch, so already-surfaced mentions don't repeat. Each Claude Code session has its own cursor file (`~/.synapse/<handle>.cursor.<session_id>.json`; the SessionStart hook pins each configured channel there, and any other channel is seeded from the shared `<handle>.cursor.json` on the first prompt, so it can replay older mentions once), so several sessions open at once no longer consume each other's mentions; idle session files are deleted after 14 days.
 
 ### Sync `await` primitive ([Synapse#7](https://github.com/R1ngZer0/synapse/issues/7))
 

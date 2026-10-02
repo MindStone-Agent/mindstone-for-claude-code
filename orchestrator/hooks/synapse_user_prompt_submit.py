@@ -31,6 +31,8 @@ sys.path.insert(0, str(ORCHESTRATOR_DIR.parent))
 # it from the others. This hook never writes the shared cursor when a session id
 # is present; a prompt whose stdin yields no session id falls back to the shared
 # cursor for that prompt and writes it.
+
+
 def _read_session_id() -> str | None:
     """The Claude Code session id from this hook's stdin JSON, or None (see state.py)."""
     from orchestrator.integrations.synapse.state import read_session_id_from_stdin  # type: ignore

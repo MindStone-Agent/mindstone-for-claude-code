@@ -337,6 +337,30 @@ def main() -> int:
         check("no session id: SessionStart writes the shared cursor as before",
               json.loads(scfg.cursor_path.read_text())["ch"] == "2026-01-01T00:00:02")
 
+        print("SessionStart: a failed write is rolled back and other channels' pins are kept")
+        two = types.SimpleNamespace(**{**vars(scfg), "channels": ("ch", "ch2")})
+        pkg.load_config = lambda: two
+        for f in Path(tmp).glob("me.cursor*"):
+            f.unlink()
+        real, calls = S.write_session_cursors, []
+
+        def fail_first(*a, **k):
+            calls.append(1)
+            return False if len(calls) == 1 else real(*a, **k)
+
+        S.write_session_cursors = fail_first
+        run_hook(start_hook, "startF")
+        S.write_session_cursors = real
+        saved = json.loads((Path(tmp) / "me.cursor.startF.json").read_text())
+        check("the channel whose write failed is not persisted by the next channel's write", "ch" not in saved and "ch2" in saved)
+
+        (Path(tmp) / "me.cursor.startG.json").write_text(json.dumps({"ch2": "2026-01-01T00:00:01"}))
+        pkg.load_config = lambda: scfg  # only "ch" is configured for SessionStart
+        run_hook(start_hook, "startG")
+        saved = json.loads((Path(tmp) / "me.cursor.startG.json").read_text())
+        check("a pin for a channel SessionStart does not handle survives it (resume, compact)",
+              saved.get("ch2") == "2026-01-01T00:00:01" and "ch" in saved)
+
         print("fetch pins the seed even when the first fetch returns nothing")
         cfg.cursor_path.write_text(json.dumps({"ch": "2026-01-01T00:00:09"}))
         check("nothing new past the seed", fetch(cfg, stamps, advance=True, session_id="pin1") == [])
