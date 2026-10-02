@@ -66,19 +66,23 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
 
 ### Fixed
 - **Synapse mentions no longer vanish when several sessions are open** (`orchestrator/integrations/synapse/state.py`,
-  `cli.py`, `hooks/synapse_user_prompt_submit.py`) (#TBD): all sessions shared one cursor, so the first session to read
-  a mention advanced it for every other open session, which then never saw it. Each Claude Code session now keeps its
-  own cursor, `~/.synapse/<handle>.cursor.<session_id>.json`, seeded from the shared cursor on its first read. The prompt
-  hook takes the session id from its stdin JSON (a bounded read, so a stalled writer cannot hold up the prompt) and the
-  `fetch` CLI takes it from `CLAUDE_CODE_SESSION_ID`. A failed cursor write is rolled back so those mentions repeat
-  rather than being lost; session files idle for 14 days are deleted; with no session id the shared cursor is used as
-  before. `fetch` still writes nothing without `--advance-cursor`. Known limits: the SessionStart hook still advances
-  only the shared cursor, so a new session's seed can be stale (old mentions replayed once) or ahead (mentions that
-  arrived between its start and first read are not shown to it), the `fetch` CLI and the hook must agree on the id (the hook reads `session_id`, or `sessionId`, from its stdin JSON; the CLI reads
-  `CLAUDE_CODE_SESSION_ID`, which matched the hook's id when checked), and with no env var the CLI falls back to the shared cursor;
-  the id's stability across resume and clear is not verified; the hook and a CLI fetch in one session rewrite the same file
-  without a lock, so at worst a cursor moves back and a mention repeats; pruning runs only from the hook; and a prompt whose
-  stdin does not arrive in time falls back to, and writes, the shared cursor for that prompt. Tests: `orchestrator/tests/test_synapse_session_cursors.py`.
+  `cli.py`, `hooks/synapse_user_prompt_submit.py`, `hooks/synapse_session_start.py`) (#137, closes #136): all sessions
+  shared one cursor, so the first session to read a mention advanced it for every other open session, which then never
+  saw it. Each Claude Code session now keeps its own cursor, `~/.synapse/<handle>.cursor.<session_id>.json`. The
+  SessionStart and prompt hooks take the session id from their stdin JSON (`session_id`, or `sessionId`; a bounded read
+  that stops once a whole document has arrived, so a stalled writer cannot hold up a prompt) and the `fetch` CLI takes it
+  from `CLAUDE_CODE_SESSION_ID`. SessionStart pins each configured channel in its own session's file instead of moving
+  the shared cursor, so a second session starting later cannot hide mentions from the first. A channel SessionStart did
+  not pin (a member channel not listed in `channels`, or one with no mentions) is seeded from the shared cursor on that
+  session's first read. A failed cursor write is rolled back so those mentions repeat rather than being lost; session
+  files idle for 14 days are deleted; with no session id the shared cursor is used as before. `fetch` still writes
+  nothing without `--advance-cursor`. Known limits: with no session id, SessionStart and the hooks still move the shared
+  cursor, and the shared seed of an unpinned channel can be stale (older mentions replayed once); the hook and the CLI
+  must agree on the id (`CLAUDE_CODE_SESSION_ID` matched the hook's `session_id` when checked, also after a compaction;
+  with no env var the CLI falls back to the shared cursor); whether the id survives `--resume` and `/clear` is not
+  verified; the hooks and a CLI fetch in one session rewrite the same file without a lock, so at worst a cursor moves back
+  and a mention repeats; pruning runs only from the hooks; a prompt whose stdin does not arrive in time falls back to,
+  and writes, the shared cursor for that prompt. Tests: `orchestrator/tests/test_synapse_session_cursors.py`.
 
 ## [0.5.0] — 2026-09-27
 

@@ -17,6 +17,7 @@ import glob
 import json
 import os
 import re
+import select
 import sys
 import time
 from pathlib import Path
@@ -84,14 +85,13 @@ def write_cursor(cfg: SynapseConfig, channel: str, cursor: str) -> None:
 # <handle>.cursor.<session_id>.json, next to the shared one.
 #
 # The shared cursor stays the fallback when no session id is available, and the
-# seed for a session's first read of a channel; the seed is pinned into the
-# session's own file on the first write, so later moves of the shared cursor
-# cannot change what that session sees. With a session id present, the callers
-# in this package never write the shared cursor. The shared cursor is still
-# advanced by the SessionStart hook, so how recent a seed is depends on that: a
-# seed can be stale (old mentions are replayed once; with no shared entry the
-# first fetch has no lower bound) or ahead (mentions that arrived between this
-# session's start and its first read are never shown to it).
+# seed for a session's first read of a channel its SessionStart did not pin; the
+# seed is pinned into the session's own file on the first write, so later moves
+# of the shared cursor cannot change what that session sees. With a session id
+# present, no caller in this package writes the shared cursor: SessionStart pins
+# the session's own file too. A seed from the shared cursor can therefore be
+# stale (older mentions are replayed once; with no shared entry the first fetch
+# has no lower bound).
 #
 # Cursor files unused for SESSION_CURSOR_MAX_AGE_S are deleted.
 
@@ -186,3 +186,49 @@ def prune_session_cursors(cfg: SynapseConfig) -> None:
                     p.unlink()
             except OSError:
                 pass
+
+
+STDIN_WAIT_S = 0.5
+
+
+def read_session_id_from_stdin(wait_s: float = STDIN_WAIT_S) -> str | None:
+    """Return the Claude Code session id from a hook's stdin JSON, or None.
+
+    None (terminal, empty, not JSON, an incomplete payload, or an unsafe id)
+    makes the caller fall back to the shared cursor, which is the pre-existing
+    behaviour. Reads what the harness has written for at most wait_s in total,
+    and stops as soon as a whole JSON document has arrived, so a writer that
+    never closes the pipe cannot stall the prompt; a payload still incomplete
+    when the wait ends cannot be parsed and also falls back.
+    """
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return None
+        fd = sys.stdin.fileno()
+        deadline = time.monotonic() + wait_s
+        chunks: list[bytes] = []
+        data = None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if not ready:
+                break
+            chunk = os.read(fd, 65536)
+            if not chunk:  # EOF: the writer closed the pipe
+                break
+            chunks.append(chunk)
+            try:
+                data = json.loads(b"".join(chunks).decode("utf-8"))
+                break
+            except ValueError:  # incomplete so far (or a split multibyte character)
+                continue
+        if data is None:
+            data = json.loads(b"".join(chunks).decode("utf-8") or "{}")
+    except (OSError, ValueError):  # includes UnicodeDecodeError and JSONDecodeError
+        return None
+    if not isinstance(data, dict):
+        return None
+    # The other hooks accept both spellings.
+    return valid_session_id(data.get("session_id")) or valid_session_id(data.get("sessionId"))

@@ -17,10 +17,7 @@ trouble all → exit 0 with no output. Never break the prompt.
 from __future__ import annotations
 
 import json
-import os
-import select
 import sys
-import time
 import traceback
 from pathlib import Path
 
@@ -34,54 +31,11 @@ sys.path.insert(0, str(ORCHESTRATOR_DIR.parent))
 # it from the others. This hook never writes the shared cursor when a session id
 # is present; a prompt whose stdin yields no session id falls back to the shared
 # cursor for that prompt and writes it.
-STDIN_WAIT_S = 0.5
-
-
 def _read_session_id() -> str | None:
-    """Return the Claude Code session id from the hook's stdin JSON, or None.
+    """The Claude Code session id from this hook's stdin JSON, or None (see state.py)."""
+    from orchestrator.integrations.synapse.state import read_session_id_from_stdin  # type: ignore
 
-    None (terminal, empty, not JSON, an incomplete payload, or an unsafe id)
-    makes the hook fall back to the shared cursor, which is the pre-existing
-    behaviour. Reads what the harness has written for at most STDIN_WAIT_S in
-    total and does not wait for EOF, so a writer that never closes the pipe
-    cannot stall the prompt; a payload still incomplete when the wait ends
-    cannot be parsed and also falls back.
-    """
-    try:
-        if sys.stdin is None or sys.stdin.isatty():
-            return None
-        fd = sys.stdin.fileno()
-        deadline = time.monotonic() + STDIN_WAIT_S
-        chunks: list[bytes] = []
-        data = None
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            ready, _, _ = select.select([fd], [], [], remaining)
-            if not ready:
-                break
-            chunk = os.read(fd, 65536)
-            if not chunk:  # EOF: the writer closed the pipe
-                break
-            chunks.append(chunk)
-            try:
-                # Stop as soon as a whole document has arrived, so a writer that
-                # leaves the pipe open does not cost the full wait on every prompt.
-                data = json.loads(b"".join(chunks).decode("utf-8"))
-                break
-            except ValueError:  # incomplete so far (or a split multibyte character)
-                continue
-        if data is None:
-            data = json.loads(b"".join(chunks).decode("utf-8") or "{}")
-    except (OSError, ValueError):  # includes UnicodeDecodeError and JSONDecodeError
-        return None
-    from orchestrator.integrations.synapse.state import valid_session_id  # type: ignore
-
-    if not isinstance(data, dict):
-        return None
-    # The other hooks accept both spellings.
-    return valid_session_id(data.get("session_id")) or valid_session_id(data.get("sessionId"))
+    return read_session_id_from_stdin()
 
 
 def _emit(context: str) -> None:

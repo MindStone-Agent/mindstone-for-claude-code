@@ -290,6 +290,53 @@ def main() -> int:
         prompt("hookP")
         check("a prompt touches the session file, so a live session is not pruned", pinned.exists())
 
+        print("SessionStart: a later session start must not hide mentions from an open session")
+        spec2 = importlib.util.spec_from_file_location("start_hook", ROOT / "orchestrator" / "hooks" / "synapse_session_start.py")
+        start_hook = importlib.util.module_from_spec(spec2)
+        spec2.loader.exec_module(start_hook)
+        live = ["2026-01-01T00:00:01"]
+
+        class LiveClient(FakeClient):
+            def __init__(self, *a, **k):
+                super().__init__(live)
+
+            def list_channels(self):
+                return [{"slug": "ch"}]
+
+        pkg.SynapseClient = LiveClient
+        scfg = types.SimpleNamespace(**{**vars(hcfg), "channels": ("ch",)})
+        pkg.load_config = lambda: scfg
+        for f in Path(tmp).glob("me.cursor*"):
+            f.unlink()
+
+        def run_hook(module, session_id):
+            payload = json.dumps({"session_id": session_id} if session_id else {}).encode()
+            r, w = os.pipe()
+            os.write(w, payload)
+            os.close(w)
+            old_stdin, sys.stdin = sys.stdin, os.fdopen(r, "r")
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    module.main()
+            finally:
+                sys.stdin.close()
+                sys.stdin = old_stdin
+            out = buf.getvalue().strip()
+            return json.loads(out)["hookSpecificOutput"]["additionalContext"].count("- [") if out else 0
+
+        check("session A starts and is shown the existing mention", run_hook(start_hook, "startA") == 1)
+        live.append("2026-01-01T00:00:02")  # a mention arrives between the two starts
+        check("session B starts and is shown both", run_hook(start_hook, "startB") == 2)
+        check("neither start wrote the shared cursor", not scfg.cursor_path.exists())
+        check("A's first prompt still shows the mention that arrived between the starts", run_hook(hook, "startA") == 1)
+        check("B's first prompt shows nothing new", run_hook(hook, "startB") == 0)
+        for f in Path(tmp).glob("me.cursor*"):
+            f.unlink()
+        run_hook(start_hook, None)
+        check("no session id: SessionStart writes the shared cursor as before",
+              json.loads(scfg.cursor_path.read_text())["ch"] == "2026-01-01T00:00:02")
+
         print("fetch pins the seed even when the first fetch returns nothing")
         cfg.cursor_path.write_text(json.dumps({"ch": "2026-01-01T00:00:09"}))
         check("nothing new past the seed", fetch(cfg, stamps, advance=True, session_id="pin1") == [])

@@ -51,6 +51,11 @@ def main() -> int:
             load_config,
             write_cursor,
         )
+        from orchestrator.integrations.synapse.state import (  # type: ignore
+            load_session_cursors,
+            read_session_id_from_stdin,
+            write_session_cursors,
+        )
 
         cfg = load_config()
         if cfg is None:
@@ -64,6 +69,13 @@ def main() -> int:
             return 0
 
         client = SynapseClient(cfg.base_url, token, timeout=cfg.http_timeout)
+
+        # With a session id, advance THIS session's cursor, not the shared one:
+        # moving the shared cursor here would hide mentions from every other
+        # open session that has not read its first prompt yet. Without one, the
+        # shared cursor is advanced as before.
+        session_id = read_session_id_from_stdin()
+        session_cursors = load_session_cursors(cfg, session_id) if session_id else {}
 
         lines: list[str] = []
         per_channel_blocks: list[str] = []
@@ -94,7 +106,17 @@ def main() -> int:
             # Advance cursor so subsequent UserPromptSubmit hooks don't
             # re-surface these messages.
             if page.head_cursor:
-                write_cursor(cfg, slug, page.head_cursor)
+                if session_id:
+                    previous = session_cursors.get(slug)
+                    session_cursors[slug] = page.head_cursor
+                    if not write_session_cursors(cfg, session_id, session_cursors):
+                        # Not saved: roll back so the mentions repeat.
+                        if previous is None:
+                            session_cursors.pop(slug, None)
+                        else:
+                            session_cursors[slug] = previous
+                else:
+                    write_cursor(cfg, slug, page.head_cursor)
 
         if not per_channel_blocks:
             return 0
