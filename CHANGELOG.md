@@ -22,7 +22,7 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
   the code, since a crash and a detection can both exit 1.
 - **No destructive git near uncommitted work** (`AGENTS.md`) (#131): `restore` joins the listed commands;
   never used to prove a check, even with confirmation.
-- **Scope of Checks that can fail** (`AGENTS.md`): the subsection now applies to any output you are
+- **Scope of Checks that can fail** (`AGENTS.md`) (#132): the subsection now applies to any output you are
   about to use to support a claim or decide what to do, with an illustrative list of examples.
   Second-hand outputs (a recalled figure, a summary of a result, a reported result) are re-derived from the
   source; primary sources such as logs remain the source for what they record, not proof the artifact works; reviewer verdicts stay under Adversarial
