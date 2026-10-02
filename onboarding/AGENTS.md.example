@@ -85,17 +85,18 @@ The standard cycle:
 
 ### GitHub Project Board workflow
 
-All work tracked on the board flows: **Backlog → In Progress → In Dev Review → Ready for UAT → Done**.
+All work tracked on the board flows: **Backlog → Selected for Development → In Progress → In Dev Review → Ready for UAT → Done**. If TestFlight is installed (`$TESTFLIGHT_HOME`), its SDLC standard (`docs/SDLC_AND_ARCHITECTURE_STANDARDS.md`, §8, work tracking) is the binding text and this is a summary. Without TestFlight, these rules stand on their own.
 
-- Move to **In Progress** before starting work.
-- Move to **In Dev Review** when tests pass locally and the code is ready for build verification.
-- Move to **Ready for UAT** after deploy is confirmed on the target environment. Comment on the card with:
+- Only the human product owner, or a designee named on the board, selects work. An agent acting in a product-owner role does not, unless it is the designee named on the board. A designee selects only items whose "Done when" the product owner has approved on record. Work starts only on selected items; if in doubt, ask the product owner.
+- Every item carries a **"Done when"** section (observable, testable statements of what a user can see or do when it works; for an item that ships nothing, such as a spike, the deliverable it produces), and testing is measured against it. An item without one is not selected.
+- Move to **In Progress** when work starts, to **In Dev Review** when the PR is open, and to **Ready for UAT** when the tester can test it (deployed to beta or staging; where a repo has neither, a build the tester can run; where there is nothing to deploy or build, the open PR once its code review has passed). No item skips a state forward, except a hotfix the product owner OKs and an item that ships nothing (which goes from In Progress to Done). An item sent back from review or testing returns to In Progress. When moving to Ready for UAT, comment on the card with:
   - Root cause (what was broken and why)
   - Fix applied (what was changed)
   - Files modified (list)
-  - Verification (how it was tested)
-- **Never auto-close.** No `Closes #X` / `Fixes #X` in commit messages. Reference issues but let humans move them to Done.
-- **Done is locked.** Orchestrators never touch cards in Done.
+  - Verification (how it was tested, against "Done when")
+- **Done** is the tester's or product owner's move. An agent moves a forgotten item to Done only when someone who did not author the work has passed it against its "Done when" (for example, a tester's pass comment or a recorded UAT pass) and it is done for its repo: live in production with its post-deploy check passed, or, where nothing deploys, merged to main and released, or, for an item that ships nothing, its deliverable exists. A merge or green tests are not that proof. The agent comments with a link to that proof and names the "Done when" statements checked.
+- Items are never auto-closed: no closing keywords (`Closes #X` / `Fixes #X`), and the board's automatic Done workflows are turned off. With TestFlight installed, its release-promotion rule is the only exception.
+- **Done is locked.** Once a card is in Done, orchestrators don't change it, except to close its issue or to take items closed as not planned or as duplicates out of Done. If a production deploy or its post-deploy check fails, the DevOps owner reopens the items it shipped and returns them to Ready for UAT.
 
 ## Debugging and testing rules
 

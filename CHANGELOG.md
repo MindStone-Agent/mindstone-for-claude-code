@@ -18,6 +18,25 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
   assertion. Proposed by Aegis; adapted.
 
 ### Changed
+- **Board workflow in the onboarding template** (`onboarding/AGENTS.md.example`) (#135): adds the
+  Selected for Development state; only the human product owner or a designee named on the board selects
+  work, a designee only items whose "Done when" the product owner has approved on record, and work starts
+  only on selected items; every item carries a "Done when", and one without it is not selected. No item
+  skips a state forward, except a hotfix the product owner OKs and an item that ships nothing. An item
+  sent back from review or testing returns to In Progress. In Dev Review now starts when the PR is open (was: tests pass
+  locally, ready for build verification). Ready for UAT now means the tester can test it (on beta or
+  staging; otherwise a build the tester can run, or, where there is nothing to deploy or build, the open
+  PR once its code review has passed) (was: deploy confirmed on the target environment), and its Verification note is
+  against "Done when". Done is now the tester's or product owner's move (was: any human); an agent may
+  move a forgotten item to Done on a non-author pass against "Done when", with a comment linking the
+  proof and naming the "Done when" statements checked (a merge or green tests are not proof), once it is done for its repo: live in production with its post-deploy check passed, merged to main and
+  released where nothing deploys, or its deliverable exists for an item that ships nothing. The
+  never-auto-close rule now bans closing keywords anywhere (was: in commit messages) and turns off the
+  board's automatic Done workflows; with TestFlight installed, its release-promotion rule is the only
+  exception. Done stays locked apart from closing the issue and taking not-planned or duplicate items
+  out (was: orchestrators never touch Done); if a production deploy or its post-deploy check fails, the
+  DevOps owner reopens the items that deploy shipped and returns them to Ready for UAT. With TestFlight
+  installed, its SDLC standard §8 is the binding text.
 - **Prove the tooling ran** (`AGENTS.md`) (#131): now also asks for the reason for an exit, not just
   the code, since a crash and a detection can both exit 1.
 - **No destructive git near uncommitted work** (`AGENTS.md`) (#131): `restore` joins the listed commands;
