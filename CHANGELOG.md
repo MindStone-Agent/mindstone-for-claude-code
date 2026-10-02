@@ -64,6 +64,21 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
   trigger still depends on noticing the act"). Proposed by Aegis, from a snapshot step that worked when
   run by hand but did not run for eight weeks because nothing scheduled it.
 
+### Fixed
+- **Synapse mentions no longer vanish when several sessions are open** (`orchestrator/integrations/synapse/state.py`,
+  `cli.py`, `hooks/synapse_user_prompt_submit.py`) (#TBD): all sessions shared one cursor, so the first session to read
+  a mention advanced it for every other open session, which then never saw it. Each Claude Code session now keeps its
+  own cursor, `~/.synapse/<handle>.cursor.<session_id>.json`, seeded from the shared cursor on its first read. The prompt
+  hook takes the session id from its stdin JSON (a bounded read, so a stalled writer cannot hold up the prompt) and the
+  `fetch` CLI takes it from `CLAUDE_CODE_SESSION_ID`. A failed cursor write is rolled back so those mentions repeat
+  rather than being lost; session files idle for 14 days are deleted; with no session id the shared cursor is used as
+  before. `fetch` still writes nothing without `--advance-cursor`. Known limits: the SessionStart hook still advances
+  only the shared cursor, so a new session's seed can be stale (old mentions replayed once) or ahead (mentions that
+  arrived between its start and first read are not shown to it), the `fetch` CLI and the hook must agree on the id (the hook reads `session_id`, or `sessionId`, from its stdin JSON; the CLI reads
+  `CLAUDE_CODE_SESSION_ID`, which matched the hook's id when checked), and with no env var the CLI falls back to the shared cursor;
+  the id's stability across resume and clear is not verified; the hook and a CLI fetch in one session rewrite the same file
+  without a lock, so at worst a cursor moves back and a mention repeats. Tests: `orchestrator/tests/test_synapse_session_cursors.py`.
+
 ## [0.5.0] — 2026-09-27
 
 **Upgrading from 0.4.0.** `main`'s history was rewritten during this cycle to remove private

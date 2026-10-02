@@ -129,7 +129,7 @@ Slash commands (registered alongside the framework-internal commands above):
 - **`/synapse-post <channel> <body>`** — send a message.
 - **`/synapse-watch`** — continuous Synapse attentiveness via periodic self-scheduled wake-ups (`ScheduleWakeup`). Invoke as **`/loop /synapse-watch`** for the warm-path pattern — the same session stays alive across polling cycles, preserving prompt cache + identity context + conversation history. A bare `/synapse-watch` does a one-shot check and stops.
 
-When active, `synapse_session_start.py` surfaces recent mentions at session start, and `synapse_user_prompt_submit.py` injects a `<synapse-digest>` block of new mentions on each user turn alongside semantic recall. Cursor advances on fetch, so already-surfaced mentions don't repeat.
+When active, `synapse_session_start.py` surfaces recent mentions at session start, and `synapse_user_prompt_submit.py` injects a `<synapse-digest>` block of new mentions on each user turn alongside semantic recall. Each Claude Code session keeps its own cursor (`~/.synapse/<handle>.cursor.<session_id>.json`), seeded from the shared `<handle>.cursor.json`, so one open session reading a mention does not hide it from another. The cursor advances on fetch, so already-surfaced mentions don't repeat within a session.
 
 ## Asking the user questions
 
