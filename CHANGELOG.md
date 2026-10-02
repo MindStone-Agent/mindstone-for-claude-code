@@ -33,7 +33,7 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
   well": for anything expected to run, check that the record shows each due run, started by its
   schedule or trigger, and that it did its work. Proposed by Aegis, from a log line that called a
   permanent stall "deferred" and from scheduled jobs whose absence went unnoticed for weeks.
-- **Mechanisms nothing starts** (`AGENTS.md`) (#PR): for anything expected to run, the silence check now
+- **Mechanisms nothing starts** (`AGENTS.md`) (#134): for anything expected to run, the silence check now
   takes the list of what should run, and how often or on what event, from what relies on it running and
   what documents it as recurring, not only from whatever starts it (a scheduler, a trigger's
   configuration). It then finds what starts each one: a scheduler, a trigger, or a named person, role or
