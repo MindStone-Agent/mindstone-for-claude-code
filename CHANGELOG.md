@@ -77,7 +77,8 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
   arrived between its start and first read are not shown to it), the `fetch` CLI and the hook must agree on the id (the hook reads `session_id`, or `sessionId`, from its stdin JSON; the CLI reads
   `CLAUDE_CODE_SESSION_ID`, which matched the hook's id when checked), and with no env var the CLI falls back to the shared cursor;
   the id's stability across resume and clear is not verified; the hook and a CLI fetch in one session rewrite the same file
-  without a lock, so at worst a cursor moves back and a mention repeats. Tests: `orchestrator/tests/test_synapse_session_cursors.py`.
+  without a lock, so at worst a cursor moves back and a mention repeats; pruning runs only from the hook; and a prompt whose
+  stdin does not arrive in time falls back to, and writes, the shared cursor for that prompt. Tests: `orchestrator/tests/test_synapse_session_cursors.py`.
 
 ## [0.5.0] — 2026-09-27
 

@@ -81,7 +81,7 @@ def _read_session_id() -> str | None:
     if not isinstance(data, dict):
         return None
     # The other hooks accept both spellings.
-    return valid_session_id(data.get("session_id") or data.get("sessionId"))
+    return valid_session_id(data.get("session_id")) or valid_session_id(data.get("sessionId"))
 
 
 def _emit(context: str) -> None:

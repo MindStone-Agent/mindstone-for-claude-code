@@ -219,6 +219,8 @@ def main() -> int:
         for w in held[1:]:
             os.close(w)
         check("sessionId is accepted too", with_stdin(closed(b'{"sessionId": "camel-1"}'))[0] == "camel-1")
+        check("an invalid session_id does not mask a valid sessionId",
+              with_stdin(closed(b'{"session_id": 5, "sessionId": "camel-2"}'))[0] == "camel-2")
 
         print("hook main(): two sessions, shared cursor untouched")
         CONFIG.HOME_SYNAPSE = Path(tmp)
@@ -276,6 +278,17 @@ def main() -> int:
         prompt("hookE")
         S.write_session_cursors = real
         check("only the channel whose write failed repeats", prompt("hookE") == 2)
+
+        print("hook main(): the seed is pinned and the file is kept alive")
+        hcfg.cursor_path.write_text(json.dumps({"ch": "2026-01-01T00:00:09", "ch2": "2026-01-01T00:00:09"}))
+        check("nothing new past the seed", prompt("hookP") == 0)
+        hcfg.cursor_path.write_text(json.dumps({"ch": "2026-01-01T00:00:00", "ch2": "2026-01-01T00:00:00"}))
+        check("moving the shared cursor later does not change a pinned session", prompt("hookP") == 0)
+        pinned = Path(tmp) / "me.cursor.hookP.json"
+        aged = time.time() - S.SESSION_CURSOR_MAX_AGE_S - 3600
+        os.utime(pinned, (aged, aged))
+        prompt("hookP")
+        check("a prompt touches the session file, so a live session is not pruned", pinned.exists())
 
         print("fetch pins the seed even when the first fetch returns nothing")
         cfg.cursor_path.write_text(json.dumps({"ch": "2026-01-01T00:00:09"}))
