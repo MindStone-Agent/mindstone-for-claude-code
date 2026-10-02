@@ -33,6 +33,17 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
   well": for anything expected to run, check that the record shows each due run, started by its
   schedule or trigger, and that it did its work. Proposed by Aegis, from a log line that called a
   permanent stall "deferred" and from scheduled jobs whose absence went unnoticed for weeks.
+- **Mechanisms nothing starts** (`AGENTS.md`) (#134): for anything expected to run, the silence check now
+  takes the list of what should run, and how often or on what event, from what relies on it running and
+  what documents it as recurring, not only from whatever starts it (a scheduler, a trigger's
+  configuration). It then finds what starts each one: a scheduler, a trigger, or a named person, role or
+  agent assigned by a rota or standing instruction. If nothing does, that is a failure, even if someone
+  runs it by hand now and then and even if no due run has been missed yet. A due run now counts when it
+  was "started by whatever is meant to start it" (was "by its schedule or trigger"), so rota and
+  instruction-driven duties are covered. The paragraph's closing limit now reads "The scope rule at the
+  start of this paragraph still depends on noticing that you are relying on an output" (was "This
+  trigger still depends on noticing the act"). Proposed by Aegis, from a snapshot step that worked when
+  run by hand but did not run for eight weeks because nothing scheduled it.
 
 ## [0.5.0] — 2026-09-27
 
