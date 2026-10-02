@@ -27,7 +27,7 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
   Second-hand outputs (a recalled figure, a summary of a result, a reported result) are re-derived from the
   source; primary sources such as logs remain the source for what they record, not proof the artifact works; reviewer verdicts stay under Adversarial
   QA. The text states its own limit. Proposed by Aegis.
-- **Log framing and silence** (`AGENTS.md`): a log is the source for what it records, but its
+- **Log framing and silence** (`AGENTS.md`) (#133): a log is the source for what it records, but its
   framing ("deferred", "retried", "skipped") is a claim; when the meaning is what you would cite,
   re-derive it from the mechanism that would carry out the action. A log's silence is not "all is
   well": for anything expected to run, check that the record shows each due run, started by its
