@@ -18,7 +18,7 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
   assertion. Proposed by Aegis; adapted.
 
 ### Changed
-- **Board workflow in the onboarding template** (`onboarding/AGENTS.md.example`) (#PR): adds the
+- **Board workflow in the onboarding template** (`onboarding/AGENTS.md.example`) (#135): adds the
   Selected for Development state; only the human product owner or a designee named on the board selects
   work, a designee only items whose "Done when" the product owner has approved on record, and work starts
   only on selected items; every item carries a "Done when", and one without it is not selected. No item
