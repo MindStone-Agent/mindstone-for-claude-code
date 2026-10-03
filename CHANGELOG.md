@@ -79,8 +79,9 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
   nothing without `--advance-cursor`. Known limits: with no session id, SessionStart and the hooks still move the shared
   cursor, and the shared seed of an unpinned channel can be stale (older mentions replayed once); the hook and the CLI
   must agree on the id (`CLAUDE_CODE_SESSION_ID` matched the hook's `session_id` when checked, also after a compaction;
-  with no env var the CLI falls back to the shared cursor); whether the id survives `--resume` and `/clear` is not
-  verified; the hooks and a CLI fetch in one session rewrite the same file without a lock, so at worst a cursor moves back
+  with no env var the CLI falls back to the shared cursor); after a Claude Code resume, `CLAUDE_CODE_SESSION_ID` in the Bash tool keeps the original id while the hooks
+  get the new one, so the `fetch` CLI and the hooks use different cursor files: expect a mention to surface twice, never to be
+  lost (observed once, #138); whether the id survives `/clear` is not verified; the hooks and a CLI fetch in one session rewrite the same file without a lock, so at worst a cursor moves back
   and a mention repeats; pruning runs only from the hooks; SessionStart still lists only the newest `limit_per_channel`
   mentions (as before), so older unread ones are skipped, and on a resume or compact of the same session it lists them again,
   so some repeat; the channel name in `channels` must match the server's slug exactly for SessionStart's pin to be found; a prompt whose stdin does not arrive in time falls back to,
