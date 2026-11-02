@@ -158,9 +158,18 @@ def classify(sec: Section, head_end: int, tail_start: int, text: str) -> None:
         sec.status = STATUS_BODY
 
 
-def build_report(text: str, limit: int, head_ratio: float, tail_ratio: float) -> dict:
-    head_end = int(limit * head_ratio)
-    tail_len = int(limit * tail_ratio)
+def build_report(
+    text: str,
+    limit: int,
+    head_ratio: float = 0.70,
+    tail_ratio: float = 0.20,
+    head_chars: int | None = None,
+    tail_chars: int | None = None,
+) -> dict:
+    # Absolute counts win when given: a harness that reports its own head and tail should be
+    # measured, not approximated by a fraction that happens to work on two boxes.
+    head_end = head_chars if head_chars is not None else int(limit * head_ratio)
+    tail_len = tail_chars if tail_chars is not None else int(limit * tail_ratio)
     tail_start = max(head_end, len(text) - tail_len)
     window = head_end + tail_len
 
@@ -200,6 +209,7 @@ def build_report(text: str, limit: int, head_ratio: float, tail_ratio: float) ->
             "head_end": head_end,
             "tail_start": tail_start,
             "delivered_capacity": window,
+            "unused_of_limit": max(0, limit - window),
             "note": "head+tail is the usable window; limit - (head+tail) is never filled",
         },
         "not_delivered": {
@@ -283,6 +293,10 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=20000, help="harness character limit (default 20000)")
     ap.add_argument("--head-ratio", type=float, default=0.70, help="head fraction of limit (default 0.70)")
     ap.add_argument("--tail-ratio", type=float, default=0.20, help="tail fraction of limit (default 0.20)")
+    ap.add_argument("--head", type=int, default=None,
+                    help="absolute head chars, overriding --head-ratio. Measure this, do not assume it.")
+    ap.add_argument("--tail", type=int, default=None,
+                    help="absolute tail chars, overriding --tail-ratio")
     ap.add_argument("--json", action="store_true", help="emit JSON")
     ap.add_argument("--rules-only", action="store_true", help="skip the per-section listing")
     ap.add_argument("--rules-pattern", default=None,
@@ -305,7 +319,29 @@ def main() -> int:
     if args.rules_pattern:
         global RULE_TITLE_RE
         RULE_TITLE_RE = re.compile(args.rules_pattern, re.I)
-    rep = build_report(text, args.limit, args.head_ratio, args.tail_ratio)
+
+    # Absolute values win over ratios. A ratio that is right on two boxes and wrong on the
+    # fifth produces a table that reconciles internally and measures the wrong thing, which
+    # is the failure mode this whole exercise exists to catch. If the harness reports its own
+    # head and tail, pass those with --head and --tail rather than guessing a fraction.
+    head_chars = args.head if args.head is not None else int(args.limit * args.head_ratio)
+    tail_chars = args.tail if args.tail is not None else int(args.limit * args.tail_ratio)
+    if head_chars + tail_chars > args.limit:
+        print(
+            f"bootstrap-report: --head {head_chars:,} + --tail {tail_chars:,} "
+            f"exceeds --limit {args.limit:,}",
+            file=sys.stderr,
+        )
+        return 2
+
+    rep = build_report(
+        text,
+        args.limit,
+        args.head_ratio,
+        args.tail_ratio,
+        head_chars=head_chars,
+        tail_chars=tail_chars,
+    )
     rep["file"]["path"] = str(path)
 
     if args.json:
