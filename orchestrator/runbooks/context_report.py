@@ -94,29 +94,53 @@ def instruction_files(atts: list[dict]) -> list[str]:
 
 
 def memory_index(mem: Path, atts: list[dict]) -> str:
+    """The index in --memory-dir: its size on disk, and how (and whether) it reached the model.
+
+    Claude Code injects its own auto-memory MEMORY.md as an instruction file (cut at about 25 KB). An
+    MS4CC index elsewhere only reaches the model inside the SessionStart hook output. Both are
+    reported, each with the path it was measured on.
+    """
     idx = mem / "MEMORY.md"
     print("2. MEMORY.md")
-    if not idx.exists():
-        print("   none in the memory dir")
-        return ""
-    disk = idx.read_text(errors="replace")
-    print(f"   on disk: {disk.count(chr(10)) + 1} lines, {kb(len(disk.encode()))}")
-    last = None
+    instr: list[tuple[str, str]] = []
     for o in atts:
         a = o["attachment"]
         if a.get("type") == "instructions":
-            for fi in a.get("files", []):
-                if str(fi.get("path", "")).endswith("/MEMORY.md"):
-                    last = fi.get("content", "")
-    if last is None:
-        print("   delivered: not found in this transcript")
-        return ""
-    cut = CUT.search(last)
-    if cut:
-        print(f"   delivered: lines 1-{int(cut.group(3)) - 1} of {cut.group(2)} ({cut.group(1)} cut off); {kb(len(last.encode()))} injected")
+            instr = [(str(fi.get("path", "")), str(fi.get("content", ""))) for fi in a.get("files", []) if str(fi.get("path", "")).endswith("/MEMORY.md")]
+    delivered_text = ""
+    if not idx.exists():
+        print(f"   {idx}: none")
     else:
-        print(f"   delivered: whole file, {kb(len(last.encode()))} injected")
-    return last
+        disk = idx.read_text(errors="replace")
+        print(f"   {idx}: {disk.count(chr(10)) + 1} lines, {kb(len(disk.encode()))} on disk")
+        same = [(pth, c) for pth, c in instr if os.path.realpath(pth) == os.path.realpath(idx)]
+        if same:
+            delivered_text = same[-1][1]
+            cut = CUT.search(delivered_text)
+            how = (f"lines 1-{int(cut.group(3)) - 1} of {cut.group(2)} ({cut.group(1)} cut off)" if cut else "whole file")
+            print(f"     delivered as a Claude Code instruction file: {how}, {kb(len(delivered_text.encode()))} injected")
+        else:
+            # Look for the index's first substantial line in the SessionStart output the model saw.
+            probe = next((l.strip() for l in disk.splitlines() if len(l.strip()) > 40 and not l.startswith("---")), "")
+            starts = [o["attachment"] for o in atts if o["attachment"].get("type") == "hook_additional_context" and o["attachment"].get("hookEvent") == "SessionStart"]
+            if not starts:
+                print("     not delivered as an instruction file, and no SessionStart output in this transcript")
+            else:
+                p_, size, text = delivered_size(starts[-1].get("content"))
+                seen = probe and probe in text
+                if p_:
+                    print(f"     not an instruction file; the latest SessionStart output (where MS4CC sends the index) was SAVED to a file "
+                          f"({kb(size)}), so the model saw a 2 KB preview; the index's first line {'is' if seen else 'is not'} in it")
+                else:
+                    print(f"     {'found' if seen else 'NOT found'} in the latest SessionStart output (inline, {kb(size)})")
+                if seen:
+                    delivered_text = text
+    for pth, c in instr:
+        if not idx.exists() or os.path.realpath(pth) != os.path.realpath(idx):
+            cut = CUT.search(c)
+            how = (f"lines 1-{int(cut.group(3)) - 1} of {cut.group(2)} cut" if cut else "whole file")
+            print(f"   {pth} (Claude Code auto-memory, a different file): {how}, {kb(len(c.encode()))} injected")
+    return delivered_text
 
 
 def hooks(atts: list[dict]) -> list[str]:
@@ -198,8 +222,13 @@ def main() -> int:
     else:
         cands = sorted(proj.glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
         if not cands:
-            print(f"no transcript in {proj}", file=sys.stderr)
-            return 2
+            # Sessions started from another directory (the home dir, say) live under another project
+            # dir: fall back to the newest transcript anywhere, and say so.
+            cands = sorted((Path.home() / ".claude" / "projects").glob("*/*.jsonl"), key=lambda p: p.stat().st_mtime)
+            if not cands:
+                print(f"no transcript in {proj} or any other project dir", file=sys.stderr)
+                return 2
+            print(f"(no transcript in {proj}; using the newest one anywhere: pass --transcript to choose)")
         tr = cands[-1]
     print(f"transcript: {tr.name}\nmemory dir: {mem}\n")
     memory_files(mem)
