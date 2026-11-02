@@ -112,13 +112,29 @@ def memory_index(mem: Path, atts: list[dict]) -> str:
         print(f"   {idx}: none")
     else:
         disk = idx.read_text(errors="replace")
-        print(f"   {idx}: {disk.count(chr(10)) + 1} lines, {kb(len(disk.encode()))} on disk")
+        print(f"   {idx}: {len(disk.splitlines())} lines, {kb(len(disk.encode()))} on disk")
         same = [(pth, c) for pth, c in instr if os.path.realpath(pth) == os.path.realpath(idx)]
         if same:
             delivered_text = same[-1][1]
             cut = CUT.search(delivered_text)
             how = (f"lines 1-{int(cut.group(3)) - 1} of {cut.group(2)} ({cut.group(1)} cut off)" if cut else "whole file")
             print(f"     delivered as a Claude Code instruction file: {how}, {kb(len(delivered_text.encode()))} injected")
+            # The harness drops the frontmatter and numbers what is left, so its line N is not file line N.
+            fm = FRONTMATTER.match(disk)
+            skip = disk[: fm.end()].count("\n") + 1 if fm else 0
+            if skip:
+                print(f"     the harness numbers lines after dropping the {skip}-line frontmatter: its line 1 is file line {skip + 1}")
+            # The copy delivered after a compaction can predate edits made earlier in the session.
+            shown = set(delivered_text.split("> WARNING:")[0].splitlines())
+            body = disk.splitlines()[skip:]
+            end = len(body)
+            if cut:
+                start = delivered_text[cut.end():].split('("', 1)[-1].split("\n", 1)[0][:40]
+                end = next((i for i, l in enumerate(body) if start and l.startswith(start)), end)
+            missing = [l for l in body[:end] if l.strip() and l not in shown]
+            if missing:
+                print(f"     the delivered copy is OLDER than the file: {len(missing)} line(s) before the cut point on disk are not in it "
+                      f"(edited after the harness read it); first: {missing[0][:80]}")
         else:
             # Look for the index's first substantial line in the SessionStart output the model saw.
             probe = next((l.strip() for l in disk.splitlines() if len(l.strip()) > 40 and not l.startswith("---")), "")
@@ -210,10 +226,10 @@ def duplicates(mem: Path) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--project-dir")
-    ap.add_argument("--memory-dir")
-    ap.add_argument("--transcript")
-    ap.add_argument("--rule", action="append", default=[])
+    ap.add_argument("--project-dir", help="Claude Code's transcript dir, ~/.claude/projects/<escaped cwd> (not the repo); default from the cwd")
+    ap.add_argument("--memory-dir", help="the memory dir whose MEMORY.md to measure; default <project dir>/memory")
+    ap.add_argument("--transcript", help="a session .jsonl; default the newest in the project dir")
+    ap.add_argument("--rule", action="append", default=[], help="a load-bearing rule, verbatim; repeatable")
     a = ap.parse_args()
     proj = Path(a.project_dir) if a.project_dir else Path.home() / ".claude" / "projects" / os.getcwd().replace("/", "-")
     mem = Path(a.memory_dir) if a.memory_dir else proj / "memory"
