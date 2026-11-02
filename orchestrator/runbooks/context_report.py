@@ -83,14 +83,28 @@ def delivered_size(content: object) -> tuple[bool, int, str]:
     return False, len(text.encode()), text
 
 
+def outputs(content: object) -> list[tuple[bool, int, str]]:
+    """One (persisted?, size, text) per hook output: an attachment can carry several, each saved separately."""
+    if isinstance(content, list):
+        return [delivered_size(x) for x in content]
+    text = content if isinstance(content, str) else json.dumps(content)
+    stubs = PERSISTED.findall(text)
+    if not stubs:
+        return [delivered_size(text)]
+    mult = {"B": 1, "KB": 1024, "MB": 1024 * 1024}
+    return [(True, int(float(n) * mult[u]), text) for n, u in stubs]
+
+
 def instruction_files(atts: list[dict]) -> list[str]:
-    """The text of every instruction file (CLAUDE.md, MEMORY.md, ...) in the latest instructions attachment."""
-    last: list[str] = []
+    """The latest recorded copy of each instruction file (CLAUDE.md, MEMORY.md, ...). Attachments after a
+    compaction or a re-read often carry only some files, so the latest attachment alone misses the rest."""
+    latest: dict[str, str] = {}
     for o in atts:
         a = o["attachment"]
         if a.get("type") == "instructions":
-            last = [str(fi.get("content", "")) for fi in a.get("files", [])]
-    return last
+            for fi in a.get("files", []):
+                latest[str(fi.get("path", ""))] = str(fi.get("content", ""))
+    return list(latest.values())
 
 
 def memory_index(mem: Path, atts: list[dict]) -> str:
@@ -106,7 +120,8 @@ def memory_index(mem: Path, atts: list[dict]) -> str:
     for o in atts:
         a = o["attachment"]
         if a.get("type") == "instructions":
-            instr = [(str(fi.get("path", "")), str(fi.get("content", ""))) for fi in a.get("files", []) if str(fi.get("path", "")).endswith("/MEMORY.md")]
+            found = [(str(fi.get("path", "")), str(fi.get("content", ""))) for fi in a.get("files", []) if str(fi.get("path", "")).endswith("/MEMORY.md")]
+            instr = found or instr
     delivered_text = ""
     if not idx.exists():
         print(f"   {idx}: none")
@@ -133,8 +148,9 @@ def memory_index(mem: Path, atts: list[dict]) -> str:
                 end = next((i for i, l in enumerate(body) if start and l.startswith(start)), end)
             missing = [l for l in body[:end] if l.strip() and l not in shown]
             if missing:
-                print(f"     the delivered copy is OLDER than the file: {len(missing)} line(s) before the cut point on disk are not in it "
-                      f"(edited after the harness read it); first: {missing[0][:80]}")
+                print(f"     the delivered copy is OLDER than the file (edited after the harness read it): {len(missing)} line(s) "
+                      f"of the file are not in it; first: {missing[0][:80]}. A fresh copy is cut by size too, so these "
+                      f"lines are not necessarily ones that would arrive")
         else:
             # Look for the index's first substantial line in the SessionStart output the model saw.
             probe = next((l.strip() for l in disk.splitlines() if len(l.strip()) > 40 and not l.startswith("---")), "")
@@ -162,16 +178,18 @@ def memory_index(mem: Path, atts: list[dict]) -> str:
 def hooks(atts: list[dict]) -> list[str]:
     print("3. Hook output (additionalContext)")
     by_event: dict[str, list[tuple[bool, int]]] = {}
+    events: dict[str, int] = {}
     for o in atts:
         a = o["attachment"]
         if a.get("type") != "hook_additional_context":
             continue
-        p, size, _ = delivered_size(a.get("content"))
-        by_event.setdefault(str(a.get("hookEvent", "?")), []).append((p, size))
+        ev = str(a.get("hookEvent", "?"))
+        events[ev] = events.get(ev, 0) + 1
+        by_event.setdefault(ev, []).extend((p, size) for p, size, _ in outputs(a.get("content")))
     for ev, xs in sorted(by_event.items()):
         saved = [s for p, s in xs if p]
         inline = [s for p, s in xs if not p]
-        print(f"   {ev}: {len(xs)} outputs; inline {len(inline)} (largest {kb(max(inline, default=0))}); "
+        print(f"   {ev}: {events[ev]} events, {len(xs)} outputs; inline {len(inline)} (largest {kb(max(inline, default=0))}); "
               f"saved to a file {len(saved)} (largest {kb(max(saved, default=0))})")
     # The latest session start: SessionStart outputs within 60 s of the last one.
     starts = [o for o in atts if o["attachment"].get("type") == "hook_additional_context" and o["attachment"].get("hookEvent") == "SessionStart"]
@@ -186,9 +204,9 @@ def hooks(atts: list[dict]) -> list[str]:
         latest = [o for o in starts if ts(starts[-1]) - ts(o) <= 60]
         print(f"   latest session start ({t_last}):")
         for o in latest:
-            p, size, text = delivered_size(o["attachment"].get("content"))
-            print(f"     {'SAVED, 2 KB preview shown' if p else 'inline'}: {kb(size)}")
-            seen.append(text)
+            for p, size, text in outputs(o["attachment"].get("content")):
+                print(f"     {'SAVED, 2 KB preview shown (the preview names the saved file)' if p else 'inline'}: {kb(size)}")
+            seen.append(delivered_size(o["attachment"].get("content"))[2])
     return seen
 
 
@@ -200,12 +218,13 @@ def canary(rules: list[str], seen: list[str], index: str, instructions: list[str
     norm = lambda s: re.sub(r"\s+", " ", s).lower()
     sources = [("session-start hook output (as shown)", norm("\n".join(seen))),
                ("MEMORY.md as delivered", norm(index)),
-               ("instruction files re-read in the transcript", norm("\n".join(instructions)))]
+               ("instruction files recorded in the transcript", norm("\n".join(instructions)))]
     for r in rules:
         hit = [name for name, h in sources if norm(r) in h]
         print(f"   {'YES' if hit else 'NO '}  {r[:80]}{'  <- ' + ', '.join(hit) if hit else ''}")
-    print("   NO means: not in the session-start hook output the model saw, nor in the delivered memory index.")
-    print("   CLAUDE.md files loaded with the system prompt aren't recorded in the transcript; check those by hand.")
+    print("   NO means: not in the session-start output the model saw, the delivered memory index, or the latest")
+    print("   recorded copy of any instruction file. Per-prompt recall is not checked: it surfaces memories by")
+    print("   similarity, intermittently. A file loaded only with the system prompt and never recorded can't be checked.")
 
 
 def duplicates(mem: Path) -> None:
