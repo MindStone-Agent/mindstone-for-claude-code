@@ -158,13 +158,15 @@ def memory_index(mem: Path, atts: list[dict]) -> str:
     idx = mem / "MEMORY.md"
     print("2. MEMORY.md")
     instr: list[tuple[str, str]] = []
+    instr_ts = ""
     for o in atts:
         a = o["attachment"]
         if a.get("type") == "compact_boundary":
             instr = []
         elif a.get("type") == "instructions":
             found = [(str(fi.get("path", "")), str(fi.get("content", ""))) for fi in a.get("files", []) if str(fi.get("path", "")).endswith("/MEMORY.md")]
-            instr = found or instr
+            if found:
+                instr, instr_ts = found, str(o.get("timestamp", ""))
     delivered_text = ""
     if not idx.exists():
         print(f"   {idx}: none")
@@ -176,7 +178,8 @@ def memory_index(mem: Path, atts: list[dict]) -> str:
             delivered_text = same[-1][1]
             cut = CUT.search(delivered_text)
             how = (f"lines 1-{int(cut.group(3)) - 1} of {cut.group(2)} ({cut.group(1)} cut off)" if cut else "whole file")
-            print(f"     delivered as a Claude Code instruction file: {how}, {kb(len(delivered_text.encode()))} injected")
+            print(f"     delivered as a Claude Code instruction file: {how}, {kb(len(delivered_text.encode()))} injected"
+                  f"{' (the copy recorded at ' + instr_ts + ')' if instr_ts else ''}")
             # The harness drops the frontmatter and numbers what is left, so its line N is not file line N.
             fm = FRONTMATTER.match(disk)
             skip = disk[: fm.end()].count("\n") + 1 if fm else 0
