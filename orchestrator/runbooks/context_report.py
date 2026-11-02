@@ -97,6 +97,19 @@ def outputs(content: object) -> list[tuple[bool, int, str]]:
     return [delivered_size(content)]
 
 
+def unrecorded_compaction(atts: list[dict]) -> str:
+    """The timestamp of the last compaction if no instruction re-send was recorded after it, else "".
+    Not recorded is not the same as not delivered, so callers report UNKNOWN rather than NO."""
+    last = ""
+    for o in atts:
+        t = o["attachment"].get("type")
+        if t == "compact_boundary":
+            last = str(o.get("timestamp", "")) or "?"
+        elif t == "instructions":
+            last = ""
+    return last
+
+
 def instruction_files(atts: list[dict]) -> list[str]:
     """The instruction files in context now: the set re-sent after the last compaction (or at the start),
     updated by later re-reads, which carry only the re-read file."""
@@ -154,9 +167,12 @@ def memory_index(mem: Path, atts: list[dict]) -> str:
                 end = next((i for i, l in enumerate(body) if start and l.startswith(start)), end)
             missing = [l for l in body[:end] if l.strip() and l not in shown]
             if missing:
-                print(f"     the delivered copy is OLDER than the file (a compaction re-sends the last recorded copy; a re-read brings the current file): {len(missing)} line(s) "
+                print(f"     the delivered copy is OLDER than the file, which was edited after the last recorded copy (a compaction "
+                      f"re-sends that copy; only a re-read refreshes it): {len(missing)} line(s) "
                       f"of the file are not in it; first: {missing[0][:80]}. A fresh copy is cut by size too, so these "
                       f"lines are not necessarily ones that would arrive")
+        elif unrecorded_compaction(atts):
+            print(f"     UNKNOWN: no instruction re-send recorded since the compaction at {unrecorded_compaction(atts)}")
         else:
             # Look for the index's first substantial line in the SessionStart output the model saw.
             probe = next((l.strip() for l in disk.splitlines() if len(l.strip()) > 40 and not l.startswith("---")), "")
@@ -165,16 +181,13 @@ def memory_index(mem: Path, atts: list[dict]) -> str:
                 print("     not delivered as an instruction file, and no SessionStart output in this transcript")
             else:
                 outs = outputs(starts[-1].get("content"))
-                p_, size = any(o[0] for o in outs), sum(o[1] for o in outs)
-                text = "\n".join(o[2] for o in outs)
-                seen = probe and probe in text
-                if p_:
-                    print(f"     not an instruction file; the latest SessionStart output (where MS4CC sends the index) was SAVED to a file "
-                          f"({kb(size)}), so the model saw a 2 KB preview; the index's first line {'is' if seen else 'is not'} in it")
-                else:
-                    print(f"     {'found' if seen else 'NOT found'} in the latest SessionStart output (inline, {kb(size)})")
-                if seen:
-                    delivered_text = text
+                print(f"     not an instruction file; MS4CC sends the index in SessionStart output. The latest start had {len(outs)} output(s):")
+                for p_, size, text in outs:
+                    seen = bool(probe) and probe in text
+                    where = "the index's first line is in it" if seen else "the index's first line is not in it"
+                    print(f"       {'SAVED to a file, 2 KB preview shown' if p_ else 'inline'} ({kb(size)}): {where}")
+                    if seen:
+                        delivered_text += text + "\n"
     for pth, c in instr:
         if not idx.exists() or os.path.realpath(pth) != os.path.realpath(idx):
             cut = CUT.search(c)
@@ -218,7 +231,7 @@ def hooks(atts: list[dict]) -> list[str]:
     return seen
 
 
-def canary(rules: list[str], seen: list[str], index: str, instructions: list[str]) -> None:
+def canary(rules: list[str], seen: list[str], index: str, instructions: list[str], unrecorded: str = "") -> None:
     if not rules:
         print("4. Load-bearing rule: pass --rule \"...\" to check one")
         return
@@ -226,10 +239,13 @@ def canary(rules: list[str], seen: list[str], index: str, instructions: list[str
     norm = lambda s: re.sub(r"\s+", " ", s).lower()
     sources = [("session-start hook output (as shown)", norm("\n".join(seen))),
                ("MEMORY.md as delivered", norm(index)),
-               ("instruction files recorded in the transcript", norm("\n".join(instructions)))]
+               ("instruction files in context (since the last compaction, plus re-reads)", norm("\n".join(instructions)))]
     for r in rules:
         hit = [name for name, h in sources if norm(r) in h]
-        print(f"   {'YES' if hit else 'NO '}  {r[:80]}{'  <- ' + ', '.join(hit) if hit else ''}")
+        verdict = "YES" if hit else ("UNK" if unrecorded else "NO ")
+        print(f"   {verdict}  {r[:80]}{'  <- ' + ', '.join(hit) if hit else ''}")
+    if unrecorded:
+        print(f"   UNK means: not found, but no instruction re-send was recorded after the compaction at {unrecorded}.")
     print("   NO means: not in the session-start output the model saw, the delivered memory index, or the instruction")
     print("   files in context now (re-sent at the last compaction, plus later re-reads). Per-prompt recall is not checked: it surfaces memories by")
     print("   similarity, intermittently. A file loaded only with the system prompt and never recorded can't be checked.")
@@ -278,7 +294,7 @@ def main() -> int:
     atts = load(tr)
     index = memory_index(mem, atts)
     seen = hooks(atts)
-    canary(a.rule, seen, index, instruction_files(atts))
+    canary(a.rule, seen, index, instruction_files(atts), unrecorded_compaction(atts))
     duplicates(mem)
     return 0
 
