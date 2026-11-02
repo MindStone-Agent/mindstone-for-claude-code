@@ -51,6 +51,10 @@ from pathlib import Path
 
 HEADING_RE = re.compile(r"^(#{2,3}) (.+)$", re.M)
 
+# only used to size the truncation marker; the real name is per-file but the length is what
+# matters for budgeting and it is within a character or two either way.
+_MARKER_NAME = "AGENTS.md"
+
 # A rule is a section whose heading carries the ⛔ or ⚠️ marker, or whose title matches one of
 # these words. The marker is this workspace's convention; the word list is the portability
 # hatch, because boxes name their rule sections differently and a count that depends on one
@@ -173,6 +177,18 @@ def build_report(
     tail_start = max(head_end, len(text) - tail_len)
     window = head_end + tail_len
 
+    # When the file is truncated the harness inserts a marker between head and tail. It is
+    # spent from the limit and belongs to neither window, so the number actually injected is
+    # window + marker, and the unused remainder is limit - that.
+    truncated = len(text) > limit
+    marker_len = 0
+    if truncated:
+        marker_len = len(
+            f"\n[...truncated, read {_MARKER_NAME} for full content...]\n"
+            f"…(truncated {_MARKER_NAME}: kept {head_end}+{tail_len} chars of {len(text)})…\n"
+        )
+    injected = window + marker_len
+
     secs = split_sections(text)
     for s in secs:
         classify(s, head_end, tail_start, text)
@@ -209,8 +225,14 @@ def build_report(
             "head_end": head_end,
             "tail_start": tail_start,
             "delivered_capacity": window,
-            "unused_of_limit": max(0, limit - window),
-            "note": "head+tail is the usable window; limit - (head+tail) is never filled",
+            "truncation_marker_chars": marker_len,
+            "actually_injected": injected,
+            "unused_of_limit": max(0, limit - injected),
+            "note": (
+                "head+tail is the window; when truncated a marker is also spent from the limit, "
+                "so unused = limit - (head+tail+marker). The shortfall is not headroom: it is a "
+                "remainder that no code allocates."
+            ),
         },
         "not_delivered": {
             "arithmetic": not_delivered_arith,
@@ -293,6 +315,10 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=20000, help="harness character limit (default 20000)")
     ap.add_argument("--head-ratio", type=float, default=0.70, help="head fraction of limit (default 0.70)")
     ap.add_argument("--tail-ratio", type=float, default=0.20, help="tail fraction of limit (default 0.20)")
+    ap.add_argument("--split", default=None, metavar="HEAD,TAIL",
+                    help="head,tail as one argument, e.g. --split 0.8,0.1. "
+                         "A ratio is a property of the harness, not a constant; a tool that can "
+                         "only express one box's split measures the wrong window on the box that matters.")
     ap.add_argument("--head", type=int, default=None,
                     help="absolute head chars, overriding --head-ratio. Measure this, do not assume it.")
     ap.add_argument("--tail", type=int, default=None,
@@ -315,6 +341,16 @@ def main() -> int:
     if not text.strip():
         print(f"bootstrap-report: {path} is empty", file=sys.stderr)
         return 2
+
+    if args.split:
+        try:
+            parts = [p.strip() for p in args.split.split(",")]
+            if len(parts) != 2:
+                raise ValueError("expected HEAD,TAIL")
+            args.head_ratio, args.tail_ratio = float(parts[0]), float(parts[1])
+        except ValueError as e:
+            print(f"bootstrap-report: bad --split {args.split!r}: {e}", file=sys.stderr)
+            return 2
 
     if args.rules_pattern:
         global RULE_TITLE_RE
