@@ -10,7 +10,7 @@ Usage:
   python3 orchestrator/runbooks/context_report.py [--project-dir DIR] [--memory-dir DIR] [--transcript FILE]
                                          [--rule "text of a load-bearing rule"]...
 
-Defaults: the project dir is ~/.claude/projects/<cwd with / replaced by ->; the transcript is the
+Defaults: the project dir is ~/.claude/projects/<cwd, each non-alphanumeric character replaced by ->; the transcript is the
 newest *.jsonl there; the memory dir is <project dir>/memory. Standard library only; reads files,
 writes nothing, prints no environment. Section 5 measures duplication; it never edits a file.
 This covers Claude Code sessions. For MindStone bootstrap files, see scripts/bootstrap-report.py (PR #141).
@@ -298,7 +298,8 @@ def main() -> int:
     ap.add_argument("--transcript", help="a session .jsonl; default the newest in the project dir")
     ap.add_argument("--rule", action="append", default=[], help="a load-bearing rule, verbatim; repeatable")
     a = ap.parse_args()
-    proj = Path(a.project_dir) if a.project_dir else Path.home() / ".claude" / "projects" / os.getcwd().replace("/", "-")
+    # Claude Code names a project dir after the cwd with every non-alphanumeric character as "-".
+    proj = Path(a.project_dir) if a.project_dir else Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", os.getcwd())
     mem = Path(a.memory_dir) if a.memory_dir else proj / "memory"
     if a.transcript:
         tr = Path(a.transcript)
