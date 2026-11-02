@@ -25,9 +25,14 @@ WHAT IT DOES
     "it came from a seam" does not distinguish those.
 
 EXIT CODES
-    0  checked, both methods agree, classification complete
-    1  the two methods DISAGREE, or a rule is not delivered  -> do not trust the table
+    0  the numbers are trustworthy AND every rule arrives
+    3  the numbers are trustworthy, but a rule does not arrive fully
+    1  the two methods DISAGREE -> do not use this table at all
     2  could not check (missing file, bad arguments, unreadable content)
+
+    Aegis's point, and it is the right split: the exit code answers "can I trust these
+    numbers", not "is delivery perfect". Those are different questions, and folding them
+    together means a broken rule hides a broken measurement.
 
 Usage
     bootstrap-report.py AGENTS.md
@@ -46,10 +51,15 @@ from pathlib import Path
 
 HEADING_RE = re.compile(r"^(#{2,3}) (.+)$", re.M)
 
-# A rule is a section whose heading carries the ⛔ or ⚠️ marker, or whose title is one of these.
-# The marker is the convention in this workspace; the title list is the escape hatch for rules
-# that predate it.
-RULE_TITLE_RE = re.compile(r"\b(Safety|Group Chats|External vs Internal)\b", re.I)
+# A rule is a section whose heading carries the ⛔ or ⚠️ marker, or whose title matches one of
+# these words. The marker is this workspace's convention; the word list is the portability
+# hatch, because boxes name their rule sections differently and a count that depends on one
+# box's naming is not comparable across boxes. Override entirely with --rules-pattern.
+DEFAULT_RULE_WORDS = (
+    r"Safety|Group Chats|External vs Internal|Operating rules|Rules|Constraints|"
+    r"Conventions|Protocol|Conduct|MANDATORY|NEVER|ALWAYS|\bMUST\b"
+)
+RULE_TITLE_RE = re.compile(r"\b(?:" + DEFAULT_RULE_WORDS + r")\b", re.I)
 
 STATUS_WHOLE = "whole"
 STATUS_STUB = "whole-tail-cut"       # lost span is whitespace only: not damage
@@ -275,6 +285,8 @@ def main() -> int:
     ap.add_argument("--tail-ratio", type=float, default=0.20, help="tail fraction of limit (default 0.20)")
     ap.add_argument("--json", action="store_true", help="emit JSON")
     ap.add_argument("--rules-only", action="store_true", help="skip the per-section listing")
+    ap.add_argument("--rules-pattern", default=None,
+                    help="regex for rule-section titles (overrides the default word list)")
     args = ap.parse_args()
 
     path = Path(args.file)
@@ -290,6 +302,9 @@ def main() -> int:
         print(f"bootstrap-report: {path} is empty", file=sys.stderr)
         return 2
 
+    if args.rules_pattern:
+        global RULE_TITLE_RE
+        RULE_TITLE_RE = re.compile(args.rules_pattern, re.I)
     rep = build_report(text, args.limit, args.head_ratio, args.tail_ratio)
     rep["file"]["path"] = str(path)
 
@@ -298,10 +313,12 @@ def main() -> int:
     else:
         print_report(rep, args.rules_only)
 
+    # 1 is reserved for "these numbers cannot be trusted". A rule arriving badly is a real
+    # finding, not a reason to distrust the arithmetic, so it gets its own code.
     if not rep["not_delivered"]["agree"]:
         return 1
     if rep["rules"]["absent"] or rep["rules"]["without_marking"]:
-        return 1
+        return 3
     return 0
 
 
