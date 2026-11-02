@@ -97,17 +97,41 @@ def outputs(content: object) -> list[tuple[bool, int, str]]:
     return [delivered_size(content)]
 
 
-def unrecorded_compaction(atts: list[dict]) -> str:
-    """The timestamp of the last compaction if no instruction re-send was recorded after it, else "".
-    Not recorded is not the same as not delivered, so callers report UNKNOWN rather than NO."""
-    last = ""
+def unrecorded(atts: list[dict]) -> tuple[str, list[str]]:
+    """Why an instruction-file NO can't be trusted, if it can't: ("", []) when it can.
+    A compaction re-sends the instruction files; a re-read carries only the re-read file. Any file
+    recorded before the last compaction and not recorded since has an unknown state, and so does
+    everything when the transcript never recorded instruction files at all."""
+    ever: set[str] = set()
+    pending: set[str] = set()
+    when = ""
     for o in atts:
-        t = o["attachment"].get("type")
-        if t == "compact_boundary":
-            last = str(o.get("timestamp", "")) or "?"
-        elif t == "instructions":
-            last = ""
-    return last
+        a = o["attachment"]
+        if a.get("type") == "compact_boundary":
+            pending, when = set(ever), str(o.get("timestamp", "")) or "?"
+        elif a.get("type") == "instructions":
+            for fi in a.get("files", []):
+                path = str(fi.get("path", ""))
+                ever.add(path)
+                pending.discard(path)
+    if not ever:
+        return "no instruction files are recorded in this transcript", []
+    if pending:
+        return f"no re-send recorded since the compaction at {when} for", sorted(pending)
+    return "", []
+
+
+def latest_starts(atts: list[dict]) -> list[dict]:
+    """The SessionStart attachments of the latest session start: those within 60 s of the last one."""
+    starts = [o for o in atts if o["attachment"].get("type") == "hook_additional_context" and o["attachment"].get("hookEvent") == "SessionStart"]
+    if not starts:
+        return []
+    def ts(o: dict) -> float:
+        try:
+            return datetime.fromisoformat(str(o.get("timestamp", "")).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return 0.0
+    return [o for o in starts if ts(starts[-1]) - ts(o) <= 60]
 
 
 def instruction_files(atts: list[dict]) -> list[str]:
@@ -168,25 +192,28 @@ def memory_index(mem: Path, atts: list[dict]) -> str:
             missing = [l for l in body[:end] if l.strip() and l not in shown]
             if missing:
                 print(f"     the delivered copy is OLDER than the file, which was edited after the last recorded copy (a compaction "
-                      f"re-sends that copy; only a re-read refreshes it): {len(missing)} line(s) "
+                      f"usually re-sends that copy; a re-read refreshes it): {len(missing)} line(s) "
                       f"of the file are not in it; first: {missing[0][:80]}. A fresh copy is cut by size too, so these "
                       f"lines are not necessarily ones that would arrive")
-        elif unrecorded_compaction(atts):
-            print(f"     UNKNOWN: no instruction re-send recorded since the compaction at {unrecorded_compaction(atts)}")
+        elif any(os.path.realpath(p_) == os.path.realpath(idx) for p_ in unrecorded(atts)[1]):
+            print(f"     UNKNOWN: {unrecorded(atts)[0]} this file")
         else:
-            # Look for the index's first substantial line in the SessionStart output the model saw.
-            probe = next((l.strip() for l in disk.splitlines() if len(l.strip()) > 40 and not l.startswith("---")), "")
-            starts = [o["attachment"] for o in atts if o["attachment"].get("type") == "hook_additional_context" and o["attachment"].get("hookEvent") == "SessionStart"]
-            if not starts:
+            # MS4CC builds its index in the SessionStart output from memory frontmatter rather than pasting
+            # MEMORY.md, so look for the index's entries (the memory files it names), not its first line.
+            fm = FRONTMATTER.match(disk)
+            names = sorted(set(re.findall(r"\]\(([^)]+\.md)\)", disk[fm.end():] if fm else disk)))
+            latest = latest_starts(atts)
+            if not latest:
                 print("     not delivered as an instruction file, and no SessionStart output in this transcript")
             else:
-                outs = outputs(starts[-1].get("content"))
-                print(f"     not an instruction file; MS4CC sends the index in SessionStart output. The latest start had {len(outs)} output(s):")
+                outs = [x for o in latest for x in outputs(o["attachment"].get("content"))]
+                print(f"     not an instruction file; MS4CC sends its index in SessionStart output. The latest start had {len(outs)} output(s):")
                 for p_, size, text in outs:
-                    seen = bool(probe) and probe in text
-                    where = "the index's first line is in it" if seen else "the index's first line is not in it"
-                    print(f"       {'SAVED to a file, 2 KB preview shown' if p_ else 'inline'} ({kb(size)}): {where}")
-                    if seen:
+                    n = sum(1 for nm in names if nm in text)
+                    shown = "in the 2 KB preview" if p_ else "in it"
+                    print(f"       {'SAVED to a file, 2 KB preview shown' if p_ else 'inline'} ({kb(size)}): "
+                          f"{n} of the {len(names)} memory files the index names appear {shown}")
+                    if n:
                         delivered_text += text + "\n"
     for pth, c in instr:
         if not idx.exists() or os.path.realpath(pth) != os.path.realpath(idx):
@@ -213,17 +240,10 @@ def hooks(atts: list[dict]) -> list[str]:
         print(f"   {ev}: {events[ev]} events, {len(xs)} outputs; inline {len(inline)} (largest {kb(max(inline, default=0))}); "
               f"saved to a file {len(saved)} (largest {kb(max(saved, default=0))})")
     # The latest session start: SessionStart outputs within 60 s of the last one.
-    starts = [o for o in atts if o["attachment"].get("type") == "hook_additional_context" and o["attachment"].get("hookEvent") == "SessionStart"]
+    latest = latest_starts(atts)
     seen: list[str] = []
-    if starts:
-        t_last = starts[-1].get("timestamp", "")
-        def ts(o: dict) -> float:
-            try:
-                return datetime.fromisoformat(str(o.get("timestamp", "")).replace("Z", "+00:00")).timestamp()
-            except ValueError:
-                return 0.0
-        latest = [o for o in starts if ts(starts[-1]) - ts(o) <= 60]
-        print(f"   latest session start ({t_last}):")
+    if latest:
+        print(f"   latest session start ({latest[-1].get('timestamp', '')}):")
         for o in latest:
             for p, size, text in outputs(o["attachment"].get("content")):
                 print(f"     {'SAVED, 2 KB preview shown (the preview names the saved file)' if p else 'inline'}: {kb(size)}")
@@ -231,7 +251,7 @@ def hooks(atts: list[dict]) -> list[str]:
     return seen
 
 
-def canary(rules: list[str], seen: list[str], index: str, instructions: list[str], unrecorded: str = "") -> None:
+def canary(rules: list[str], seen: list[str], index: str, instructions: list[str], why_unknown: tuple[str, list[str]] = ("", [])) -> None:
     if not rules:
         print("4. Load-bearing rule: pass --rule \"...\" to check one")
         return
@@ -242,10 +262,11 @@ def canary(rules: list[str], seen: list[str], index: str, instructions: list[str
                ("instruction files in context (since the last compaction, plus re-reads)", norm("\n".join(instructions)))]
     for r in rules:
         hit = [name for name, h in sources if norm(r) in h]
-        verdict = "YES" if hit else ("UNK" if unrecorded else "NO ")
+        verdict = "YES" if hit else ("UNK" if why_unknown[0] else "NO ")
         print(f"   {verdict}  {r[:80]}{'  <- ' + ', '.join(hit) if hit else ''}")
-    if unrecorded:
-        print(f"   UNK means: not found, but no instruction re-send was recorded after the compaction at {unrecorded}.")
+    if why_unknown[0]:
+        files = f" {', '.join(why_unknown[1])}" if why_unknown[1] else ""
+        print(f"   UNK means: not found, but {why_unknown[0]}{files}, so their state is unknown.")
     print("   NO means: not in the session-start output the model saw, the delivered memory index, or the instruction")
     print("   files in context now (re-sent at the last compaction, plus later re-reads). Per-prompt recall is not checked: it surfaces memories by")
     print("   similarity, intermittently. A file loaded only with the system prompt and never recorded can't be checked.")
@@ -294,7 +315,7 @@ def main() -> int:
     atts = load(tr)
     index = memory_index(mem, atts)
     seen = hooks(atts)
-    canary(a.rule, seen, index, instruction_files(atts), unrecorded_compaction(atts))
+    canary(a.rule, seen, index, instruction_files(atts), unrecorded(atts))
     duplicates(mem)
     return 0
 
