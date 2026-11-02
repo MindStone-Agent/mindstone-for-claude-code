@@ -25,7 +25,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-PERSISTED = re.compile(r"<persisted-output>\s*Output too large \(([\d.]+)\s*(KB|MB|B)\)")
+PERSISTED = re.compile(r"\A\s*<persisted-output>\s*Output too large \(([\d.]+)\s*(KB|MB|B)\)")
 CUT = re.compile(r"Only part of it was loaded: (\d+) of (\d+) lines were cut off, starting at line (\d+)")
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---", re.S)
 
@@ -59,7 +59,7 @@ def load(transcript: Path) -> list[dict]:
     out = []
     with transcript.open(errors="replace") as f:
         for line in f:
-            if '"attachment"' not in line:
+            if '"attachment"' not in line and '"compact_boundary"' not in line:
                 continue
             try:
                 o = json.loads(line)
@@ -67,15 +67,22 @@ def load(transcript: Path) -> list[dict]:
                 continue
             if isinstance(o.get("attachment"), dict):
                 out.append(o)
+            elif o.get("type") == "system" and o.get("subtype") == "compact_boundary":
+                # Kept as a pseudo-attachment: after a compaction the harness re-sends instruction files.
+                out.append({"attachment": {"type": "compact_boundary"}, "timestamp": o.get("timestamp", "")})
     return out
 
 
-def delivered_size(content: object) -> tuple[bool, int, str]:
-    """(persisted?, original size in bytes, text the model actually saw)."""
+def joined(content: object) -> str:
     if isinstance(content, list):
-        text = "\n".join(x if isinstance(x, str) else json.dumps(x) for x in content)
-    else:
-        text = content if isinstance(content, str) else json.dumps(content)
+        return "\n".join(x if isinstance(x, str) else json.dumps(x) for x in content)
+    return content if isinstance(content, str) else json.dumps(content)
+
+
+def delivered_size(content: object) -> tuple[bool, int, str]:
+    """For one hook output: (saved to a file?, original size in bytes, text the model actually saw).
+    Saved only when the output IS the stub; an inline output that quotes a stub stays inline."""
+    text = joined(content)
     m = PERSISTED.search(text)
     if m:
         mult = {"B": 1, "KB": 1024, "MB": 1024 * 1024}[m.group(2)]
@@ -87,21 +94,18 @@ def outputs(content: object) -> list[tuple[bool, int, str]]:
     """One (persisted?, size, text) per hook output: an attachment can carry several, each saved separately."""
     if isinstance(content, list):
         return [delivered_size(x) for x in content]
-    text = content if isinstance(content, str) else json.dumps(content)
-    stubs = PERSISTED.findall(text)
-    if not stubs:
-        return [delivered_size(text)]
-    mult = {"B": 1, "KB": 1024, "MB": 1024 * 1024}
-    return [(True, int(float(n) * mult[u]), text) for n, u in stubs]
+    return [delivered_size(content)]
 
 
 def instruction_files(atts: list[dict]) -> list[str]:
-    """The latest recorded copy of each instruction file (CLAUDE.md, MEMORY.md, ...). Attachments after a
-    compaction or a re-read often carry only some files, so the latest attachment alone misses the rest."""
+    """The instruction files in context now: the set re-sent after the last compaction (or at the start),
+    updated by later re-reads, which carry only the re-read file."""
     latest: dict[str, str] = {}
     for o in atts:
         a = o["attachment"]
-        if a.get("type") == "instructions":
+        if a.get("type") == "compact_boundary":
+            latest = {}
+        elif a.get("type") == "instructions":
             for fi in a.get("files", []):
                 latest[str(fi.get("path", ""))] = str(fi.get("content", ""))
     return list(latest.values())
@@ -119,7 +123,9 @@ def memory_index(mem: Path, atts: list[dict]) -> str:
     instr: list[tuple[str, str]] = []
     for o in atts:
         a = o["attachment"]
-        if a.get("type") == "instructions":
+        if a.get("type") == "compact_boundary":
+            instr = []
+        elif a.get("type") == "instructions":
             found = [(str(fi.get("path", "")), str(fi.get("content", ""))) for fi in a.get("files", []) if str(fi.get("path", "")).endswith("/MEMORY.md")]
             instr = found or instr
     delivered_text = ""
@@ -148,7 +154,7 @@ def memory_index(mem: Path, atts: list[dict]) -> str:
                 end = next((i for i, l in enumerate(body) if start and l.startswith(start)), end)
             missing = [l for l in body[:end] if l.strip() and l not in shown]
             if missing:
-                print(f"     the delivered copy is OLDER than the file (edited after the harness read it): {len(missing)} line(s) "
+                print(f"     the delivered copy is OLDER than the file (a compaction re-sends the last recorded copy; a re-read brings the current file): {len(missing)} line(s) "
                       f"of the file are not in it; first: {missing[0][:80]}. A fresh copy is cut by size too, so these "
                       f"lines are not necessarily ones that would arrive")
         else:
@@ -158,7 +164,9 @@ def memory_index(mem: Path, atts: list[dict]) -> str:
             if not starts:
                 print("     not delivered as an instruction file, and no SessionStart output in this transcript")
             else:
-                p_, size, text = delivered_size(starts[-1].get("content"))
+                outs = outputs(starts[-1].get("content"))
+                p_, size = any(o[0] for o in outs), sum(o[1] for o in outs)
+                text = "\n".join(o[2] for o in outs)
                 seen = probe and probe in text
                 if p_:
                     print(f"     not an instruction file; the latest SessionStart output (where MS4CC sends the index) was SAVED to a file "
@@ -206,7 +214,7 @@ def hooks(atts: list[dict]) -> list[str]:
         for o in latest:
             for p, size, text in outputs(o["attachment"].get("content")):
                 print(f"     {'SAVED, 2 KB preview shown (the preview names the saved file)' if p else 'inline'}: {kb(size)}")
-            seen.append(delivered_size(o["attachment"].get("content"))[2])
+            seen.append(joined(o["attachment"].get("content")))
     return seen
 
 
@@ -222,8 +230,8 @@ def canary(rules: list[str], seen: list[str], index: str, instructions: list[str
     for r in rules:
         hit = [name for name, h in sources if norm(r) in h]
         print(f"   {'YES' if hit else 'NO '}  {r[:80]}{'  <- ' + ', '.join(hit) if hit else ''}")
-    print("   NO means: not in the session-start output the model saw, the delivered memory index, or the latest")
-    print("   recorded copy of any instruction file. Per-prompt recall is not checked: it surfaces memories by")
+    print("   NO means: not in the session-start output the model saw, the delivered memory index, or the instruction")
+    print("   files in context now (re-sent at the last compaction, plus later re-reads). Per-prompt recall is not checked: it surfaces memories by")
     print("   similarity, intermittently. A file loaded only with the system prompt and never recorded can't be checked.")
 
 
