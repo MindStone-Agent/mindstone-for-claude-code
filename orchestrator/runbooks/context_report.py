@@ -13,6 +13,8 @@ Usage:
 Defaults: the project dir is ~/.claude/projects/<cwd, each non-alphanumeric character replaced by ->; the transcript is the
 newest *.jsonl there; the memory dir is <project dir>/memory. Standard library only; reads files,
 writes nothing, prints no environment. Section 5 measures duplication; it never edits a file.
+Section 6 sweeps every critical memory's invariant: shown at the latest session start, against a
+control on what the hook emitted (the saved output file), so a 0 shown can't come from a probe that never matches.
 This covers Claude Code sessions. For MindStone bootstrap files, see scripts/bootstrap-report.py (PR #141).
 """
 from __future__ import annotations
@@ -291,6 +293,81 @@ def duplicates(mem: Path) -> None:
     print(f"   index entries {len(links)}, files listed more than once {len(dup_links)}" + (f": {', '.join(dup_links[:8])}" if dup_links else ""))
 
 
+SAVED_PATH = re.compile(r"Full output saved to:\s*(\S+)")
+INVARIANT = re.compile(r"^([ \t]*)invariant:[ \t]*(.*)$", re.M)
+
+
+def invariant(fm: str) -> str:
+    """The `invariant:` value from a frontmatter block: inline, quoted, or a folded/literal block
+    scalar (`>`, `>-`, `|`, `|-`), top-level or nested under `metadata:`. Whitespace-normalised."""
+    m = INVARIANT.search(fm)
+    if not m:
+        return ""
+    indent, val = len(m.group(1)), m.group(2).strip()
+    if val and val[0] not in ">|":
+        return re.sub(r"\s+", " ", val.strip("\"'")).strip()
+    body = []
+    for line in fm[m.end():].splitlines()[1:]:
+        if line.strip() and len(line) - len(line.lstrip()) <= indent:
+            break
+        body.append(line.strip())
+    return re.sub(r"\s+", " ", " ".join(body)).strip()
+
+
+def emitted_text(persisted: bool, text: str) -> str | None:
+    """What the hook emitted for one output: the inline text, or the file its saved-output stub
+    names. None when that file is gone, so the control can't run."""
+    if not persisted:
+        return text
+    m = SAVED_PATH.search(text)
+    if not m or not Path(m.group(1)).is_file():
+        return None
+    return Path(m.group(1)).read_text(errors="replace")
+
+
+def critical_sweep(mem: Path, atts: list[dict], instructions: list[str], why_unknown: tuple[str, list[str]]) -> None:
+    """Every critical memory's `invariant:` against the latest session start: shown to the model, or
+    only emitted. The control runs the same probe on the hook's full output, so a 0 shown can't come
+    from a probe that never matches. Counts only: memory filenames are operator data."""
+    print("6. Critical invariants at the latest session start (shown vs emitted)")
+    crit, rules = 0, []
+    for p in sorted(mem.glob("*.md")):
+        if p.name == "MEMORY.md":
+            continue
+        m = FRONTMATTER.match(p.read_text(errors="replace"))
+        fm = m.group(1) if m else ""
+        if flag(fm, "critical"):
+            crit += 1
+            inv = invariant(fm)
+            if inv:
+                rules.append(inv.lower()[:120])
+    print(f"   critical {crit}; with an invariant {len(rules)}; without one {crit - len(rules)}")
+    latest = latest_starts(atts)
+    if not latest:
+        print("   no SessionStart output in this transcript")
+        return
+    norm = lambda s: re.sub(r"\s+", " ", s).lower()
+    outs = [x for o in latest for x in outputs(o["attachment"].get("content"))]
+    shown = norm("\n".join(text for _, _, text in outs))
+    full = [emitted_text(p, text) for p, _, text in outs]
+    n_shown = sum(1 for r in rules if r in shown)
+    print(f"   shown in the session-start output: {n_shown} of {len(rules)}")
+    if any(f is None for f in full):
+        print("   emitted by the hook (control): UNKNOWN, a saved output file is gone")
+    else:
+        emitted = norm("\n".join(full))
+        n_emitted = sum(1 for r in rules if r in emitted)
+        print(f"   emitted by the hook (control): {n_emitted} of {len(rules)}")
+        if n_emitted < len(rules):
+            print(f"   {len(rules) - n_emitted} never left the hook (its own budget); "
+                  f"{n_emitted - n_shown} left it and were not shown (the harness)")
+        elif n_shown < n_emitted:
+            print(f"   all left the hook; {n_emitted - n_shown} were not shown (the harness)")
+    n_instr = sum(1 for r in rules if r in norm("\n".join(instructions)))
+    caveat = f" (UNKNOWN for some files: {why_unknown[0]})" if why_unknown[0] else ""
+    print(f"   in the instruction files in context now: {n_instr} of {len(rules)}{caveat}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--project-dir", help="Claude Code's transcript dir, ~/.claude/projects/<escaped cwd> (not the repo); default from the cwd")
@@ -321,6 +398,7 @@ def main() -> int:
     seen = hooks(atts)
     canary(a.rule, seen, index, instruction_files(atts), unrecorded(atts))
     duplicates(mem)
+    critical_sweep(mem, atts, instruction_files(atts), unrecorded(atts))
     return 0
 
 
