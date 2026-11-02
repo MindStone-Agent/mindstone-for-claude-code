@@ -169,6 +169,7 @@ def build_report(
     tail_ratio: float = 0.20,
     head_chars: int | None = None,
     tail_chars: int | None = None,
+    file_name: str | None = None,
 ) -> dict:
     # Absolute counts win when given: a harness that reports its own head and tail should be
     # measured, not approximated by a fraction that happens to work on two boxes.
@@ -183,10 +184,21 @@ def build_report(
     truncated = len(text) > limit
     marker_len = 0
     if truncated:
-        marker_len = len(
-            f"\n[...truncated, read {_MARKER_NAME} for full content...]\n"
-            f"…(truncated {_MARKER_NAME}: kept {head_end}+{tail_len} chars of {len(text)})…\n"
+        name = file_name or _MARKER_NAME
+        # marker + the two newlines that join it to head and tail; it is spent from the limit
+        # and belongs to neither window
+        # Exactly what the harness does: marker = ["", line1, line2, ""].join("\n"), then the
+        # content is [head, marker, tail].join("\n"). So the overhead beyond head+tail is the
+        # joined marker plus the two newlines that attach it to head and tail.
+        marker_block = "\n".join(
+            [
+                "",
+                f"[...truncated, read {name} for full content...]",
+                f"…(truncated {name}: kept {head_end}+{tail_len} chars of {len(text)})…",
+                "",
+            ]
         )
+        marker_len = len(marker_block) + 2
     injected = window + marker_len
 
     secs = split_sections(text)
@@ -227,7 +239,11 @@ def build_report(
             "delivered_capacity": window,
             "truncation_marker_chars": marker_len,
             "actually_injected": injected,
-            "unused_of_limit": max(0, limit - injected),
+            # NOT clamped at zero. A negative value is the overflow condition: the marker is
+            # spent from a limit that the head/tail split already exhausted, so the function
+            # emits more than maxChars. Only reachable at small limits, but it is real and a
+            # clamp would hide exactly the case worth knowing about.
+            "unused_of_limit": limit - injected,
             "note": (
                 "head+tail is the window; when truncated a marker is also spent from the limit, "
                 "so unused = limit - (head+tail+marker). The shortfall is not headroom: it is a "
@@ -377,6 +393,7 @@ def main() -> int:
         args.tail_ratio,
         head_chars=head_chars,
         tail_chars=tail_chars,
+        file_name=path.name,
     )
     rep["file"]["path"] = str(path)
 
