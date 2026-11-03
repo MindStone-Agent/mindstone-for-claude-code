@@ -134,6 +134,22 @@ def rate_remaining(session: str, what: str, every_s: float) -> float:
         return 0.0
 
 
+def mark_sent(session: str, ts: str) -> None:
+    """Record the ts of the newest status sent, so a held snapshot never overwrites it."""
+    if _ensure_state_dir():
+        try:
+            _state_file(session, "status.sent").write_text(ts)
+        except OSError:
+            pass
+
+
+def last_sent(session: str) -> str:
+    try:
+        return _state_file(session, "status.sent").read_text().strip()
+    except OSError:
+        return ""
+
+
 def reset_rate(session: str, what: str) -> None:
     try:
         _state_file(session, what).unlink()
@@ -189,33 +205,56 @@ def prune_state(max_age_s: float = STATE_MAX_AGE_S) -> None:
 
 # A task subject is the one model-written string the reporter sends, and the framework's
 # scrubber is tuned for transcripts, where a miss stays local. These run after it, on
-# subjects only, and err towards redacting.
-_SECRET_NOUN = re.compile(
-    r"(?i)\b(pass(?:word|wd|phrase)?|pwd|secret|token|api[-_ ]?key|key|credentials?|creds)"
-    r"((?:\s+(?:is|to|as|of|for\s+\S+\s+(?:is|to)))?\s*[=:]?\s*)(\S+)")
+# subjects only. They are heuristics: they catch the common shapes (a secret word followed by
+# its value, credentials, keys, emails) and leave ordinary words, times, file:line references
+# and branch names alone. A secret written as plain prose can still get through.
+_SECRET_WORD = re.compile(
+    r"(?i)\b(pass(?:word|wd|phrase)?|pw|pwd|pin|secret|token|api[-_ ]?key|key|credentials?|creds|bearer)\b"
+    r"(\s*(?:is|was|to|as|=|:)\s*|\s+)(\S+)")
+_CONNECTOR = re.compile(r"(?i)\s*(?:is|was|to|as|=|:)\s*$")
+_SECRETISH = re.compile(r"[0-9!@#$%^&*+=?~]")
 _SUBJECT_RULES = [
-    re.compile(r"\b[A-Z][A-Z0-9_]{2,}\s*=\s*\S+"),                     # ENV_VAR=value
-    re.compile(r"\b[^\s:@/]+:[^\s@/]*[0-9!#$%^&*+=?~][^\s@/]*"),       # user:pass shapes
-    re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"),                        # email addresses
-    re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),                               # SSN shape
-    re.compile(r"\b[0-9a-fA-F]{16,}\b"),                                # long hex
-    re.compile(r"(?=[A-Za-z0-9_+/=-]*[A-Za-z])(?=[A-Za-z0-9_+/=-]*[0-9])[A-Za-z0-9_+/=-]{16,}"),  # long mixed tokens
+    re.compile(r"\b[A-Z][A-Z0-9_]{2,}=\S+"),                                   # ENV_VAR=value
+    re.compile(r"(?<![\w.])[A-Za-z][\w.-]*:(?=[^\s/\[\]]*[A-Za-z])(?=[^\s/\[\]]*[0-9!#$%^&*+=?~])[^\s/\[\]]{4,}"),  # user:pass
+    re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"),                                # email addresses
+    re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),                                       # SSN shape
+    re.compile(r"\b[0-9a-fA-F]{16,}\b"),                                       # long hex
 ]
+_WORD = re.compile(r"[A-Za-z0-9_+/=-]{8,}")
+
+
+def _keyish(w: str) -> bool:
+    """A word that looks like a credential rather than an identifier: 16+ chars with three
+    or more digits, or 8+ chars mixing upper case, lower case and digits."""
+    digits = sum(ch.isdigit() for ch in w)
+    if len(w) >= 16 and digits >= 3:
+        return True
+    return digits > 0 and any(ch.islower() for ch in w) and any(ch.isupper() for ch in w)
 
 
 def _strict_subject(v: str) -> str:
-    v = _SECRET_NOUN.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", v)
+    def word(m: re.Match) -> str:
+        value = m.group(3)
+        if m.group(1).lower() == "bearer" or _CONNECTOR.match(m.group(2)) or _SECRETISH.search(value):
+            return f"{m.group(1)}{m.group(2)}[redacted]"
+        return m.group(0)
+    v = _SECRET_WORD.sub(word, v)
     for rule in _SUBJECT_RULES:
         v = rule.sub("[redacted]", v)
-    return v
+    return _WORD.sub(lambda m: "[redacted]" if _keyish(m.group(0)) else m.group(0), v)
+
+
+SUBJECT_SCAN_MAX = 512  # only 120 chars are sent; scanning more only costs time (regex cost)
 
 
 def scrub_subject(v: object, scrubber_dir: Path | None = None) -> str | None:
-    """A task subject: the framework scrubber, then the stricter subject rules, then cut to
-    120 chars. Scrubbed before cutting, so a secret straddling the cut can't survive as a
-    fragment. If the scrubber can't load, the subject is omitted, never sent unscrubbed."""
+    """A task subject: cut to 512 chars, the framework scrubber, the stricter subject rules,
+    then cut to 120 chars. Scrubbed before the final cut, so a secret straddling it can't
+    survive as a fragment. If the scrubber can't load, the subject is omitted, never sent
+    unscrubbed."""
     if not isinstance(v, str) or not v:
         return None
+    v = v[:SUBJECT_SCAN_MAX]
     try:
         sys.path.insert(0, str(scrubber_dir or ORCHESTRATOR_DIR / "hooks"))
         from scrubber import scrub  # type: ignore
@@ -236,19 +275,36 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_NoRedirect)
 
 
-def post(cfg: FleetConfig, events: list[dict]) -> int | None:
-    """POST /v1/fleet/events. Returns the HTTP status, or None on any failure (dropped)."""
-    body = json.dumps({"events": events}, separators=(",", ":")).encode()
+RETRY_AFTER_MAX_S = 2.0
+
+
+def _post_once(cfg: FleetConfig, body: bytes) -> tuple[int | None, float | None]:
     req = urllib.request.Request(
         cfg.base_url + "/v1/fleet/events", data=body, method="POST",
         headers={"Authorization": f"Bearer {cfg.token}", "Content-Type": "application/json"})
     try:
         with _OPENER.open(req, timeout=HTTP_TIMEOUT_S) as r:
-            return r.status
+            return r.status, None
     except urllib.error.HTTPError as e:
-        return e.code
+        try:
+            wait = float(e.headers.get("Retry-After", "1"))
+        except (TypeError, ValueError):
+            wait = 1.0
+        return e.code, wait
     except Exception:
-        return None
+        return None, None
+
+
+def post(cfg: FleetConfig, events: list[dict]) -> int | None:
+    """POST /v1/fleet/events. Returns the HTTP status, or None on any failure (dropped).
+
+    A 429 is retried once, after its Retry-After (at most 2 s), then dropped (synapse#31)."""
+    body = json.dumps({"events": events}, separators=(",", ":")).encode()
+    status, wait = _post_once(cfg, body)
+    if status == 429:
+        time.sleep(min(max(wait or 0.0, 0.0), RETRY_AFTER_MAX_S))
+        status, _ = _post_once(cfg, body)
+    return status
 
 
 def detach(fn) -> None:
@@ -292,6 +348,7 @@ def send_now(cfg: FleetConfig, events: list[dict]) -> None:
     """The body of a detached send: SIGALRM ends it after SEND_DEADLINE_S, whatever it is
     waiting on, so a sick Synapse or proxy can't pile up processes."""
     if os.environ.get("MS4CC_FLEET_INLINE") != "1":
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)  # an inherited "ignore" would disarm it
         signal.alarm(SEND_DEADLINE_S)
     post(cfg, events)
 

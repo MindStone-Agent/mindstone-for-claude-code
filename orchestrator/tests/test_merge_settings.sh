@@ -153,6 +153,12 @@ if merge_sl "$TMP/sl_moved.json" > "$TMP/sl8.json" 2> "$TMP/esl8"; then
     "$(jq -r '.statusLine.command' "$TMP/sl8.json")" "$SL --wrap-b64 ZWNobyBoaQ=="
 else bad "moved-dir merge failed: $(cat "$TMP/esl8")"; fi
 
+jq -n --arg c "$SL --wrap-b64 ZWNobyBoaQ==  " '{statusLine: {type: "command", command: $c}}' > "$TMP/sl_trail.json"
+if merge_sl "$TMP/sl_trail.json" > "$TMP/sl9.json" 2> "$TMP/esl9"; then
+  assert "ours with trailing whitespace is still ours (not wrapped inside ourselves)" \
+    "$(jq -r '.statusLine.command' "$TMP/sl9.json")" "$SL --wrap-b64 ZWNobyBoaQ=="
+else bad "trailing-space merge failed: $(cat "$TMP/esl9")"; fi
+
 echo "== the REAL settings.fragment.json, substituted as bootstrap does =="
 REAL="$HERE/../settings.fragment.json"
 sed "s|\$ORCHESTRATOR_DIR|$ORCH|g" "$REAL" > "$TMP/real_frag.json"

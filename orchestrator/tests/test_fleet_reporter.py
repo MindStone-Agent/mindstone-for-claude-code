@@ -34,16 +34,22 @@ class Synapse:
 
     def __init__(self) -> None:
         self.requests: list[dict] = []
+        self.latency = 0.0        # seconds before answering
+        self.statuses: list[int] = []  # scripted response codes, consumed in order; then 202
         outer = self
 
         class H(BaseHTTPRequestHandler):
             def do_POST(self):  # noqa: N802
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                time.sleep(outer.latency)
+                code = outer.statuses.pop(0) if outer.statuses else 202
                 outer.requests.append({"path": self.path, "auth": self.headers.get("Authorization"),
-                                       "raw": body.decode(), "json": json.loads(body)})
-                self.send_response(202)
+                                       "raw": body.decode(), "json": json.loads(body), "code": code})
+                self.send_response(code)
+                if code == 429:
+                    self.send_header("Retry-After", "1")
                 self.end_headers()
-                self.wfile.write(b'{"accepted": 1}')
+                self.wfile.write(b'{"accepted": 1}' if code == 202 else b'{}')
 
             def do_GET(self):  # noqa: N802 - a followed redirect arrives as a GET
                 outer.requests.append({"path": self.path, "auth": self.headers.get("Authorization"),
@@ -59,7 +65,8 @@ class Synapse:
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def events(self) -> list[dict]:
-        return [e for r in self.requests for e in r["json"]["events"]]
+        """Events the server accepted (a 429'd attempt isn't one)."""
+        return [e for r in self.requests if r.get("code", 202) == 202 for e in r["json"]["events"]]
 
     def wait(self, n: int, timeout: float = 5.0) -> list[dict]:
         end = time.time() + timeout
@@ -358,21 +365,41 @@ def test_redirect_is_never_followed_so_the_token_stays_home(tmp_path, synapse):
     "mail jane.doe@example.com about it",
     "SSN 123-45-6789 on the form",
     "token ghp9aZ8bY7cX6dW5eV4fU3",
+    "pw: hunter2",
+    "PIN 4821",
+    "login admin / Sup3rS3cret!",
+    "Bearer abcdef",
+    "the passphrase is hunter2 horse",
 ])
 def test_prose_secrets_in_task_subjects_are_redacted(tmp_path, synapse, subject):
     env = make_env(tmp_path, synapse.url)
     hook(env, base("TaskCreated", task_id="1", task_subject=subject))
     (ev,) = synapse.wait(1)
     sent = ev["payload"].get("subject", "")
-    for secret in ("hunter2", "Tr0ub4dor", "4f9a8b7c6d5e", "S3cr3tP", "sk-abc", "jane.doe", "123-45-6789", "ghp9aZ8bY7"):
+    for secret in ("hunter2", "Tr0ub4dor", "4f9a8b7c6d5e", "S3cr3tP", "@ss", "sk-abc", "jane.doe", "123-45-6789",
+                   "ghp9aZ8bY7", "4821", "Sup3rS3cret", "abcdef"):
         assert secret not in sent, f"{secret!r} left the machine in {sent!r}"
 
 
-def test_plain_task_subject_survives(tmp_path, synapse):
-    env = make_env(tmp_path, synapse.url)
-    hook(env, base("TaskCreated", task_id="1", task_subject="Write the PR body for the fleet reporter"))
-    (ev,) = synapse.wait(1)
-    assert ev["payload"]["subject"] == "Write the PR body for the fleet reporter"
+@pytest.mark.parametrize("subject", [
+    "Write the PR body for the fleet reporter", "Update keyboard shortcuts", "Fix key handling in the parser",
+    "Update password reset flow", "Add secret scanning to CI", "token redirect bug", "Meeting at 10:30",
+    "Fix README.md:42 typo", "Rebase feature/fleet-reporter-v2", "Investigate test_fleet_reporter2 flake",
+    "Set MAX_RETRIES = 3", "Bump Python to 3.14 in CI", "Review PR #142 and #143", "see http://host:8080/path",
+])
+def test_plain_task_subject_survives(tmp_path, subject):
+    sys.path.insert(0, str(ORCH))
+    from fleet.common import scrub_subject
+    assert scrub_subject(subject) == subject
+
+
+def test_subject_scrub_is_bounded_on_huge_input():
+    sys.path.insert(0, str(ORCH))
+    from fleet.common import scrub_subject
+    for shape in ("key" + " " * 40000, "x" * 40000 + ":", "a:" * 20000, "A1" * 30000):
+        t = time.perf_counter()
+        scrub_subject(shape)
+        assert time.perf_counter() - t < 0.5, f"{len(shape)}-char subject took too long"
 
 
 def test_subject_omitted_when_the_scrubber_cannot_load(tmp_path):
@@ -469,6 +496,73 @@ def test_sampling_check_holds_a_lock(tmp_path, synapse):
     p.wait(timeout=10)
     assert still_waiting, "the hook didn't wait for the lock"
     assert [e["type"] for e in synapse.wait(1)] == ["tool"]
+
+
+def test_update_during_the_flushers_send_is_not_lost(tmp_path, synapse):
+    """Review round 2, finding A: an update landing while the flusher's POST is in flight
+    used to find the claim still held and be dropped for good."""
+    synapse.latency = 0.6
+    env = make_env(tmp_path, synapse.url, inline=False)
+    def status(pct):
+        inp = json.loads(json.dumps(STATUS_IN))
+        inp["context_window"]["used_percentage"] = pct
+        assert hook(env, inp, STATUSLINE).returncode == 0
+    t0 = time.time()
+    status(10)                       # direct send; opens the window
+    time.sleep(1.0)
+    status(20)                       # held; a flusher waits for the window to end (~t0+10)
+    time.sleep(max(0.0, t0 + 10.35 - time.time()))
+    status(30)                       # lands while the flusher's POST is in flight
+    evs = synapse.wait(3, timeout=25)
+    assert [e["payload"]["context_pct"] for e in evs] == [10, 20, 30]
+
+
+def test_429_is_retried_once_then_dropped(tmp_path, synapse):
+    env = make_env(tmp_path, synapse.url)
+    synapse.statuses = [429]
+    hook(env, base("Stop"))
+    assert [r["code"] for r in synapse.requests] == [429, 202]
+    assert [e["type"] for e in synapse.events()] == ["turn.ended"]
+    synapse.statuses = [429, 429]
+    hook(env, base("UserPromptSubmit", prompt="x"))
+    assert [r["code"] for r in synapse.requests][2:] == [429, 429], "one retry only, then dropped"
+
+
+def test_report_hook_is_silent_on_a_python_without_tomllib(tmp_path, synapse):
+    old = Path("/usr/bin/python3")
+    if not old.exists() or subprocess.run([str(old), "-c", "import tomllib"], capture_output=True).returncode == 0:
+        pytest.skip("no tomllib-less python on this box")
+    env = make_env(tmp_path, synapse.url)
+    r = subprocess.run([str(old), str(REPORT)], input=json.dumps(base("SessionStart", source="startup")).encode(),
+                       env=env, capture_output=True, timeout=20)
+    assert (r.returncode, r.stdout) == (0, b"")
+    time.sleep(0.3)
+    assert synapse.requests == []
+
+
+def test_fragment_notification_matcher_matches_the_needs_input_kinds():
+    """The matcher is the real gate in Claude Code; the reporter's list must agree with it."""
+    sys.path.insert(0, str(ORCH))
+    from fleet.report import NEEDS_INPUT_KINDS
+    frag = json.loads((ORCH / "settings.fragment.json").read_text())
+    groups = [g for g in frag["hooks"]["Notification"] if any("fleet/report.py" in h["command"] for h in g["hooks"])]
+    assert len(groups) == 1 and set(groups[0]["matcher"].split("|")) == NEEDS_INPUT_KINDS
+
+
+@pytest.mark.parametrize("fleet_toml,expected", [
+    ('[fleet]\nenabled = true\nmachine = "box 💻"\n', {"enabled": True, "machine": "box 💻"}),
+    ('[fleet]\nenabled = false\nmachine = "a \\"q\\" \\\\ b"\n', {"enabled": False, "machine": 'a "q" \\ b'}),
+    ('[fleet]\nenabled = "yes"\nmachine = 7\n', None),
+    ('', None),
+])
+def test_setup_keeps_the_fleet_table(tmp_path, fleet_toml, expected):
+    import tomllib
+    sys.path.insert(0, str(ORCH))
+    from integrations.synapse.cli import _kept_fleet_lines
+    p = tmp_path / "synapse.toml"
+    p.write_text('[synapse]\nhandle = "x"\n' + fleet_toml)
+    out = "\n".join(['[synapse]', 'handle = "x"', ""] + _kept_fleet_lines(p))
+    assert tomllib.loads(out).get("fleet") == expected
 
 
 # --- latency with Synapse down (done item 6) ----------------------------------------------

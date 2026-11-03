@@ -6,10 +6,11 @@ things, in this order:
 1. **Prints the bar.** If the user already had a status line, bootstrap wrapped it rather
    than replacing it: its command arrives here base64-encoded after `--wrap-b64`, runs with
    the same stdin and inherited stderr, and its stdout bytes and exit code pass through
-   unchanged. With nothing to wrap, or if the wrapped command can't start or runs past
-   WRAP_TIMEOUT_S, it prints a short bar of its own (model, context %, cost). Nothing outside
-   the standard library is imported before the bar is out, so a broken MS4CC install can't
-   blank the user's bar.
+   unchanged. With nothing to wrap, or if the wrapped command runs past WRAP_TIMEOUT_S, it
+   prints a short bar of its own (model, context %, cost). Nothing outside the standard library
+   is imported before the bar is out, so a Fleet module that can't load (no tomllib on Python
+   3.10, say) can't blank the user's bar. A missing or broken MS4CC venv still can: the command
+   runs on the venv's python.
 2. **Reports `status`** to Synapse, only when `[fleet] enabled = true`: at most once every
    10 s per session, from a detached grandchild. An update that falls inside the window is
    kept and sent when the window ends, so the last update of a turn isn't lost.
@@ -127,6 +128,7 @@ def report(inp: dict) -> None:
             pending.unlink()
         except OSError:
             pass
+        c.mark_sent(sid, event["ts"])
         c.emit(cfg, [event])
         return
     # Inside the window: keep the newest snapshot, and make sure one sender is waiting to
@@ -150,23 +152,41 @@ def report(inp: dict) -> None:
         os.close(os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
     except OSError:
         return  # a flusher is already waiting; it sends the newest pending snapshot
-    delay = c.rate_remaining(sid, "status", STATUS_EVERY_S)
+
+    def release() -> None:
+        try:
+            claim.unlink()
+        except OSError:
+            pass
 
     def flush() -> None:
+        """Wait out the window, then send the newest pending snapshot. The claim is released
+        BEFORE the send, so an update arriving during the POST gets a flusher of its own. If a
+        direct send opened a new window first, the snapshot goes back (unless a newer one is
+        already waiting, or it is older than what was sent) and the wait repeats."""
         try:
-            time.sleep(delay + 0.05)
-            try:
-                ev = json.loads(pending.read_text())
-                pending.unlink()
-            except (OSError, ValueError):
-                return  # a direct send already went out and cleared it
-            if c.rate_ok(sid, "status", STATUS_EVERY_S):
-                c.send_now(cfg, [ev])
+            for _ in range(6):
+                time.sleep(c.rate_remaining(sid, "status", STATUS_EVERY_S) + 0.05)
+                try:
+                    ev = json.loads(pending.read_text())
+                    pending.unlink()
+                except (OSError, ValueError):
+                    return  # nothing waiting: a direct send already carried it
+                if ev.get("ts", "") <= c.last_sent(sid):
+                    return  # something newer already went out
+                if c.rate_ok(sid, "status", STATUS_EVERY_S):
+                    release()
+                    c.mark_sent(sid, ev.get("ts", ""))
+                    c.send_now(cfg, [ev])
+                    return
+                try:
+                    fd = os.open(pending, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                    os.write(fd, json.dumps(ev).encode())
+                    os.close(fd)
+                except OSError:
+                    pass  # a newer snapshot is already pending; send that one instead
         finally:
-            try:
-                claim.unlink()
-            except OSError:
-                pass
+            release()
     c.detach(flush)
 
 

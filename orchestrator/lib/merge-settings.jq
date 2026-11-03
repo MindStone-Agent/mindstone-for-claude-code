@@ -66,7 +66,7 @@ def strip_managed($orch):
     | if $old == null then .statusLine = $mine
       elif ($old | type) != "object" then .
       elif (($old.command // "") | type) == "string"
-           and (($old.command // "") | test("^.+/\\.venv/bin/python .+/fleet/statusline\\.py( --wrap-b64 [A-Za-z0-9+/=]+)?$")) then
+           and (($old.command // "") | gsub("^\\s+|\\s+$"; "") | test("^.+/\\.venv/bin/python .+/fleet/statusline\\.py( --wrap-b64 [A-Za-z0-9+/=]+)?$")) then
         ((first($old.command | scan("--wrap-b64 ([A-Za-z0-9+/=]+)")) // [null])[0]) as $w
         | .statusLine = ($old + {type: "command",
                                   command: ($mine.command + (if $w then " --wrap-b64 " + $w else "" end))})
