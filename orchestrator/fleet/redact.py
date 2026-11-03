@@ -105,6 +105,12 @@ def _htpasswd(m: re.Match) -> str:
 # Anchored at the start of a run: unanchored, a long run with no marker was tried from every
 # position (7 s on 256 KB of KEY_KEY_...).
 _REMNANT_BEFORE = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{8,4096}(?=\[REDACTED-)")
+# The tail of a value the chunk scrubber cut in two: its head became [REDACTED-SECRET] in one
+# chunk, and every later rule skips what follows a marker, so `passwd:[REDACTED-SECRET]!2024`
+# kept its tail (activity review rounds 3 and 4). Anything glued to the marker up to a
+# separator goes too. Redacting the value before the scrubber instead hid it from the
+# scrubber's own propagation, so a repeat of it elsewhere went out whole (round 4, S1-1).
+_GLUED_AFTER_SECRET = re.compile(r"\[REDACTED-SECRET\][^\s\"'`<>\\,;)}\]]{1,256}")
 _REMNANT_AFTER = re.compile(r"(\[REDACTED-[A-Z-]{0,40}\])[A-Za-z0-9+/_-]{8,4096}")
 
 
@@ -112,6 +118,7 @@ def redact(text: str) -> str:
     """The reporter's own rules, after the server's full pass."""
     text = _REMNANT_BEFORE.sub(_R, text)
     text = _REMNANT_AFTER.sub(r"\1" + _R, text)
+    text = _GLUED_AFTER_SECRET.sub(_R, text)
     for pattern, repl in _MORE:
         text = pattern.sub(repl, text)
     text = _HTPASSWD.sub(_htpasswd, text)
@@ -128,12 +135,6 @@ def clean(text: str) -> str:
     from fleet import fleet_redact_vendor as server
     # Line-anchored rules end in $, which doesn't match before \r (activity review round 3).
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    # The whole-text rules first, before the chunked scrub: a value the chunk scrubber cuts in
-    # two (DB_PASSWORD=correct | .horse.battery.staple) has its head redacted in one chunk, and
-    # every later rule skips what follows a [REDACTED marker (activity review round 3).
-    for pattern, repl in server.EXTRA:
-        text = pattern.sub(repl, text)
-    text = redact(text)
     return redact(server.redact_preview(text))
 
 

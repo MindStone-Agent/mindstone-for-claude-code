@@ -840,11 +840,12 @@ def test_a_punctuated_password_across_the_chunk_cut_leaves_no_fragment(password,
             assert password[i:i + 4] not in text, (pad, password[i:i + 4])
 
 
+@pytest.mark.parametrize("eol", ["\r\n", "\r"], ids=["crlf", "cr"])
 @pytest.mark.parametrize("case", _shared_fixtures()["secret"], ids=lambda c: c["name"])
-def test_a_secret_in_crlf_text_never_survives(case):
-    """Round 3, finding 2: the line-anchored rules end in $, which doesn't match before \\r, so
-    10 fixtures leaked once Windows line endings were used."""
-    out, _ = preview(case["input"].replace("\n", "\r\n") + "\r\n", A.OUTPUT_MAX)
+def test_a_secret_in_crlf_text_never_survives(case, eol):
+    """Round 3, finding 2: the line-anchored rules end in $, which doesn't match before \r, so
+    10 fixtures leaked once Windows line endings were used (7 with lone CRs, round 4 N1)."""
+    out, _ = preview(case["input"].replace("\n", eol) + eol, A.OUTPUT_MAX)
     assert case["leak"] not in out
 
 
@@ -897,3 +898,33 @@ def test_only_a_user_lines_error_result_closes_a_call(tmp_path, synapse):
     transcript(tp, [blob])
     hook(env, base("Stop", transcript_path=str(tp)))
     assert [e for e in synapse.wait(3) if e["type"] == "tool.finished"] == []
+
+
+
+# --- activity review round 4 ------------------------------------------------------------------
+
+@pytest.mark.parametrize("case", _shared_fixtures()["secret"], ids=lambda c: c["name"])
+def test_a_secret_repeated_bare_later_is_never_kept_where_the_server_removes_it(case):
+    """Round 4, S1-1: redacting a keyed value before the scrubber ran hid it from the scrubber's
+    propagation, so a repeat of it ("auth ok using <it>") went out whole where the server's own
+    pass removes it (6 fixtures). Repeats of values only the extra rules catch are not
+    propagated on either side yet: a follow-up for the shared fixtures, not this check."""
+    from fleet import fleet_redact_vendor as server
+    raw = case["input"] + "\nlater: " + case["leak"] + " done"
+    out, _ = preview(raw, A.OUTPUT_MAX)
+    if case["leak"] not in server.redact_preview(raw):
+        assert case["leak"] not in out
+
+
+@pytest.mark.parametrize("password", ["s3cr3t!P@ssw0rd!2024", "correct.horse.battery.staple", "Xk2$mQ9#vLpq7Rz8wT"])
+@pytest.mark.parametrize("key", ["passwd:", "password:", "Password:", "pwd:", "passphrase:", "DB_PASSWORD=",
+                                 "PGPASSWORD=", "password=", "db_password="])
+@pytest.mark.parametrize("pad", ["Q", "Q,", "a;"])
+def test_a_split_value_leaves_no_fragment_for_any_key_form(password, key, pad):
+    """Round 4, S1-2: in whitespace-free text the 1 KB cut lands inside the value, the chunk
+    scrubber redacts its head, and every later rule skips what follows the marker."""
+    for p in range(980, 1031):
+        raw = (pad * 1100)[:p] + "," + key + password + "," + (pad * 1500)
+        text, _ = preview(raw, A.OUTPUT_MAX)
+        for i in range(len(password) - 3):
+            assert password[i:i + 4] not in text, (p, key, password[i:i + 4])
