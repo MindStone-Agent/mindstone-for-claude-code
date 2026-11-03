@@ -22,6 +22,21 @@
             "type": "command",
             "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/report.py",
             "async": true
+          },
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/live.py --watch"
+          }
+        ]
+      }
+    ],
+    "FileChanged": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/report.py",
+            "async": true
           }
         ]
       }
@@ -203,7 +218,7 @@
       }
     ]
   },
-  "_comment_fleet": "Fleet Phase 0 (synapse#31): fleet/report.py rides every event above as an async command hook and posts nothing unless [fleet] enabled = true in config/synapse.toml. statusLine is fleet/statusline.py, installed only while Fleet is on (bootstrap passes --argjson fleet); if settings.json already has a statusLine, the merge WRAPS it (passes its command base64-encoded via --wrap-b64, its output shown unchanged) and never replaces it, and with Fleet off it puts the wrapped one back. PreToolUse is used only by the activity layer ([fleet] activity = true); with it off the hook exits at once.",
+  "_comment_fleet": "Fleet Phase 0 (synapse#31): fleet/report.py rides every event above as an async command hook and posts nothing unless [fleet] enabled = true in config/synapse.toml. statusLine is fleet/statusline.py, installed only while Fleet is on (bootstrap passes --argjson fleet); if settings.json already has a statusLine, the merge WRAPS it (passes its command base64-encoded via --wrap-b64, its output shown unchanged) and never replaces it, and with Fleet off it puts the wrapped one back. PreToolUse is used only by the activity layer ([fleet] activity = true); with it off the hook exits at once. FileChanged and the synchronous fleet/live.py --watch (SessionStart) are the live-output stream ([fleet] activity = true): --watch returns watchPaths for the session's tasks directory and prints nothing when activity is off; FileChanged has no matcher on purpose, since for FileChanged a matcher is a list of paths to watch.",
   "statusLine": {
     "type": "command",
     "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/statusline.py",

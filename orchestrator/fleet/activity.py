@@ -200,6 +200,10 @@ def tool_finished(inp: dict, ok: bool) -> dict | None:
     d = inp.get("duration_ms")
     payload = {"tool_use_id": tool_use_id, "tool_name": name, "ok": ok,
                "duration_ms": d if isinstance(d, int) and not isinstance(d, bool) and d >= 0 else None}
+    resp = inp.get("tool_response") if isinstance(inp.get("tool_response"), dict) else {}
+    task_id = resp.get("backgroundTaskId") if name == "Bash" else resp.get("taskId") if name == "Monitor" else None
+    if isinstance(task_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", task_id):
+        payload["task_id"] = task_id  # its live output streams as tool.output (fleet/live.py)
     if ok:
         text, cut = preview(output_text(name, inp.get("tool_response"), inp.get("tool_input")), OUTPUT_MAX)
         payload.update(output_preview=text, output_truncated=cut or None)

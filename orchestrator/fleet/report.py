@@ -129,6 +129,9 @@ def _activity(cfg, inp: dict, session: str, mapped) -> list[dict] | None:
             if not (isinstance(resp, dict) and resp.get("status") == "async_launched"):
                 a.forget_agent_call(session, inp.get("tool_use_id"))
         payload = a.tool_finished(inp, ok=ev == "PostToolUse")
+        if payload and payload.get("task_id"):
+            from fleet import live
+            live.remember_task(session, payload["task_id"], payload["tool_use_id"])
         return [_event(cfg, "tool.finished", session, payload, agent_id)] if payload else []
     if ev == "SubagentStart" and mapped is not None:
         kind, payload, _ = mapped
@@ -168,6 +171,17 @@ def main() -> int:
     if not session:
         return 0
     remember_mode(session, inp.get("permission_mode"))  # the status line has no mode field
+    if inp.get("hook_event_name") == "FileChanged":  # a task's output file: live output
+        if cfg.activity:
+            from fleet import live
+            live.on_file_changed(cfg, inp, session)
+        return 0
+    if cfg.activity and inp.get("hook_event_name") in ("Stop", "SessionEnd"):
+        from fleet import live
+        if inp["hook_event_name"] == "Stop":
+            live.remember_running(session, inp.get("background_tasks"))
+        else:
+            live.mark_ended(session)
     mapped = build(inp)
     if mapped is not None and mapped[0] == "session.started":
         prune_state()
