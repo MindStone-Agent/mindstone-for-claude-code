@@ -62,6 +62,47 @@ def short(v: object, limit: int = 64) -> str | None:
     return v[:limit]
 
 
+def _read_config() -> dict | None:
+    try:
+        import tomllib
+    except ImportError:
+        return None
+    try:
+        with CONFIG_PATH.open("rb") as f:
+            return tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+
+
+def fleet_enabled() -> bool:
+    """`[fleet] enabled = true`, whatever else is set. Bootstrap installs the status line only
+    then, and removes it again when this is false."""
+    data = _read_config()
+    fleet = data.get("fleet") if data else None
+    return isinstance(fleet, dict) and fleet.get("enabled") is True
+
+
+def plain_http_remote(base_url: object) -> bool:
+    """True when the token would cross the network unencrypted: http:// to anything but
+    localhost. Bootstrap warns about it; the board needs https before production."""
+    if not isinstance(base_url, str) or not base_url.lower().startswith("http://"):
+        return False
+    from urllib.parse import urlsplit
+    try:
+        host = (urlsplit(base_url).hostname or "").lower()
+    except ValueError:
+        return True
+    return host not in ("localhost", "127.0.0.1", "::1")
+
+
+def bootstrap_state() -> str:
+    """One line for bootstrap.sh: `on`, `on plain-http` or `off`."""
+    if not fleet_enabled():
+        return "off"
+    syn = (_read_config() or {}).get("synapse")
+    return "on plain-http" if isinstance(syn, dict) and plain_http_remote(syn.get("base_url")) else "on"
+
+
 def fleet_config() -> FleetConfig | None:
     """The reporter's config, or None when Fleet is off or can't run.
 
@@ -69,14 +110,8 @@ def fleet_config() -> FleetConfig | None:
     `[synapse]` table (the status-line JSON doesn't name the agent) and the token from
     ~/.synapse/<handle>.token, the agent's own existing token: an agent reports only about
     itself (synapse#31 section 1). On a Python without tomllib (3.10) Fleet is simply off."""
-    try:
-        import tomllib
-    except ImportError:
-        return None
-    try:
-        with CONFIG_PATH.open("rb") as f:
-            data = tomllib.load(f)
-    except (OSError, tomllib.TOMLDecodeError):
+    data = _read_config()
+    if data is None:
         return None
     fleet = data.get("fleet")
     syn = data.get("synapse")
@@ -122,11 +157,30 @@ def _ensure_state_dir() -> bool:
         return False
 
 
+LOCK_WAIT_S = 0.5  # the status line runs this on Claude Code's render path: never wait long
+
+
+def _lock(fd: int, wait_s: float = LOCK_WAIT_S) -> bool:
+    """An exclusive flock, given up after `wait_s` (a suspended holder, a slow network home)."""
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+        except OSError:
+            return False
+
+
 def rate_ok(session: str, what: str, every_s: float) -> bool:
     """True at most once per `every_s` seconds per session and kind; records the send.
 
     Check and mark happen under an exclusive lock, so parallel hooks (a burst of tool calls)
-    can't all pass. The mark is the file's mtime, so a killed reporter can't wedge it."""
+    can't all pass. The mark is the file's mtime, so a killed reporter can't wedge it. A lock
+    that can't be had within LOCK_WAIT_S counts as not ok: the event waits or is dropped."""
     if not _ensure_state_dir():
         return False
     path = _state_file(session, what)
@@ -135,7 +189,8 @@ def rate_ok(session: str, what: str, every_s: float) -> bool:
     except OSError:
         return False
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if not _lock(fd):
+            return False
         now = time.time()
         st = os.fstat(fd)
         if st.st_size and now - st.st_mtime < every_s:
