@@ -927,3 +927,59 @@ def test_bootstrap_state_decides_the_status_line_install(tmp_path, toml, state):
     r = subprocess.run([sys.executable, "-c", "from fleet.common import bootstrap_state; print(bootstrap_state())"],
                        cwd=str(ORCH), env=env, capture_output=True, text=True, timeout=20)
     assert r.stdout.strip() == state, r.stderr
+
+
+S3_C_RACE = r"""import sys, os, threading, time
+sys.path.insert(0, %r)
+from fleet import statusline as sl
+from fleet import common as c
+sl.STATUS_EVERY_S = 1.0
+sent = []
+c.send_now = lambda cfg, evs: sent.append(evs[0]["payload"]["context_pct"])
+c.emit = c.send_now
+threads = []
+def detach(fn):
+    t = threading.Thread(target=fn); threads.append(t); t.start()
+c.detach = detach
+def inp(p): return {"session_id": "S1", "context_window": {"used_percentage": p}}
+pending = c._state_file("S1", "status.pending")
+real_last_sent, real_write = c.last_sent, os.write
+state = {"window": False, "stole": False}
+def last_sent(sid):
+    if threads and threading.current_thread() is threads[0] and not state["window"]:
+        state["window"] = True
+        c.reset_rate("S1", "status"); c.rate_ok("S1", "status", 1.0)  # a direct send opens a window
+    return real_last_sent(sid)
+def write(fd, data):
+    # A second flusher takes the put-back file between its create and its write: it reads it
+    # empty, drops it, and the write lands in an unlinked file.
+    if threads and threading.current_thread() is threads[0] and not state["stole"] and pending.exists():
+        state["stole"] = True
+        stolen = pending.with_name(pending.name + ".stolen")
+        os.rename(pending, stolen)
+        stolen.unlink()
+    return real_write(fd, data)
+c.last_sent = last_sent
+os.write = write
+sl.report(inp(10)); time.sleep(0.002)
+sl.report(inp(20))
+for _ in range(60):
+    for t in list(threads): t.join()
+    time.sleep(0.05)
+print(sent)
+"""
+
+
+def test_a_snapshot_put_back_can_never_be_taken_half_written(tmp_path, synapse):
+    """#144 delta S3-C (Cairn): the put-back created the file, then wrote it, so a second
+    flusher could take it empty in between, and the snapshot was lost."""
+    env = make_env(tmp_path, synapse.url)
+    r = subprocess.run([sys.executable, "-B", "-c", S3_C_RACE % str(ORCH)], env=env, capture_output=True, text=True,
+                       timeout=60, cwd=str(tmp_path))
+    assert r.stdout.strip() == "[10.0, 20.0]", r.stdout + r.stderr
+
+
+def test_a_nul_in_the_wrapped_command_still_shows_a_bar(tmp_path, synapse):
+    env = make_env(tmp_path, synapse.url, enabled=False)
+    r = hook(env, STATUS_IN, STATUSLINE, ["--wrap-b64", base64.b64encode(b"echo a\x00b").decode()])
+    assert (r.stdout.decode(), r.returncode) == ("Opus 5.5 · ctx 42% · $1.23", 0)

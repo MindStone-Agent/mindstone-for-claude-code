@@ -9,7 +9,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 FILTER="$HERE/../lib/merge-settings.jq"
-ORCH="/opt/orch"          # pretend orchestrator dir; managed commands live under it
+ORCH="/opt/proj/orchestrator"  # pretend orchestrator dir; managed commands live under it
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -148,7 +148,7 @@ echo '{"statusLine": "echo hi"}' > "$TMP/sl_str.json"
 if merge_sl "$TMP/sl_str.json" > "$TMP/sl7.json" 2> "$TMP/esl7"; then
   assert "a non-object statusLine is left untouched (no jq error)" "$(jq -c '.statusLine' "$TMP/sl7.json")" '"echo hi"'
 else bad "non-object statusLine made jq fail: $(cat "$TMP/esl7")"; fi
-OTHER="/old/orch/.venv/bin/python /old/orch/fleet/statusline.py --wrap-b64 ZWNobyBoaQ=="
+OTHER="/old/proj/orchestrator/.venv/bin/python /old/proj/orchestrator/fleet/statusline.py --wrap-b64 ZWNobyBoaQ=="
 jq -n --arg c "$OTHER" '{statusLine: {type: "command", command: $c}}' > "$TMP/sl_moved.json"
 if merge_sl "$TMP/sl_moved.json" > "$TMP/sl8.json" 2> "$TMP/esl8"; then
   assert "ours from a moved orchestrator dir is re-prefixed, wrapped command kept" \
@@ -183,10 +183,17 @@ if merge_sl_off "$TMP/sl8.json" > "$TMP/o6.json" 2> "$TMP/eo6" && merge_sl_off "
   assert "Fleet off: a wrapped 'echo hi' comes back" "$(jq -r '.statusLine.command' "$TMP/o6.json")" "echo hi"
   assert "Fleet off: ours from a moved dir is unwrapped too" "$(jq -r '.statusLine.command' "$TMP/o7.json")" "echo hi"
 else bad "Fleet-off unwrap of moved/echo failed: $(cat "$TMP/eo6")"; fi
-jq -n --arg c "$SL --wrap-b64 ////" '{statusLine: {type: "command", command: $c}}' > "$TMP/sl_bad.json"
-if merge_sl_off "$TMP/sl_bad.json" > "$TMP/o8.json" 2> "$TMP/eo8"; then
-  assert "Fleet off, wrap that doesn't decode to UTF-8: left as it is" "$(jq -r '.statusLine.command' "$TMP/o8.json")" "$SL --wrap-b64 ////"
-else bad "Fleet-off undecodable failed: $(cat "$TMP/eo8")"; fi
+for w in //// eA; do  # invalid UTF-8; unpadded: neither round-trips, as statusline.py's validate=True refuses them
+  jq -n --arg c "$SL --wrap-b64 $w" '{statusLine: {type: "command", command: $c}}' > "$TMP/sl_bad.json"
+  if merge_sl_off "$TMP/sl_bad.json" > "$TMP/o8.json" 2> "$TMP/eo8"; then
+    assert "Fleet off, a wrap that doesn't round-trip ($w): left as it is" "$(jq -r '.statusLine.command' "$TMP/o8.json")" "$SL --wrap-b64 $w"
+  else bad "Fleet-off undecodable failed: $(cat "$TMP/eo8")"; fi
+done
+jq -n --arg c "echo $(printf '\xef\xbf\xbd') ok" '{statusLine: {type: "command", command: $c}}' > "$TMP/sl_fffd.json"
+if merge_sl "$TMP/sl_fffd.json" > "$TMP/o10.json" 2> "$TMP/eo10" && merge_sl_off "$TMP/o10.json" > "$TMP/o11.json" 2>> "$TMP/eo10"; then
+  assert "a user line containing U+FFFD is wrapped, then restored (#144 delta S3-A)" \
+    "$(jq -cS '.statusLine' "$TMP/o11.json")" "$(jq -cS '.statusLine' "$TMP/sl_fffd.json")"
+else bad "U+FFFD round trip failed: $(cat "$TMP/eo10")"; fi
 if merge_sl "$TMP/o3.json" > "$TMP/o9.json" 2> "$TMP/eo9"; then
   assert "on, off, on again: the same wrap as the first time" "$(jq -cS '.statusLine' "$TMP/o9.json")" "$(jq -cS '.statusLine' "$TMP/sl2.json")"
 else bad "on-off-on failed: $(cat "$TMP/eo9")"; fi
@@ -195,7 +202,8 @@ echo "== statusLine: only our exact shape counts as ours (#144 review S2-2) =="
 for c in '~/tools/.venv/bin/python ~/tools/fleet/statusline.py' \
          'cd ~/x && ~/x/.venv/bin/python ~/x/fleet/statusline.py' \
          '/a/.venv/bin/python /b/fleet/statusline.py' \
-         'cd /x && /x/.venv/bin/python /x/fleet/statusline.py'; do
+         'cd /x && /x/.venv/bin/python /x/fleet/statusline.py' \
+         '/home/u/proj/.venv/bin/python /home/u/proj/fleet/statusline.py'; do
   jq -n --arg c "$c" '{statusLine: {type: "command", command: $c}}' > "$TMP/look.json"
   if merge_sl "$TMP/look.json" > "$TMP/look_on.json" 2> "$TMP/elook" && merge_sl_off "$TMP/look.json" > "$TMP/look_off.json" 2>> "$TMP/elook"; then
     B64=$(jq -r '.statusLine.command' "$TMP/look_on.json" | sed -n 's/.*--wrap-b64 \([A-Za-z0-9+/=]*\).*/\1/p')
