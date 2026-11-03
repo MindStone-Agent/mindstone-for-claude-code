@@ -26,7 +26,7 @@ from pathlib import Path
 if __package__ in (None, ""):  # run as a script by the hook command
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fleet.common import emit, fleet_config, now_iso, prune_state, rate_ok, remember_mode, reset_rate, scrub_subject  # noqa: E402
+from fleet.common import emit, emit_later, fleet_config, now_iso, prune_state, rate_ok, remember_mode, reset_rate, scrub_subject  # noqa: E402
 
 HARNESS = "claude-code"
 # Notification types that mean a person must act (synapse#31: permission, idle, elicitation).
@@ -93,6 +93,59 @@ def build(inp: dict) -> tuple[str, dict, dict] | None:
     return None
 
 
+def _event(cfg, kind: str, session: str, payload: dict, agent_id: object = None) -> dict:
+    return {
+        "type": kind,
+        "ts": now_iso(),
+        "machine": cfg.machine,
+        "harness": HARNESS,
+        "session_id": session,
+        # Set on events fired inside a subagent (and on SubagentStart/Stop, naming it).
+        "agent_id": _s(agent_id, 128),
+        "parent_agent_id": None,
+        "payload": {k: v for k, v in payload.items() if v is not None},
+    }
+
+
+def _activity(cfg, inp: dict, session: str, mapped) -> list[dict] | None:
+    """The activity-layer events for one hook input (synapse#31 scope change), replacing the
+    status layer's event where they overlap. None when activity has nothing to add."""
+    from fleet import activity as a
+    ev = inp.get("hook_event_name")
+    agent_id = inp.get("agent_id")
+    if ev == "PreToolUse":
+        payload = a.tool_started(inp)
+        if payload is None:
+            return []
+        if payload["tool_name"] in a.AGENT_TOOLS:
+            a.remember_agent_call(session, inp)
+        return [_event(cfg, "tool.started", session, payload, agent_id)]
+    if ev in ("PostToolUse", "PostToolUseFailure"):
+        payload = a.tool_finished(inp, ok=ev == "PostToolUse")
+        return [_event(cfg, "tool.finished", session, payload, agent_id)] if payload else []
+    if ev == "SubagentStart" and mapped is not None:
+        kind, payload, _ = mapped
+        parent, description = a.pair_subagent(session, payload.get("agent_type"))
+        text, _ = a.preview(description, a.DESCRIPTION_MAX)
+        payload = dict(payload, parent_tool_use_id=parent, description=text)
+        return [_event(cfg, kind, session, payload, agent_id)]
+    return None
+
+
+def _tail(inp: dict, session: str) -> tuple[Path, str | None, bool] | None:
+    """Which transcript to tail for replies after this event, if any."""
+    from fleet import activity as a
+    ev = inp.get("hook_event_name")
+    tp = inp.get("transcript_path")
+    agent_id = _s(inp.get("agent_id"), 128)
+    if ev in ("PostToolUse", "PostToolUseFailure", "Stop", "SubagentStop") and agent_id:
+        path = a.subagent_transcript(tp, session, agent_id)
+        return (path, agent_id, False) if path else None
+    if ev in ("PostToolUse", "PostToolUseFailure", "Stop") and isinstance(tp, str) and tp:
+        return Path(tp), None, True
+    return None
+
+
 def main() -> int:
     cfg = fleet_config()
     if cfg is None:  # off, unconfigured or no token: the cheapest path, nothing forked
@@ -108,29 +161,38 @@ def main() -> int:
         return 0
     remember_mode(session, inp.get("permission_mode"))  # the status line has no mode field
     mapped = build(inp)
-    if mapped is None:
-        return 0
-    kind, payload, extras = mapped
-    if kind == "session.started":
+    if mapped is not None and mapped[0] == "session.started":
         prune_state()
-    if kind == "tool" and not rate_ok(session, "tool", TOOL_SAMPLE_S):
-        return 0
-    if kind == "needs_input":
+    events = _activity(cfg, inp, session, mapped) if cfg.activity else None
+    if events is None:
+        if mapped is None:
+            return 0
+        kind, payload, _ = mapped
+        if kind == "tool" and not rate_ok(session, "tool", TOOL_SAMPLE_S):
+            return 0
+        events = [_event(cfg, kind, session, payload, inp.get("agent_id"))]
+    if mapped is not None and mapped[0] == "needs_input":
         # The board clears "needs you" on the next tool or turn event. Re-arm tool sampling
         # so the first tool after the answer is always sent, not swallowed by the 5 s sample.
         reset_rate(session, "tool")
-    event = {
-        "type": kind,
-        "ts": now_iso(),
-        "machine": cfg.machine,
-        "harness": HARNESS,
-        "session_id": session,
-        # Set on events fired inside a subagent (and on SubagentStart/Stop, naming it).
-        "agent_id": _s(inp.get("agent_id"), 128),
-        "parent_agent_id": None,
-        "payload": {k: v for k, v in payload.items() if v is not None},
-    }
-    emit(cfg, [event])
+    if not cfg.activity:
+        emit(cfg, events)
+        return 0
+    from fleet import activity as a
+    if inp.get("hook_event_name") == "SessionStart" and isinstance(inp.get("transcript_path"), str):
+        a.start_offset(session, Path(inp["transcript_path"]))  # replies from here on, no history
+    tail = _tail(inp, session)
+    if tail is None:
+        if events:
+            emit(cfg, events)
+        return 0
+    path, tail_agent, at_end = tail
+
+    def make() -> list[dict]:
+        last = inp.get("last_assistant_message") if inp.get("hook_event_name") in ("Stop", "SubagentStop") else None
+        msgs = a.tail_messages(session, path, tail_agent, start_at_end=at_end, last_message=last)
+        return events + [_event(cfg, "message", session, m, tail_agent) for m in msgs]
+    emit_later(cfg, make)
     return 0
 
 

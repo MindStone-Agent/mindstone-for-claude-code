@@ -18,6 +18,7 @@ import socket
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -39,6 +40,26 @@ class FleetConfig:
     handle: str
     token: str
     machine: str
+    activity: bool = False  # [fleet] activity = true, AND the transport is safe (see below)
+
+
+def activity_transport_ok(base_url: str) -> bool:
+    """Activity previews (commands, output, replies) go only over https, or to this machine.
+    Plain http across a network would put them on the wire in the clear (synapse#31)."""
+    try:
+        u = urllib.parse.urlsplit(base_url)
+    except ValueError:
+        return False
+    if u.scheme == "https":
+        return True
+    return u.scheme == "http" and (u.hostname or "") in ("localhost", "127.0.0.1", "::1")
+
+
+def short(v: object, limit: int = 64) -> str | None:
+    """A short identifier-like string, or None. Never free text."""
+    if not isinstance(v, str) or not v:
+        return None
+    return v[:limit]
 
 
 def fleet_config() -> FleetConfig | None:
@@ -75,7 +96,9 @@ def fleet_config() -> FleetConfig | None:
     machine = fleet.get("machine")
     if not isinstance(machine, str) or not machine:
         machine = socket.gethostname().split(".")[0]
-    return FleetConfig(base_url=base.rstrip("/"), handle=handle, token=token, machine=machine[:64])
+    base = base.rstrip("/")
+    activity = fleet.get("activity") is True and activity_transport_ok(base)
+    return FleetConfig(base_url=base, handle=handle, token=token, machine=machine[:64], activity=activity)
 
 
 def now_iso() -> str:
@@ -368,5 +391,33 @@ def send_now(cfg: FleetConfig, events: list[dict]) -> None:
     post(cfg, events)
 
 
+BATCH_MAX_BYTES = 60_000  # the server takes 64 KB and 100 events per request
+
+
+def batches(events: list[dict]) -> list[list[dict]]:
+    out: list[list[dict]] = [[]]
+    size = 0
+    for ev in events:
+        n = len(json.dumps(ev, separators=(",", ":")).encode()) + 1
+        if out[-1] and (size + n > BATCH_MAX_BYTES or len(out[-1]) >= 100):
+            out.append([])
+            size = 0
+        out[-1].append(ev)
+        size += n
+    return [b for b in out if b]
+
+
 def emit(cfg: FleetConfig, events: list[dict]) -> None:
     detach(lambda: send_now(cfg, events))
+
+
+def emit_later(cfg: FleetConfig, make_events) -> None:
+    """Build the events in the detached grandchild (a transcript tail can read megabytes), then
+    send them in batches that fit the server's limits, inside the same deadline."""
+    def run() -> None:
+        if os.environ.get("MS4CC_FLEET_INLINE") != "1":
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+            signal.alarm(SEND_DEADLINE_S * 2)
+        for batch in batches(make_events()):
+            post(cfg, batch)
+    detach(run)
