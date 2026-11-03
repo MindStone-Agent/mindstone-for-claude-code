@@ -50,6 +50,10 @@ def noise() -> list[dict]:
     """What else a real transcript holds: the user's prompt, a request blob that repeats it."""
     return [{"type": "user", "uuid": "u1", "message": {"role": "user", "content": PROMPT}},
             {"type": "api-request-blob", "message": {"role": "user", "content": [{"type": "text", "text": PROMPT}]}},
+            # a user line that passes the cheap byte filter (a nested "type": "assistant" key)
+            # and carries a text block: only the top-level type check keeps it out
+            {"type": "user", "origin": {"type": "assistant"}, "uuid": "u2",
+             "message": {"role": "user", "content": [{"type": "text", "text": PROMPT}]}},
             {"type": "assistant", "uuid": "t1", "message": {"role": "assistant", "content": [
                 {"type": "tool_use", "name": "Bash", "input": {"command": PROMPT}}]}}]
 
@@ -213,11 +217,11 @@ def test_pairing_takes_the_oldest_call_of_the_same_type(tmp_path, synapse):
     env = act_env(tmp_path, synapse.url)
     for tid, typ in (("c1", "Explore"), ("c2", "general-purpose"), ("c3", "Explore")):
         hook(env, base("PreToolUse", tool_name="Agent", tool_use_id=tid, tool_input={"subagent_type": typ, "description": tid}))
-    for aid, typ in (("e1", "Explore"), ("g1", "general-purpose"), ("e2", "Explore"), ("x1", "Explore")):
+    for aid, typ in (("g1", "general-purpose"), ("e1", "Explore"), ("e2", "Explore"), ("x1", "Explore")):
         hook(env, base("SubagentStart", agent_id=aid, agent_type=typ))
     starts = [e for e in synapse.wait(7) if e["type"] == "subagent.started"]
     assert [(e["agent_id"], e["payload"].get("parent_tool_use_id")) for e in starts] == [
-        ("e1", "c1"), ("g1", "c2"), ("e2", "c3"), ("x1", None)]
+        ("g1", "c2"), ("e1", "c1"), ("e2", "c3"), ("x1", None)]
 
 
 # --- replies from the transcript ---------------------------------------------------------------
