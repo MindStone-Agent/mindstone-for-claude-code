@@ -433,13 +433,42 @@ def test_session_start_prunes_state_older_than_14_days(tmp_path, synapse):
 
 
 def test_parallel_tool_burst_sends_one(tmp_path, synapse):
+    """40 hooks released together: the sampling check must be atomic, so exactly one sends.
+
+    Each process is started and its interpreter warmed up, then all stdins close at once,
+    so the processes reach rate_ok() together (communicate() one by one would serialise them)."""
     env = make_env(tmp_path, synapse.url)
-    procs = [subprocess.Popen([sys.executable, str(REPORT)], stdin=subprocess.PIPE, env=env)
-             for _ in range(20)]
+    data = json.dumps(base("PostToolUse", tool_name="Read", tool_input={}, tool_response={})).encode()
+    procs = [subprocess.Popen([sys.executable, str(REPORT)], stdin=subprocess.PIPE, env=env) for _ in range(40)]
     for p in procs:
-        p.communicate(json.dumps(base("PostToolUse", tool_name="Read", tool_input={}, tool_response={})).encode())
+        p.stdin.write(data)
+    time.sleep(1.5)  # every process is now blocked in json.load(stdin), past import and config
+    for p in procs:
+        p.stdin.close()
+    for p in procs:
+        p.wait(timeout=20)
     time.sleep(0.5)
     assert len([e for e in synapse.events() if e["type"] == "tool"]) == 1
+
+
+def test_sampling_check_holds_a_lock(tmp_path, synapse):
+    """Deterministic twin of the burst test: while another process holds the sampling lock,
+    a hook waits for it instead of checking and marking unlocked."""
+    import fcntl
+    env = make_env(tmp_path, synapse.url)
+    state = Path(env["MS4CC_SYNAPSE_HOME"]) / "fleet"
+    state.mkdir(parents=True)
+    fd = os.open(state / f"{SID}.tool", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    p = subprocess.Popen([sys.executable, str(REPORT)], stdin=subprocess.PIPE, env=env)
+    p.stdin.write(json.dumps(base("PostToolUse", tool_name="Read", tool_input={}, tool_response={})).encode())
+    p.stdin.close()
+    time.sleep(1.0)
+    still_waiting = p.poll() is None
+    os.close(fd)
+    p.wait(timeout=10)
+    assert still_waiting, "the hook didn't wait for the lock"
+    assert [e["type"] for e in synapse.wait(1)] == ["tool"]
 
 
 # --- latency with Synapse down (done item 6) ----------------------------------------------
