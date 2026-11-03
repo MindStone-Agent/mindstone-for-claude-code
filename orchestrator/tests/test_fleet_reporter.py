@@ -26,7 +26,7 @@ REPORT = ORCH / "fleet" / "report.py"
 STATUSLINE = ORCH / "fleet" / "statusline.py"
 TOKEN = "test-token-abc123"
 SID = "11111111-2222-3333-4444-555555555555"
-SECRET = "sk-live-SHOULD-NEVER-LEAVE-0123456789abcdef"
+SECRET = "CANARY_SHOULD_NEVER_LEAVE_7f3a"
 
 
 class Synapse:
