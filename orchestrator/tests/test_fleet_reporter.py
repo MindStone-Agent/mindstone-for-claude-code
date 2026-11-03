@@ -380,6 +380,12 @@ def test_redirect_is_never_followed_so_the_token_stays_home(tmp_path, synapse):
     "token=" + "x" * 495 + " AKIAIOSFODNN7EXAMPLE",
     "run deploy --password hunter now",   # only the framework scrubber catches these two:
     "mysql -u root -phunterpw db",        # they prove scrub() actually runs
+    "Seed test user alice / Welcome123",
+    "Use admin/Summer2024 on staging",
+    "Log in as root with Password1",
+    "Use invite code Xq7Lp2Mz9Rw4",
+    "Connect with mQ4xR7tY2wE9 to the sandbox",
+    "admin login Hz8Kq4Lw",
 ])
 def test_prose_secrets_in_task_subjects_are_redacted(tmp_path, synapse, subject):
     env = make_env(tmp_path, synapse.url)
@@ -387,7 +393,8 @@ def test_prose_secrets_in_task_subjects_are_redacted(tmp_path, synapse, subject)
     (ev,) = synapse.wait(1)
     sent = ev["payload"].get("subject", "")
     for secret in ("hunter2", "Tr0ub4dor", "4f9a8b7c6d5e", "S3cr3tP", "@ss", "sk-abc", "jane.doe", "123-45-6789",
-                   "ghp9aZ8bY7", "4821", "Sup3rS3cret", "abc123def", "s3cr3t", "Hunter2", "AKIAIOSF", "hunter"):
+                   "ghp9aZ8bY7", "4821", "Sup3rS3cret", "abc123def", "s3cr3t", "Hunter2", "AKIAIOSF", "hunter", "Welcome123", "Summer2024", "Password1", "Xq7Lp2",
+                   "mQ4xR7", "Hz8Kq4"):
         assert secret not in sent, f"{secret!r} left the machine in {sent!r}"
 
 
@@ -400,7 +407,8 @@ def test_prose_secrets_in_task_subjects_are_redacted(tmp_path, synapse, subject)
     "Refactor OAuth2Client", "Add Http2Server", "Update Base64Encoder for UTF8", "Fix src/components/NavBar2.tsx",
     "Add S3Bucket policy", "Fix the auth token refresh in api/client.py", "Add PIN entry screen",
     "Rotate keys after the incident", "Update CHANGELOG for 2.3.1", "Migrate users table to UUID4 ids",
-    "Handle HTTP 429 from GitHub", "Port base64 helpers",
+    "Handle HTTP 429 from GitHub", "Port base64 helpers", "Use IPv6Address and H264Decoder",
+    "Add Win32Api shim", "Wrap Float32Array", "Parse X509Certificate",
 ])
 def test_plain_task_subject_survives(tmp_path, subject):
     sys.path.insert(0, str(ORCH))
@@ -566,6 +574,70 @@ def test_update_landing_while_the_flusher_decides_is_not_orphaned(tmp_path, syna
     r = subprocess.run([sys.executable, "-c", N1_RACE % str(ORCH)], env=env, capture_output=True, text=True,
                        timeout=30, cwd=str(tmp_path))
     assert r.stdout.strip() == "[10.0, 25.0, 30.0] False", r.stdout + r.stderr
+
+
+R4_RACE = r"""import sys, threading, time, pathlib
+sys.path.insert(0, %r)
+from fleet import statusline as sl
+from fleet import common as c
+sl.STATUS_EVERY_S = 1.0
+sent = []
+c.send_now = lambda cfg, evs: sent.append(evs[0]["payload"]["context_pct"])
+c.emit = c.send_now
+threads = []
+def detach(fn):
+    t = threading.Thread(target=fn); threads.append(t); t.start()
+c.detach = detach
+def inp(p): return {"session_id": "S1", "context_window": {"used_percentage": p}}
+claim = c._state_file("S1", "status.flusher")
+state = {"armed": False, "fired_d": False, "fired_u": False}
+real_rr = c.rate_remaining
+def rr(sid, what, every):
+    # F1 about to sleep its last bit: the window ends and a direct send D lands first
+    if state["armed"] and not state["fired_d"] and threading.current_thread() is threads[0]:
+        state["fired_d"] = True
+        c.reset_rate("S1", "status"); time.sleep(0.002)
+        sl.report(inp(25))                      # direct send: unlinks pending 20, opens a new window
+        return 0.0
+    return real_rr(sid, what, every)
+c.rate_remaining = rr
+real_unlink = pathlib.Path.unlink
+def unlink(self, *a, **k):
+    real_unlink(self, *a, **k)
+    if self == claim and state["fired_d"] and not state["fired_u"] and threading.current_thread() is threads[0]:
+        state["fired_u"] = True
+        time.sleep(0.002)
+        sl.report(inp(30))                      # inside the new window, after F1's release: claims, gets F2
+pathlib.Path.unlink = unlink
+sl.report(inp(10)); time.sleep(0.002)
+state["armed"] = True
+sl.report(inp(20))                              # held; F1 starts
+for _ in range(50):
+    for t in list(threads): t.join()
+    time.sleep(0.05)
+time.sleep(1.5)
+for t in list(threads): t.join()
+print(sent, "pending left:", c._state_file("S1", "status.pending").exists(), "flushers:", len(threads))
+"""
+
+
+def test_flusher_that_loses_the_reclaim_puts_its_snapshot_back(tmp_path, synapse):
+    """Review round 4, S2-1 (reviewer's deterministic reproduction): a direct send lands during
+    the flusher's last sleep, then an update takes the free claim while the flusher holds the
+    newest snapshot. Losing the re-claim must not drop that snapshot."""
+    env = make_env(tmp_path, synapse.url)
+    r = subprocess.run([sys.executable, "-c", R4_RACE % str(ORCH)], env=env, capture_output=True, text=True,
+                       timeout=60, cwd=str(tmp_path))
+    assert r.stdout.strip().startswith("[10.0, 25.0, 30.0] pending left: False"), r.stdout + r.stderr
+
+
+def test_whitespace_or_unbroken_huge_subject_drops_only_the_subject(tmp_path, synapse):
+    env = make_env(tmp_path, synapse.url)
+    hook(env, base("TaskCreated", task_id="9", task_subject=" " * 512 + "tok"))
+    hook(env, base("TaskCompleted", task_id="9", task_subject="x" * 600))
+    evs = synapse.wait(2)
+    assert [(e["type"], e["payload"]) for e in evs] == [("task.created", {"task_id": "9"}),
+                                                       ("task.completed", {"task_id": "9"})]
 
 
 def test_429_is_retried_once_then_dropped(tmp_path, synapse):

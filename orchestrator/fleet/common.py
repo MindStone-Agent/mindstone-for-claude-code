@@ -208,8 +208,8 @@ def prune_state(max_age_s: float = STATE_MAX_AGE_S) -> None:
 # subjects only. They are heuristics: they catch the common shapes (a secret word followed by
 # its value, credentials, keys, emails) and leave most ordinary words, times, file:line
 # references, branch names and identifiers alone. They over-redact a little by design (the
-# word after "token to", "password as") and a secret written as plain prose can still get
-# through.
+# word after "token to", "password as", "key for X to/is") and a secret written as plain
+# prose can still get through.
 _SECRET_WORD = re.compile(
     r"(?i)\b(pass(?:word|wd|phrase)?|pw|pwd|pin|secret|token|api[-_ ]?key|key|credentials?|creds|bearer)\b"
     r"(\s+for\s+\S+\s+(?:is|was|to)\b\s*[:=]?\s*|\s*(?:(?:is|was|to|as)\b\s*[:=]?|[:=])\s*|\s+)(\S+)")
@@ -227,13 +227,15 @@ _WORD = re.compile(r"[A-Za-z0-9_+=-]{8,}")  # no "/": a path's parts are judged 
 
 def _keyish(w: str) -> bool:
     """A word that looks like a credential rather than an identifier: 16+ chars with three
-    or more digits, or upper, lower and digits mixed either at 20+ chars or with digits inside
-    letters (Sup3rS3cret, Tr0ub4dor). OAuth2Client, Base64Encoder and S3Bucket stay."""
+    or more digits, or upper, lower and digits mixed with any of: 20+ chars, two digit runs,
+    a trailing digit run (Welcome123), or digits inside lower case (Sup3rS3cret). OAuth2Client,
+    Base64Encoder and S3Bucket stay; a version-suffixed name like Python312 is redacted."""
     digits = sum(ch.isdigit() for ch in w)
     if len(w) >= 16 and digits >= 3:
         return True
     mixed = digits > 0 and any(ch.islower() for ch in w) and any(ch.isupper() for ch in w)
-    return mixed and (len(w) >= 20 or re.search(r"[a-z][0-9]+[a-z]|[0-9][a-z]+[0-9]", w) is not None)
+    return mixed and (len(w) >= 20 or len(re.findall(r"[0-9]+", w)) >= 2 or w[-1].isdigit()
+                      or re.search(r"[a-z][0-9]+[a-z]|[0-9][a-z]+[0-9]", w) is not None)
 
 
 def _strict_subject(v: str) -> str:
@@ -260,7 +262,10 @@ def scrub_subject(v: object, scrubber_dir: Path | None = None) -> str | None:
     if not isinstance(v, str) or not v:
         return None
     if len(v) > SUBJECT_SCAN_MAX:  # drop the word the cut split, so no fragment of it survives
-        v = v[:SUBJECT_SCAN_MAX].rsplit(None, 1)[0]
+        parts = v[:SUBJECT_SCAN_MAX].rsplit(None, 1)
+        v = parts[0] if len(parts) == 2 else ""  # one unbroken run: nothing safe to keep
+        if not v.strip():
+            return None
     try:
         sys.path.insert(0, str(scrubber_dir or ORCHESTRATOR_DIR / "hooks"))
         from scrubber import scrub  # type: ignore

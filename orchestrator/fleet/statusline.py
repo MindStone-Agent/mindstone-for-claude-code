@@ -179,16 +179,19 @@ def report(inp: dict) -> None:
                 c.mark_sent(sid, ev.get("ts", ""))
                 c.send_now(cfg, [ev])
                 return
-            try:  # wait again, unless a newer update already has a flusher of its own
+            try:  # wait again, unless another flusher already holds the claim
                 os.close(os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+                mine = True
             except OSError:
-                return
-            try:
+                mine = False  # that flusher sends whatever is pending, which may be this very snapshot
+            try:  # put it back either way, unless a newer snapshot is already pending
                 fd = os.open(pending, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
                 os.write(fd, json.dumps(ev).encode())
                 os.close(fd)
             except OSError:
-                pass  # a newer snapshot is already pending; send that one instead
+                pass
+            if not mine:
+                return
         release()
     c.detach(flush)
 
