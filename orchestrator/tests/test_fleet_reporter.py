@@ -164,7 +164,6 @@ def test_session_started_shape_and_auth(tmp_path, synapse):
     (base("SessionEnd", reason="prompt_input_exit"), "session.ended", {"reason": "prompt_input_exit"}),
     (base("PreCompact", trigger="auto", custom_instructions=SECRET), "compact", {"phase": "pre"}),
     (base("PostCompact", trigger="auto", compact_summary=SECRET), "compact", {"phase": "post"}),
-    (base("Notification", notification_type="idle_prompt", message=f"waiting {SECRET}"), "needs_input", {"kind": "idle_prompt"}),
     (base("Notification", notification_type="permission_prompt", message=f"Claude needs your permission {SECRET}"),
      "needs_input", {"kind": "permission_prompt"}),
 ])
@@ -215,6 +214,7 @@ def test_task_subject_is_scrubbed_and_cut(tmp_path, synapse):
 
 @pytest.mark.parametrize("inp", [
     base("Notification", notification_type="auth_success", message="ok"),
+    base("Notification", notification_type="idle_prompt", message="Claude is waiting for your input"),  # plain idle
     base("PermissionRequest", tool_name="Bash", tool_input={"command": SECRET}),
     base("SomethingNew", anything=SECRET),
     {"hook_event_name": "UserPromptSubmit", "prompt": "no session id"},

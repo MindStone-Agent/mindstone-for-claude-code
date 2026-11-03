@@ -9,6 +9,11 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
 
 ## [Unreleased]
 
+### Fixed
+- **Fleet: an idle session is no longer "needs you"** (synapse#31): the reporter no longer sends Claude Code's
+  `idle_prompt` notification (sent after about a minute of waiting for input) as needs-input; only
+  permission prompts and elicitations are. Re-run bootstrap to drop it from the Notification matcher.
+
 ### Added
 - **Fleet Phase 0 reporter** (`orchestrator/fleet/`) ([synapse#31](https://github.com/MindStone-Agent/synapse/issues/31)):
   reports this agent's own Claude Code sessions to Synapse's read-only Fleet board, off unless

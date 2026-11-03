@@ -30,7 +30,10 @@ from fleet.common import emit, fleet_config, now_iso, prune_state, rate_ok, reme
 
 HARNESS = "claude-code"
 # Notification types that mean a person must act (synapse#31: permission, idle, elicitation).
-NEEDS_INPUT_KINDS = {"permission_prompt", "idle_prompt", "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"}
+# Not idle_prompt: Claude Code sends it after about 60 s of waiting for input, which for an
+# always-on agent is ordinary idle, not "needs you" (Clint's first look at the live board,
+# 2026-11-03). Turn end already marks the session idle.
+NEEDS_INPUT_KINDS = {"permission_prompt", "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"}
 TOOL_SAMPLE_S = 5.0
 
 
