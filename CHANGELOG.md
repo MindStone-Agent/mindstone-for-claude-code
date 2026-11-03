@@ -12,8 +12,8 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
 ### Added
 - **Fleet activity layer** (`orchestrator/fleet/activity.py`, `fleet/redact.py`) ([synapse#31](https://github.com/MindStone-Agent/synapse/issues/31)):
   with `[fleet] activity = true`, every tool call is reported with a redacted input and output
-  preview built per tool from an allow-list (never file contents, instruction text to another agent,
-  or the user's answers), the agent's own replies are tailed from the transcript (never the user's
+  preview shaped per tool and capped (never the contents of files Read returns, or the user's prompts
+  or AskUserQuestion answers), the agent's own replies are tailed from the transcript (never the user's
   prompts), and subagents are linked to the Agent call that launched them. Sent only over https or to
   localhost, never through a proxy; `synapse status` shows whether it is on, and `synapse setup` keeps
   the setting.

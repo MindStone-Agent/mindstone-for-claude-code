@@ -223,7 +223,7 @@ enabled = true
 Then re-run `./orchestrator/bootstrap.sh`, which installs the Fleet status line (below). The hooks need no re-run: they read the setting each time.
 
 - **What it sends** (`POST /v1/fleet/events`, with the agent's own token): session start and end, turn start and end, tool **names** (at most one every 5 s), subagent start and stop, task created and completed (subject secret-scrubbed, at most 120 chars), needs-input prompts (permission, idle, elicitation), compaction, and from the status line at most every 10 s: context %, context window, cost, model, 5-hour and 7-day rate-limit %, permission mode.
-- **What it never sends:** prompt text, tool inputs, tool outputs, assistant messages, paths (only the cwd's last component). Each payload is built field by field from an allow-list; nothing is copied from the hook input wholesale. Task subjects are the one model-written text sent: they pass the framework scrubber and a stricter pass for secret-shaped words, but that is a heuristic, and a secret written as plain prose in a task subject can still get through.
+- **What it never sends** (unless you also turn on the activity layer below): prompt text, tool inputs, tool outputs, assistant messages, paths (only the cwd's last component). Each payload is built field by field from an allow-list; nothing is copied from the hook input wholesale. Task subjects are the one model-written text sent: they pass the framework scrubber and a stricter pass for secret-shaped words, but that is a heuristic, and a secret written as plain prose in a task subject can still get through.
 - **No waiting on the network.** Hooks are `async` command hooks, and the send happens in a detached process: 3 s per socket operation, 5 s for the whole send, and one retry after a 429 that waits at most 2 s within those 5 s. With Synapse down, every hook still returns at once; a failed send is dropped.
 - **Use https.** The agent's token goes in every request. Bootstrap warns when `base_url` is plain `http://` to anything but localhost.
 - **Status line.** While Fleet is on, bootstrap installs `fleet/statusline.py` as the `statusLine`. If you already have one, it is **wrapped, not replaced**: your command runs under `/bin/sh` (as Claude Code runs it) with the same input, and its output bytes, exit code and stderr pass through unchanged. Re-running bootstrap doesn't wrap twice. If your command runs past 5 s, it is stopped along with anything it started, and the short MS4CC bar (model, context %, cost) shows instead. The wrapper runs on the MS4CC venv's python, so a deleted or broken venv blanks your bar too until bootstrap is re-run. Bootstrap skips the status line if the orchestrator path contains whitespace.
@@ -234,10 +234,15 @@ Then re-run `./orchestrator/bootstrap.sh`, which installs the Fleet status line 
 #### Activity layer (opt-in, `[fleet] activity = true`)
 
 Adds what each agent is doing to the board (synapse#31, scope change of 2026-11-03):
-- **Tool calls**, each as `tool.started` and `tool.finished` (not sampled). Inputs and outputs are both built per tool from an allow-list, then redacted:
-  - input: Bash, the command; Read, the path; Edit and Write, the path and a line count; Glob and Grep, the pattern; WebFetch, the URL; Agent, the subagent type and description; SendMessage, the recipient; any other tool, its input as JSON;
-  - output (head and tail, at most 16 KB as sent): Bash, stdout and stderr; Glob and Grep, the matches; WebFetch, the result; Agent, the subagent's answer; Read, a line count; Edit and Write, "updated" and the path; AskUserQuestion, "answered"; any other tool, its output as JSON; or the error.
-  - **Never sent:** file contents (what Read returns, what Write and Edit write), instruction text to another agent (the Agent prompt, a SendMessage message, any `prompt` or `message` argument, removed at any depth from other tools' JSON), and your answers to AskUserQuestion.
+- **Tool calls**, each as `tool.started` and `tool.finished` (not sampled), shaped per tool, redacted, then capped (input 4 KB, output 16 KB, head and tail):
+  - Bash: the command; stdout and stderr.
+  - Agent: the subagent type, description and prompt; the subagent's report.
+  - Write: the path and line count; then the content.
+  - Edit, MultiEdit: the path; then each edit as `--- old` / `+++ new`, each side capped on its own.
+  - Read: the path and range; a line count. **Never the file's contents.**
+  - Glob, Grep: the pattern; the matches. WebFetch: the URL; the result.
+  - AskUserQuestion: the questions; "answered". **Never your answers.**
+  - Any other tool: its input and output as compact JSON.
 - **The agent's own replies**: text blocks of `assistant` lines, tailed from the transcript from the session's start (no history), and a subagent's from its own transcript, before each tool call as well as after it, each stamped with the time it was written. Your prompts are never read or sent; neither are thinking blocks.
 - **The subagent tree**: `subagent.started` names the Agent call that launched it and its description.
 - **Redaction** runs on the machine before anything is cut: the framework scrubber, then credential headers of any scheme (Authorization, Cookie, API-key headers), secret-named `NAME=value` and `name: value` pairs, passwords given as command arguments (`curl -u`, `sshpass -p`, `docker login -p`, `redis-cli -a`, `mysql -p`, `htpasswd -b`, `openssl pass:`, `aws configure set`), `.netrc` lines, Stripe keys, Slack webhooks and base64-encoded private keys. These are heuristics: a secret in a shape they don't know gets through. The server runs the scrubber again.

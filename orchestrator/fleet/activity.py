@@ -12,13 +12,15 @@ Event shapes follow the server's allow-list (synapse feat/fleet-activity, api/fl
 - message:       message_id, text (8 KB), truncated
 - subagent.started gains description (240) and parent_tool_use_id
 
-Never sent: the user's prompts (they are in the transcript too, in `user` and
-`api-request-blob` lines; only `assistant` text blocks are read), instruction text to another
-agent (the Agent tool's `prompt`, SendMessage's `message`, any `prompt` or `message` argument),
-file bodies written by Write / Edit / MultiEdit / NotebookEdit (input or output), the contents
-of files Read returns, the user's answers to AskUserQuestion, thinking blocks. Inputs and
-outputs are both built per tool from an allow-list; an unknown tool's JSON goes out with the
-keys above removed at any depth.
+What is shown, per tool (Hearth's ruling on #devops, 2026-11-03: cap and redact, don't hide):
+the Agent prompt and the subagent's report, what Write writes (head and tail), Edit's old and
+new strings, Bash's command and output, any other tool's input and output as compact JSON.
+Everything is redacted (fleet/redact.py) before it is cut to its cap.
+
+Never sent: the contents of files Read returns (a .env would otherwise ship), and the user's
+own words: their prompts (they are in the transcript too, in `user` and `api-request-blob`
+lines; only `assistant` text blocks are read) and their answers to AskUserQuestion. Nor are
+thinking blocks.
 """
 from __future__ import annotations
 
@@ -42,11 +44,8 @@ AGENT_TOOLS = ("Agent", "Task")
 WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 PAIR_TTL_S = 120   # an Agent call not started within this (denied, failed, blocked) stops pairing
 DEFAULT_AGENT_TYPE = "general-purpose"  # what Claude Code runs when subagent_type is left out
-# Keys never sent from an unknown tool's JSON, at any depth: instruction text to an agent,
-# file bodies, the user's answers.
-_DROP_INPUT = frozenset({"prompt", "message", "content", "old_string", "new_string", "edits", "new_source"})
-_DROP_OUTPUT = frozenset({"prompt", "message", "content", "oldString", "newString", "originalFile",
-                          "structuredPatch", "answers", "old_string", "new_string", "file"})
+_NO_DROP: frozenset = frozenset()
+_ANSWERS = frozenset({"answers", "annotations"})  # AskUserQuestion: the user's own words
 _TS = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})")
 
 
@@ -55,7 +54,8 @@ def _str(v: object) -> str | None:
 
 
 def _lines(s: object) -> int:
-    return s.count("\n") + 1 if isinstance(s, str) and s else 0
+    """Lines as an editor counts them: a final newline doesn't start another."""
+    return s.count("\n") + (0 if s.endswith("\n") else 1) if isinstance(s, str) and s else 0
 
 
 def _without(v: object, drop: frozenset, depth: int = 0) -> object:
@@ -101,56 +101,86 @@ def input_text(tool_name: str, ti: object) -> str | None:
         return _str(ti.get("url"))
     if tool_name == "WebSearch":
         return _str(ti.get("query"))
-    if tool_name in AGENT_TOOLS:  # never the prompt: it's the parent's instruction text
-        return " ".join(p for p in (_str(ti.get("subagent_type")), _str(ti.get("description"))) if p) or None
-    if tool_name == "SendMessage":  # never the message: instruction text to another agent
-        return f"to {ti['to']}" if _str(ti.get("to")) else None
-    return _dump(ti, _DROP_INPUT)
+    if tool_name in AGENT_TOOLS:  # what the subagent was asked to do
+        head = " ".join(p for p in (_str(ti.get("subagent_type")), _str(ti.get("description"))) if p)
+        prompt = _str(ti.get("prompt"))
+        return (head + ("\n\n" + prompt if prompt else "")).strip() or None
+    return _dump(ti, _ANSWERS if tool_name == "AskUserQuestion" else _NO_DROP)
 
 
-def output_text(tool_name: str, resp: object) -> str | None:
-    """The raw (unredacted) output worth showing for one call, per tool. Shapes are from
-    Claude Code 2.1.312 captures and transcripts' toolUseResult."""
-    if tool_name in WRITE_TOOLS:  # never the file body (content, oldString, originalFile, ...)
-        if isinstance(resp, dict):
-            what = resp.get("type") if resp.get("type") in ("create", "update") else "updated"
-            return f"{what} {resp.get('filePath') or resp.get('notebook_path') or ''}".strip()
-        return "done"
+def _capped(text: object, limit: int) -> str:
+    """One field of a multi-part preview, redacted and cut on its own, so a long old string
+    can't push the new one out of the preview."""
+    t, _ = preview(text if isinstance(text, str) else None, limit)
+    return t or ""
+
+
+def _diff(path: object, pairs: list[tuple[object, object]]) -> str:
+    """`--- old` / `+++ new` blocks, each capped, for the board to render as a diff."""
+    budget = max(256, (OUTPUT_MAX - 512) // max(1, 2 * len(pairs)))
+    parts = [str(path or "")]
+    for old, new in pairs[:16]:
+        parts += ["--- old", _capped(old, budget), "+++ new", _capped(new, budget)]
+    if len(pairs) > 16:
+        parts.append(f"… {len(pairs) - 16} more edits")
+    return "\n".join(parts)
+
+
+def output_text(tool_name: str, resp: object, ti: object = None) -> str | None:
+    """The raw output worth showing for one call, per tool. Shapes are from Claude Code 2.1.312
+    captures and transcripts' toolUseResult; `ti` is the call's tool_input."""
+    ti = ti if isinstance(ti, dict) else {}
+    r = resp if isinstance(resp, dict) else {}
     if tool_name == "Read":  # the path is in tool.started; the file's contents are never sent
-        f = resp.get("file") if isinstance(resp, dict) and isinstance(resp.get("file"), dict) else None
+        f = r.get("file") if isinstance(r.get("file"), dict) else None
         if f is None:
-            return f"read ({resp.get('type')})" if isinstance(resp, dict) and _str(resp.get("type")) else "read"
+            return f"read ({r.get('type')})" if _str(r.get("type")) else "read"
         n, total = f.get("numLines"), f.get("totalLines")
         return f"{n} lines" + (f" of {total}" if isinstance(total, int) and total != n else "") if isinstance(n, int) else "read"
-    if tool_name in AGENT_TOOLS:  # the subagent's answer, never the prompt it was given
-        if not isinstance(resp, dict):
+    if tool_name == "Write":
+        content = r.get("content") if isinstance(r.get("content"), str) else ti.get("content")
+        content = content if isinstance(content, str) else ""
+        what = r.get("type") if r.get("type") in ("create", "update") else "wrote"
+        path = r.get("filePath") or ti.get("file_path") or ""
+        size = len(content.encode("utf-8", "replace"))
+        return f"{what} {path} ({_lines(content)} lines, {size:,} bytes)\n" + content
+    if tool_name == "Edit":
+        return _diff(r.get("filePath") or ti.get("file_path"),
+                     [(r.get("oldString", ti.get("old_string")), r.get("newString", ti.get("new_string")))])
+    if tool_name == "MultiEdit":
+        edits = ti.get("edits") if isinstance(ti.get("edits"), list) else []
+        return _diff(r.get("filePath") or ti.get("file_path"),
+                     [(e.get("old_string"), e.get("new_string")) for e in edits if isinstance(e, dict)])
+    if tool_name == "NotebookEdit":
+        return f"{ti.get('notebook_path', '')} ({ti.get('edit_mode') or 'replace'})\n" + (_str(ti.get("new_source")) or "")
+    if tool_name in AGENT_TOOLS:  # the subagent's report
+        if not r:
             return _str(resp)
-        texts = [b.get("text") for b in resp.get("content") or [] if isinstance(b, dict) and b.get("type") == "text"]
-        status = _str(resp.get("status")) or ""
+        texts = [b.get("text") for b in r.get("content") or [] if isinstance(b, dict) and b.get("type") == "text"]
+        status = _str(r.get("status")) or ""
         body = "\n\n".join(t for t in texts if isinstance(t, str) and t.strip())
         return (f"[{status}] " if status else "") + body or None
-    if tool_name == "AskUserQuestion":  # the user's own answers are never sent
-        return "answered"
-    if tool_name == "SendMessage":
-        return "sent" if isinstance(resp, dict) and resp.get("success") is True else None
+    if tool_name == "AskUserQuestion":  # the questions, never the user's answers
+        qs = [q.get("question") for q in r.get("questions") or [] if isinstance(q, dict) and _str(q.get("question"))]
+        return "answered: " + " / ".join(qs) if qs else "answered"
     if isinstance(resp, str):
         return resp or None
-    if isinstance(resp, dict) and ("stdout" in resp or "stderr" in resp):
-        out = resp.get("stdout") if isinstance(resp.get("stdout"), str) else ""
-        err = resp.get("stderr") if isinstance(resp.get("stderr"), str) else ""
+    if "stdout" in r or "stderr" in r:
+        out = r.get("stdout") if isinstance(r.get("stdout"), str) else ""
+        err = r.get("stderr") if isinstance(r.get("stderr"), str) else ""
         return (out + (("\n[stderr]\n" if out else "[stderr]\n") + err if err else "")) or None
-    if tool_name == "Glob" and isinstance(resp, dict) and isinstance(resp.get("filenames"), list):
-        return "\n".join(x for x in resp["filenames"] if isinstance(x, str)) or "no files"
-    if tool_name == "Grep" and isinstance(resp, dict):
-        if _str(resp.get("content")):
-            return resp["content"]
-        if isinstance(resp.get("filenames"), list):
-            return "\n".join(x for x in resp["filenames"] if isinstance(x, str)) or "no matches"
-    if tool_name == "WebFetch" and isinstance(resp, dict) and _str(resp.get("result")):
-        return resp["result"]
+    if tool_name == "Glob" and isinstance(r.get("filenames"), list):
+        return "\n".join(x for x in r["filenames"] if isinstance(x, str)) or "no files"
+    if tool_name == "Grep":
+        if _str(r.get("content")):
+            return r["content"]
+        if isinstance(r.get("filenames"), list):
+            return "\n".join(x for x in r["filenames"] if isinstance(x, str)) or "no matches"
+    if tool_name == "WebFetch" and _str(r.get("result")):
+        return r["result"]
     if resp is None:
         return None
-    return _dump(resp, _DROP_OUTPUT)
+    return _dump(resp, _NO_DROP)
 
 
 def tool_started(inp: dict) -> dict | None:
@@ -171,7 +201,7 @@ def tool_finished(inp: dict, ok: bool) -> dict | None:
     payload = {"tool_use_id": tool_use_id, "tool_name": name, "ok": ok,
                "duration_ms": d if isinstance(d, int) and not isinstance(d, bool) and d >= 0 else None}
     if ok:
-        text, cut = preview(output_text(name, inp.get("tool_response")), OUTPUT_MAX)
+        text, cut = preview(output_text(name, inp.get("tool_response"), inp.get("tool_input")), OUTPUT_MAX)
         payload.update(output_preview=text, output_truncated=cut or None)
     else:
         text, _ = preview(inp.get("error") if isinstance(inp.get("error"), str) else None, OUTPUT_MAX)

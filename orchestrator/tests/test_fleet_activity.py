@@ -132,14 +132,16 @@ def test_subagent_calls_carry_its_agent_id(tmp_path, synapse):
     ("Grep", {"pattern": "TODO", "glob": "*.ts"}, "TODO glob=*.ts"),
     ("WebFetch", {"url": "https://example.com/x", "prompt": PROMPT}, "https://example.com/x"),
     ("WebSearch", {"query": "python flock"}, "python flock"),
-    ("Agent", {"subagent_type": "Explore", "description": "find tests", "prompt": PROMPT}, "Explore find tests"),
+    ("Agent", {"subagent_type": "Explore", "description": "find tests", "prompt": "look in tests/"}, "Explore find tests\n\nlook in tests/"),
+    ("Agent", {"subagent_type": "Explore", "description": "find tests"}, "Explore find tests"),
     ("mcp__x__y", {"a": 1}, '{"a": 1}'),
 ])
 def test_input_preview_per_tool(name, ti, want):
     assert A.input_text(name, ti) == want
 
 
-def test_edit_and_write_never_send_file_contents():
+def test_edit_and_write_inputs_are_summaries():
+    """The bodies show in tool.finished (16 KB), not in the 4 KB input preview."""
     assert SECRET not in A.input_text("Write", {"file_path": "/f", "content": SECRET})
     assert SECRET not in A.input_text("Edit", {"file_path": "/f", "old_string": SECRET, "new_string": SECRET})
 
@@ -209,10 +211,10 @@ def test_subagent_started_names_its_agent_call(tmp_path, synapse):
     hook(env, base("PreToolUse", tool_name="Agent", tool_use_id="toolu_AG1",
                    tool_input={"subagent_type": "general-purpose", "description": "check files", "prompt": PROMPT}))
     hook(env, base("SubagentStart", agent_id="a1", agent_type="general-purpose"))
-    _, started = synapse.wait(2)
+    tool_started, started = synapse.wait(2)
     assert started["type"] == "subagent.started" and started["agent_id"] == "a1"
     assert started["payload"] == {"agent_type": "general-purpose", "parent_tool_use_id": "toolu_AG1", "description": "check files"}
-    assert PROMPT not in json.dumps(synapse.requests)
+    assert tool_started["payload"]["input_preview"] == "general-purpose check files\n\n" + PROMPT
 
 
 def test_pairing_takes_the_oldest_call_of_the_same_type(tmp_path, synapse):
@@ -320,45 +322,66 @@ def test_big_batches_are_split_to_fit_the_server(tmp_path, synapse):
 # --- activity review round 1 ------------------------------------------------------------------
 
 # Shaped like the real 2.1.312 PostToolUse tool_response of each tool (captures and transcripts'
-# toolUseResult); the canaries stand in for what must never leave.
+# toolUseResult). Hearth's ruling (#devops 2026-11-03): cap and redact, don't hide; Read's body
+# and the user's own answers are the exclusions.
 FILE_BODY = "FILE_BODY_CANARY_x81"
 ANSWER = "ANSWER_CANARY_77"
 POST_RESPONSES = {
-    "Agent": {"status": "completed", "prompt": PROMPT, "agentId": "a1", "agentType": "Explore",
-              "content": [{"type": "text", "text": "found 3 tests"}], "totalTokens": 10},
-    "Write": {"type": "create", "filePath": "/p/a.py", "content": FILE_BODY, "structuredPatch": [], "originalFile": None},
-    "Edit": {"filePath": "/p/b.py", "oldString": FILE_BODY, "newString": FILE_BODY, "originalFile": FILE_BODY,
-             "structuredPatch": [{"lines": ["-" + FILE_BODY, "+" + FILE_BODY]}], "userModified": False, "replaceAll": False},
-    "Read": {"type": "text", "file": {"filePath": "/p/c.py", "content": FILE_BODY, "numLines": 3, "startLine": 1, "totalLines": 3}},
-    "AskUserQuestion": {"questions": [{"question": "Which?"}], "answers": {"Which?": ANSWER}, "annotations": {}},
-    "SendMessage": {"success": True, "message": PROMPT},
-    "mcp__x__y": {"result": "ok", "nested": {"prompt": PROMPT, "message": PROMPT}},
+    "Agent": ({"status": "completed", "prompt": PROMPT, "agentId": "a1", "agentType": "Explore",
+               "content": [{"type": "text", "text": "found 3 tests"}], "totalTokens": 10}, {}),
+    "Write": ({"type": "create", "filePath": "/p/a.py", "content": "a\nb\n", "structuredPatch": [], "originalFile": None}, {}),
+    "Edit": ({"filePath": "/p/b.py", "oldString": "x = 1", "newString": "x = 2", "originalFile": FILE_BODY,
+              "structuredPatch": [], "userModified": False, "replaceAll": False}, {}),
+    "MultiEdit": ({"filePath": "/p/e.py"}, {"file_path": "/p/e.py", "edits": [{"old_string": "a", "new_string": "b"},
+                                                                          {"old_string": "c", "new_string": "d"}]}),
+    "Read": ({"type": "text", "file": {"filePath": "/p/c.py", "content": FILE_BODY, "numLines": 3, "startLine": 1, "totalLines": 9}}, {}),
+    "AskUserQuestion": ({"questions": [{"question": "Which?"}], "answers": {"Which?": ANSWER}, "annotations": {}}, {}),
+    "SendMessage": ({"success": True, "message": "queued"}, {}),
+    "mcp__x__y": ({"result": "ok", "nested": {"prompt": "p"}}, {}),
 }
-WANT_OUTPUT = {"Agent": "[completed] found 3 tests", "Write": "create /p/a.py", "Edit": "updated /p/b.py",
-               "Read": "3 lines", "AskUserQuestion": "answered", "SendMessage": "sent", "mcp__x__y": '{"result": "ok", "nested": {}}'}
+WANT_OUTPUT = {"Agent": "[completed] found 3 tests", "Write": "create /p/a.py (2 lines, 4 bytes)\na\nb\n",
+               "Edit": "/p/b.py\n--- old\nx = 1\n+++ new\nx = 2",
+               "MultiEdit": "/p/e.py\n--- old\na\n+++ new\nb\n--- old\nc\n+++ new\nd",
+               "Read": "3 lines of 9", "AskUserQuestion": "answered: Which?",
+               "SendMessage": '{"success": true, "message": "queued"}', "mcp__x__y": '{"result": "ok", "nested": {"prompt": "p"}}'}
 
 
 @pytest.mark.parametrize("tool", sorted(POST_RESPONSES))
-def test_tool_output_is_allow_listed_per_tool(tmp_path, synapse, tool):
-    """Round 1, finding 1 (sev-1): tool.finished dumped tool_response whole, so the Agent
-    prompt and Write/Edit file bodies went out. Run through report.py as Claude Code would."""
+def test_tool_output_is_shaped_per_tool(tmp_path, synapse, tool):
+    """Round 1, finding 1 (sev-1): tool.finished dumped tool_response whole and uncapped per
+    field. Each tool now has its own shape; Read's body and the user's answers never leave."""
     env = act_env(tmp_path, synapse.url)
-    hook(env, base("PostToolUse", tool_name=tool, tool_use_id="t1", tool_input={}, tool_response=POST_RESPONSES[tool]))
+    resp, ti = POST_RESPONSES[tool]
+    hook(env, base("PostToolUse", tool_name=tool, tool_use_id="t1", tool_input=ti, tool_response=resp))
     (ev,) = synapse.wait(1)
     assert ev["type"] == "tool.finished" and ev["payload"]["output_preview"] == WANT_OUTPUT[tool]
     raw = json.dumps(synapse.requests)
-    assert PROMPT not in raw and FILE_BODY not in raw and ANSWER not in raw
+    assert FILE_BODY not in raw and ANSWER not in raw and PROMPT not in raw
+
+
+def test_edit_caps_old_and_new_separately():
+    """A long old string can't push the new one out of the preview."""
+    text = A.output_text("Edit", {"filePath": "/p", "oldString": "old " * 20000, "newString": "NEWTEXT"})
+    out, cut = preview(text, A.OUTPUT_MAX)
+    assert "+++ new\nNEWTEXT" in out and not cut
+
+
+def test_write_shows_head_and_tail_of_the_content(tmp_path, synapse):
+    env = act_env(tmp_path, synapse.url)
+    body = "FIRST line\n" + "middle\n" * 20000 + "LAST line\n"
+    hook(env, base("PostToolUse", tool_name="Write", tool_use_id="w1", tool_input={"file_path": "/p", "content": body},
+                   tool_response={"type": "create", "filePath": "/p", "content": body}))
+    (ev,) = synapse.wait(1)
+    out = ev["payload"]["output_preview"]
+    assert ev["payload"]["output_truncated"] and "FIRST line" in out and "LAST line" in out
 
 
 @pytest.mark.parametrize("tool,ti,want", [
-    ("SendMessage", {"to": "researcher", "message": PROMPT}, "to researcher"),
-    ("ScheduleWakeup", {"delaySeconds": 60, "prompt": PROMPT}, '{"delaySeconds": 60}'),
-    ("CronCreate", {"cron": "*/5 * * * *", "prompt": PROMPT}, '{"cron": "*/5 * * * *"}'),
-    ("mcp__fs__write_file", {"path": "/p", "content": FILE_BODY}, '{"path": "/p"}'),
-    ("mcp__x__y", {"a": [{"message": PROMPT, "b": 1}]}, '{"a": [{"b": 1}]}'),
+    ("SendMessage", {"to": "researcher", "message": "check X"}, '{"to": "researcher", "message": "check X"}'),
+    ("ScheduleWakeup", {"delaySeconds": 60, "prompt": "/loop"}, '{"delaySeconds": 60, "prompt": "/loop"}'),
+    ("AskUserQuestion", {"questions": [{"question": "Which?"}], "answers": {"Which?": ANSWER}}, '{"questions": [{"question": "Which?"}]}'),
 ])
-def test_instruction_text_and_file_bodies_never_leave_in_inputs(tool, ti, want):
-    """Round 1, finding 3: the default branch sent SendMessage's message and any prompt."""
+def test_other_inputs_are_compact_json_without_the_users_answers(tool, ti, want):
     assert A.input_text(tool, ti) == want
 
 
