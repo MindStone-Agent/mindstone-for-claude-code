@@ -7,9 +7,8 @@ things, in this order:
    had a status line, bootstrap wrapped it rather than replacing it: its command arrives here
    base64-encoded after `--wrap-b64`, runs under /bin/sh (as Claude Code runs it) with the
    same stdin and inherited stderr, and its stdout bytes and exit code pass through
-   unchanged. With nothing to wrap, or if the wrapped command runs past WRAP_TIMEOUT_S (it is
-   then killed with its whole process group), it prints a short bar of its own (model,
-   context %, cost). Nothing outside the standard library
+   unchanged. With nothing to wrap, or if the wrapped command runs past WRAP_TIMEOUT_S (its
+   process group is then killed), it prints a short bar of its own (model, context %, cost). Nothing outside the standard library
    is imported before the bar is out, so a Fleet module that can't load (no tomllib on Python
    3.10, say) can't blank the user's bar. A missing or broken MS4CC venv still can: the command
    runs on the venv's python.
@@ -98,7 +97,7 @@ def _run_wrapped(wrap: str, raw: bytes) -> tuple[bytes, int] | None:
     try:
         p = subprocess.Popen(wrap, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              start_new_session=True)
-    except OSError:
+    except (OSError, ValueError):  # ValueError: a NUL in the command
         return None
     try:
         out, _ = p.communicate(raw, timeout=WRAP_TIMEOUT_S)
@@ -234,10 +233,15 @@ def report(inp: dict) -> None:
                 c.mark_sent(sid, ev.get("ts", ""))
                 c.send_now(cfg, [ev])
                 return
-            try:  # put it back, unless a newer snapshot is already pending
-                fd = os.open(pending, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                os.write(fd, json.dumps(ev).encode())
-                os.close(fd)
+            try:  # put it back, unless a newer snapshot is already pending. Written in full under
+                # its own name first, then linked in: a link is all-or-nothing, so another flusher
+                # can never take an empty file between the create and the write.
+                mine.write_text(json.dumps(ev))
+                os.link(mine, pending)
+            except OSError:
+                pass
+            try:
+                mine.unlink()
             except OSError:
                 pass
             try:  # then wait again, unless another flusher holds the claim: it hasn't read

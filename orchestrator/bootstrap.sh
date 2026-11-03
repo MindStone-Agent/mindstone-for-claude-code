@@ -193,6 +193,7 @@ else
 
   if [[ -f "$SETTINGS_FILE" ]]; then
     cp "$SETTINGS_FILE" "${SETTINGS_FILE}.backup.$(date +%s)"
+    sl_before=$(jq -c '.statusLine // null' "$SETTINGS_FILE" 2>/dev/null || echo null)
     # Merge hooks PER-EVENT (orchestrator/lib/merge-settings.jq): re-add the
     # MS4CC-managed entries (command path under $ORCHESTRATOR_DIR) fresh from the
     # fragment so re-runs stay idempotent and don't stack duplicates, while
@@ -207,7 +208,14 @@ else
        -f "$ORCHESTRATOR_DIR/lib/merge-settings.jq" \
        "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp"
     mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
-    echo "  MERGED: $FRAGMENT_FILE → $SETTINGS_FILE (Fleet status line: $([[ $FLEET_ON == true ]] && echo installed || echo not installed))"
+    sl_after=$(jq -c '.statusLine // null' "$SETTINGS_FILE" 2>/dev/null || echo null)
+    ours="$ORCHESTRATOR_DIR/fleet/statusline.py"
+    if [[ "$sl_before" == "$sl_after" ]]; then sl_msg="status line unchanged"
+    elif [[ "$sl_after" == *"$ours --wrap-b64 "* ]]; then sl_msg="Fleet status line installed, wrapping yours"
+    elif [[ "$sl_after" == *"$ours"* ]]; then sl_msg="Fleet status line installed"
+    elif [[ "$sl_after" == "null" ]]; then sl_msg="Fleet status line removed"
+    else sl_msg="your own status line restored"; fi
+    echo "  MERGED: $FRAGMENT_FILE → $SETTINGS_FILE ($sl_msg)"
     echo "          (backup at ${SETTINGS_FILE}.backup.*)"
   else
     # Through the same merge, so the status line follows the Fleet setting here too.
