@@ -688,8 +688,8 @@ def test_an_owed_reply_is_skipped_once_only(tmp_path, synapse):
 
 # --- shared fixtures with the server (synapse tests/fixtures/fleet_secrets.json) ---------------
 # Stored base64-encoded so the repo's privacy scan doesn't flag the fake secrets; byte-identical
-# to synapse's copy at 0dd221c (sha256 below). Refresh both together.
-FLEET_SECRETS_SHA256 = "1adeaff457a53756422fd8319e2502175af62ed28282845e5655105e5a9bd9de"
+# to synapse's copy at a0059ae (sha256 below). Refresh both together.
+FLEET_SECRETS_SHA256 = "becaf7cd5fdcad27005820b3227d336dac064f93ed2d1c1d06f300d1def0f314"
 
 
 def _shared_fixtures() -> dict:
@@ -718,3 +718,20 @@ def test_scrubbing_many_distinct_secrets_stays_bounded():
     text, _ = preview(lines, A.OUTPUT_MAX)
     assert time.perf_counter() - t < 1.0
     assert "xyzSECRET" not in text
+
+
+SERVER_REDACT_SHA256 = "9bbc128a82a5c4fdc781027ee5cf38b8795766c21ca7a97516a5ac365d40a685"  # synapse a0059ae
+
+
+def test_the_vendored_server_redaction_is_verbatim():
+    """fleet_redact_vendor.py is synapse's api/fleet_redact.py with only its scrubber import
+    changed; undoing that one change must give the pinned file byte for byte."""
+    import hashlib
+    text = (ORCH / "fleet" / "fleet_redact_vendor.py").read_text()
+    ours = ("import sys as _sys  # vendored change: the scrubber is hooks/scrubber.py here\n"
+            "from pathlib import Path as _Path\n"
+            "_sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / \"hooks\"))\n"
+            "from scrubber import _propagatable, scrub_collect  # noqa: E402\n")
+    assert text.count(ours) == 1
+    original = text.replace(ours, "from api.vendor.scrubber import _propagatable, scrub_collect\n")
+    assert hashlib.sha256(original.encode()).hexdigest() == SERVER_REDACT_SHA256
