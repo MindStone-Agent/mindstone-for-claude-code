@@ -100,6 +100,11 @@ EXTRA: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(\bopenssl\b[^\n]{0,200}?[ \t]-k[ \t]{1,8})(['\"]?)[^\s'\"]{1,256}\2"), r"\1\2" + _R + r"\2"),
     (re.compile(r"(\bsshpass\b[^\n]{0,40}?[ \t]-p[ \t]{0,8})(['\"])[^'\"\n]{1,256}\2"), r"\1\2" + _R + r"\2"),
     (re.compile(r"(\becho[ \t]{1,8}(?:-[ne][ \t]{1,8})?)(['\"]?)[^\s'\"|]{1,256}\2([ \t]{0,8}\|[ \t]{0,8}sudo\b[^\n]{0,40}?[ \t]-S\b)"), r"\1\2" + _R + r"\2\3"),
+    # Round 4 (Plumb): credential headers written as dict or JSON keys
+    # ({"Authorization": "Basic ..."}, 'Cookie': 'sid=...'), either quote.
+    (re.compile(r"(?i)([\"'](?:proxy-)?authorization[\"'][ \t]{0,8}:[ \t]{0,8}[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}([\"'])"), r"\1" + _R + r"\2"),
+    (re.compile(r"(?i)([\"'](?:set-)?cookie[\"'][ \t]{0,8}:[ \t]{0,8}[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}([\"'])"), r"\1" + _R + r"\2"),
+    (re.compile(r"(?i)([\"']x-[a-z0-9-]{0,40}(?:key|token|secret|auth)[\"'][ \t]{0,8}:[ \t]{0,8}[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}([\"'])"), r"\1" + _R + r"\2"),
     # Round 3: JSON keys naming a secret, any value (punctuation, short).
     (re.compile(r"(?i)(\"[A-Za-z0-9_\-]{0,40}(?:secret|password|passwd|passphrase|token|api[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret)(?:[_-]?(?:value|data|b64|base64))?\"[ \t]{0,8}:[ \t]{0,8}\")(?!\[REDACTED)(?:[^\"\\\n]|\\.){1,4096}\""), r"\1" + _R + "\""),
 ]
@@ -303,6 +308,23 @@ def _long_b64(m: re.Match[str]) -> str:
     return s
 
 
+# Round 4 (Plumb): a hard cut through a token can leave its first half
+# beside the marker the second half became, too short for its own rule
+# ("ATATT3x..Gf[REDACTED-HIGH-ENTROPY]"). A token-like run of 8+ glued to a
+# marker goes too. Anchored at the run's start, so it's one try per run.
+# No "=" or ":" in the run, so a key in front of its value ("password=[RED")
+# isn't one.
+_REMNANT_BEFORE = re.compile(r"(?<![A-Za-z0-9_\-+/])[A-Za-z0-9_\-+/]{8,4096}(?=\[REDACTED)")
+_REMNANT_AFTER = re.compile(r"(\[REDACTED[A-Z\-]{0,40}\])[A-Za-z0-9_\-+/]{8,4096}")
+
+
+def _remnants(text: str) -> str:
+    if "[REDACTED" not in text:
+        return text
+    text = _REMNANT_BEFORE.sub(_R, text)
+    return _REMNANT_AFTER.sub(r"\1" + _R, text)
+
+
 def redact_preview(text: str) -> str:
     """scrub() (bounded, above), then the extras. Irreversible; never raises
     on a str."""
@@ -311,4 +333,4 @@ def redact_preview(text: str) -> str:
         text = pattern.sub(repl, text)
     text = _B64_RUN.sub(_long_b64, text)
     text = _k8s_secret_data(text)
-    return _key_tail(text)
+    return _remnants(_key_tail(text))
