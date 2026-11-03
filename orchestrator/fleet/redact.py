@@ -13,7 +13,9 @@ Both sides pass the shared fixtures in synapse's tests/fixtures/fleet_secrets.js
 heuristics: a secret in a shape none of them knows still gets through.
 
 `preview()` cuts long text to a head and a tail. Scrubbing happens before the cut, and a word
-split by any cut is dropped, so no fragment of a secret survives at an edge.
+split by any cut is dropped, so no fragment of a secret survives at an edge. Text over
+2 * SCAN_WINDOW is first cut to its first and last SCAN_WINDOW (dropping the split words), which
+are then scrubbed: only those can reach the preview.
 If the scrubber can't be loaded, `preview()` returns None: nothing is sent unscrubbed.
 """
 from __future__ import annotations
@@ -73,9 +75,14 @@ def _env_assign(m: re.Match) -> str:
     return m.group(0)
 
 
+# Credential headers as dict or JSON keys ({"Authorization": "Basic ..."}, 'Cookie': ...):
+# the header rules need `Name:` with nothing between (activity review round 2, S2-5).
+_HEADER_KEYS = frozenset({"AUTHORIZATION", "PROXY-AUTHORIZATION", "COOKIE", "SET-COOKIE"})
+
+
 def _kv_quoted(m: re.Match) -> str:
     q, name, colon, value = m.group(1), m.group(2), m.group(3), m.group(4)
-    if not _secret_name(name) or value.strip("\"'").lower() in _TYPE_NAMES:
+    if not (_secret_name(name) or name.upper() in _HEADER_KEYS) or value.strip("\"'").lower() in _TYPE_NAMES:
         return m.group(0)
     return f"{q}{name}{q}{colon}{_R}"
 
@@ -91,8 +98,20 @@ def _htpasswd(m: re.Match) -> str:
     return whole[: m.start(group) - start] + _R + whole[m.end(group) - start:]
 
 
+# What is left of a secret a chunk cut split in two, when only one half was caught: a
+# token-like run glued to a redaction marker with no separator (activity review round 2:
+# an Atlassian token cut mid-way kept its first 41 characters). `=` and `:` are not part of
+# the run, so `API_TOKEN=[REDACTED-SECRET]` keeps its name.
+# Anchored at the start of a run: unanchored, a long run with no marker was tried from every
+# position (7 s on 256 KB of KEY_KEY_...).
+_REMNANT_BEFORE = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{8,4096}(?=\[REDACTED-)")
+_REMNANT_AFTER = re.compile(r"(\[REDACTED-[A-Z-]{0,40}\])[A-Za-z0-9+/_-]{8,4096}")
+
+
 def redact(text: str) -> str:
     """The reporter's own rules, after the server's full pass."""
+    text = _REMNANT_BEFORE.sub(_R, text)
+    text = _REMNANT_AFTER.sub(r"\1" + _R, text)
     for pattern, repl in _MORE:
         text = pattern.sub(repl, text)
     text = _HTPASSWD.sub(_htpasswd, text)

@@ -219,15 +219,20 @@ def test_subagent_started_names_its_agent_call(tmp_path, synapse):
     assert tool_started["payload"]["input_preview"] == "general-purpose check files\n\n" + PROMPT
 
 
-def test_pairing_takes_the_oldest_call_of_the_same_type(tmp_path, synapse):
+def test_pairing_happens_only_when_one_call_of_the_type_is_pending(tmp_path, synapse):
+    """Round 2, S2-1/S2-2: with two calls of a type pending (a denied one, or parallel calls
+    whose hooks race), "the oldest" is a guess the server can't undo. No parent instead."""
     env = act_env(tmp_path, synapse.url)
     for tid, typ in (("c1", "Explore"), ("c2", "general-purpose"), ("c3", "Explore")):
         hook(env, base("PreToolUse", tool_name="Agent", tool_use_id=tid, tool_input={"subagent_type": typ, "description": tid}))
-    for aid, typ in (("g1", "general-purpose"), ("e1", "Explore"), ("e2", "Explore"), ("x1", "Explore")):
+    for aid, typ in (("g1", "general-purpose"), ("e1", "Explore")):
         hook(env, base("SubagentStart", agent_id=aid, agent_type=typ))
-    starts = [e for e in synapse.wait(7) if e["type"] == "subagent.started"]
+    hook(env, base("PostToolUse", tool_name="Agent", tool_use_id="c1", tool_input={},
+                   tool_response={"status": "completed", "content": []}))
+    hook(env, base("SubagentStart", agent_id="e2", agent_type="Explore"))
+    starts = [e for e in synapse.wait(9) if e["type"] == "subagent.started"]
     assert [(e["agent_id"], e["payload"].get("parent_tool_use_id")) for e in starts] == [
-        ("g1", "c2"), ("e1", "c1"), ("e2", "c3"), ("x1", None)]
+        ("g1", "c2"), ("e1", None), ("e2", "c3")]
 
 
 # --- replies from the transcript ---------------------------------------------------------------
@@ -455,17 +460,55 @@ def test_non_ascii_output_fits_the_server(tmp_path, synapse, ch):
     assert len(json.dumps(ev["payload"]["output_preview"], ensure_ascii=False).encode()) - 2 <= A.OUTPUT_MAX
 
 
-def test_an_agent_call_that_never_starts_does_not_shift_later_pairings(tmp_path, synapse):
-    """Round 1, finding 6: a denied or failed Agent call stayed at the head of the queue and
-    every later subagent of its type got the previous call's id."""
+def test_a_denied_agent_call_never_lends_its_id_to_the_next_subagent(tmp_path, synapse):
+    """Round 1 #6 and round 2 S2-1: Claude Code sends no PostToolUse for a denied call. The
+    reviewer's case: A denied, B runs, b starts. b must not get A's id."""
     env = act_env(tmp_path, synapse.url)
-    for tid in ("A", "B", "C"):
-        hook(env, base("PreToolUse", tool_name="Agent", tool_use_id=tid, tool_input={"subagent_type": "Explore", "description": tid}))
-    hook(env, base("PostToolUseFailure", tool_name="Agent", tool_use_id="A", tool_input={}, error="denied"))
-    hook(env, base("SubagentStart", agent_id="b1", agent_type="Explore"))
-    hook(env, base("SubagentStart", agent_id="c1", agent_type="Explore"))
-    starts = [e for e in synapse.wait(8) if e["type"] == "subagent.started"]
-    assert [(e["agent_id"], e["payload"].get("parent_tool_use_id")) for e in starts] == [("b1", "B"), ("c1", "C")]
+    tp = transcript(tmp_path / "proj" / f"{SID}.jsonl", [])
+    hook(env, base("SessionStart", source="startup", transcript_path=str(tp)))
+    hook(env, base("PreToolUse", tool_name="Agent", tool_use_id="toolu_A_denied", transcript_path=str(tp),
+                   tool_input={"subagent_type": "Explore", "description": "first try"}))
+    hook(env, base("PreToolUse", tool_name="Agent", tool_use_id="toolu_B_runs", transcript_path=str(tp),
+                   tool_input={"subagent_type": "Explore", "description": "second try"}))
+    hook(env, base("SubagentStart", agent_id="agent_b", agent_type="Explore"))
+    starts = [e for e in synapse.wait(4) if e["type"] == "subagent.started"]
+    assert [e["payload"].get("parent_tool_use_id") for e in starts] == [None]
+
+
+DENIAL = {"type": "user", "uuid": "u9", "message": {"role": "user", "content": [
+    {"type": "tool_result", "tool_use_id": "toolu_D", "is_error": True,
+     "content": "The user doesn't want to proceed. DENIAL_FEEDBACK_CANARY"}]}}
+
+
+def test_a_denied_call_is_closed_from_the_transcript_without_its_text(tmp_path, synapse):
+    """Round 2, S2-3: tool.started went out, no PostToolUse ever came, and the call showed as
+    running for ever. The next tail closes it; the user's denial text is not sent."""
+    env = act_env(tmp_path, synapse.url)
+    tp = transcript(tmp_path / "proj" / f"{SID}.jsonl", [])
+    hook(env, base("SessionStart", source="startup", transcript_path=str(tp)))
+    hook(env, base("PreToolUse", tool_name="Bash", tool_use_id="toolu_D", tool_input={"command": "rm -rf x"},
+                   transcript_path=str(tp)))
+    transcript(tp, [DENIAL])
+    hook(env, base("PreToolUse", tool_name="Read", tool_use_id="toolu_E", tool_input={"file_path": "/a"},
+                   transcript_path=str(tp)))
+    hook(env, base("Stop", transcript_path=str(tp)))  # a second tail: closed once only
+    done = [e["payload"] for e in synapse.wait(6) if e["type"] == "tool.finished"]
+    assert done == [{"tool_use_id": "toolu_D", "tool_name": "Bash", "ok": False, "error": "not run (denied or blocked)"}]
+    assert "DENIAL_FEEDBACK_CANARY" not in json.dumps(synapse.requests)
+
+
+def test_an_error_result_for_a_call_already_finished_is_not_closed_twice(tmp_path, synapse):
+    env = act_env(tmp_path, synapse.url)
+    tp = transcript(tmp_path / "proj" / f"{SID}.jsonl", [])
+    hook(env, base("SessionStart", source="startup", transcript_path=str(tp)))
+    hook(env, base("PreToolUse", tool_name="Bash", tool_use_id="toolu_D", tool_input={"command": "false"},
+                   transcript_path=str(tp)))
+    hook(env, base("PostToolUseFailure", tool_name="Bash", tool_use_id="toolu_D", tool_input={}, error="exit 1",
+                   transcript_path=str(tp)))
+    transcript(tp, [DENIAL])
+    hook(env, base("Stop", transcript_path=str(tp)))
+    done = [e["payload"] for e in synapse.wait(5) if e["type"] == "tool.finished"]
+    assert [d["error"] for d in done] == ["exit 1"]
 
 
 def test_an_untyped_agent_call_is_general_purpose_not_a_wildcard(tmp_path, synapse):
@@ -735,3 +778,47 @@ def test_the_vendored_server_redaction_is_verbatim():
     assert text.count(ours) == 1
     original = text.replace(ours, "from api.vendor.scrubber import _propagatable, scrub_collect\n")
     assert hashlib.sha256(original.encode()).hexdigest() == SERVER_REDACT_SHA256
+
+
+# --- activity review round 2 ------------------------------------------------------------------
+
+_SINGLE_LINE = [c for c in _shared_fixtures()["secret"] if "\n" not in c["input"]]
+
+
+@pytest.mark.parametrize("case", _SINGLE_LINE, ids=lambda c: c["name"])
+def test_a_secret_across_the_scrub_chunk_cut_never_survives(case):
+    """Round 2, S1-1: with no whitespace near it, a 1 KB chunk cut lands inside the secret and
+    the scrubber sees two harmless halves. Every single-line fixture, across offset 1024."""
+    s = case["input"]
+    base, _ = preview("," + s + ",", A.OUTPUT_MAX)  # no cut: the rules themselves catch it
+    assert case["leak"] not in base
+    for k in (1, len(s) // 2, len(s) - 1):  # the cut falls k characters into the secret
+        raw = "," * (1024 - k) + s + "," * 1200
+        text, _ = preview(raw, A.OUTPUT_MAX)
+        assert case["leak"] not in text, (k, case["name"])
+
+
+@pytest.mark.parametrize("case", _shared_fixtures()["secret"], ids=lambda c: c["name"])
+def test_a_secret_inside_compact_json_never_survives(case):
+    """Round 2, S1-2: an unknown tool's JSON was dumped, then redacted, so newlines became
+    literal \\n and quotes \\", which line-anchored and quoted-key rules can't see."""
+    for text in (A.output_text("mcp__x__y", {"result": case["input"]}),
+                 A.input_text("mcp__x__y", {"args": {"body": case["input"]}})):
+        out, _ = preview(text, A.OUTPUT_MAX)
+        assert case["leak"] not in out, case["name"]
+
+
+
+@pytest.mark.parametrize("raw,secret", [
+    ('{"headers": {"Authorization": "Basic YWRtaW46aHVudGVyMg==", "Cookie": "session=s3ss10nV4lue"}}', "YWRtaW46"),
+    ('{"headers": {"Authorization": "Basic YWRtaW46aHVudGVyMg==", "Cookie": "session=s3ss10nV4lue"}}', "s3ss10nV4lue"),
+    ("{'Authorization': 'Basic YWRtaW46aHVudGVyMg=='}", "YWRtaW46"),
+    ('"Authorization":"token abcdef123456"', "abcdef123456"),
+    ('"Proxy-Authorization": "Basic cHJveHk6cGFzcw=="', "cHJveHk6"),
+    ('"Set-Cookie": "sid=xyz987abc"', "xyz987abc"),
+])
+def test_credential_headers_as_dict_keys_are_redacted(raw, secret):
+    """Round 2, S2-5: header rules need `Name:` with nothing in between, so the dict and JSON
+    forms of the same headers went out whole."""
+    assert secret not in clean(raw)
+    assert secret not in (preview(A.output_text("mcp__http__get", json.loads(raw) if raw.startswith("{\"") else raw), A.OUTPUT_MAX)[0] or "")
