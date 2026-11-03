@@ -45,6 +45,12 @@ class Synapse:
                 self.end_headers()
                 self.wfile.write(b'{"accepted": 1}')
 
+            def do_GET(self):  # noqa: N802 - a followed redirect arrives as a GET
+                outer.requests.append({"path": self.path, "auth": self.headers.get("Authorization"),
+                                       "raw": "", "json": {"events": []}})
+                self.send_response(404)
+                self.end_headers()
+
             def log_message(self, *a):
                 pass
 
@@ -254,12 +260,19 @@ def test_status_line_reports_allow_listed_fields_and_mode(tmp_path, synapse):
     assert SECRET not in synapse.requests[-1]["raw"]
 
 
-def test_status_debounced_10s(tmp_path, synapse):
-    env = make_env(tmp_path, synapse.url)
-    for _ in range(3):
-        hook(env, STATUS_IN, STATUSLINE)
-    time.sleep(0.3)
-    assert [e["type"] for e in synapse.events()] == ["status"]
+def test_status_debounced_10s_and_the_last_update_is_kept(tmp_path, synapse):
+    """At most one status per 10 s, and an update inside the window is sent when it ends."""
+    env = make_env(tmp_path, synapse.url, inline=False)
+    for pct in (10, 20, 30):
+        inp = json.loads(json.dumps(STATUS_IN))
+        inp["context_window"]["used_percentage"] = pct
+        assert hook(env, inp, STATUSLINE).returncode == 0
+    time.sleep(1.0)
+    assert [e["payload"]["context_pct"] for e in synapse.events()] == [10]
+    evs = synapse.wait(2, timeout=14)
+    assert [e["payload"]["context_pct"] for e in evs] == [10, 30], "the newest suppressed snapshot is sent at window end"
+    time.sleep(1.0)
+    assert len(synapse.events()) == 2, "exactly one trailing send"
 
 
 def test_status_line_wraps_existing_command_byte_for_byte(tmp_path, synapse):
@@ -274,9 +287,34 @@ def test_status_line_wraps_existing_command_byte_for_byte(tmp_path, synapse):
 
 def test_status_line_falls_back_when_wrapped_command_fails(tmp_path, synapse):
     env = make_env(tmp_path, synapse.url, enabled=False)
-    wrap = base64.b64encode(b"exit 3").decode()
-    assert hook(env, STATUS_IN, STATUSLINE, ["--wrap-b64", wrap]).stdout.decode() == "Opus 5.5 · ctx 42% · $1.23"
+    r = hook(env, STATUS_IN, STATUSLINE, ["--wrap-b64", base64.b64encode(b"printf partial; exit 3").decode()])
+    assert (r.stdout, r.returncode) == (b"partial", 3), "the wrapped exit code passes through, as before the wrap"
     assert hook(env, STATUS_IN, STATUSLINE, ["--wrap-b64", "!!not-base64"]).stdout.decode() == "Opus 5.5 · ctx 42% · $1.23"
+
+
+def test_status_line_passes_non_utf8_bytes_and_survives_a_latin1_locale(tmp_path, synapse):
+    env = make_env(tmp_path, synapse.url, enabled=False)
+    env.update(LC_ALL="en_US.ISO8859-1", LANG="en_US.ISO8859-1")
+    env.pop("PYTHONIOENCODING", None)
+    wrap = base64.b64encode(b"printf 'caf\\351 \\342\\234\\223'").decode()
+    assert hook(env, STATUS_IN, STATUSLINE, ["--wrap-b64", wrap]).stdout == b"caf\xe9 \xe2\x9c\x93"
+    assert hook(env, STATUS_IN, STATUSLINE).stdout.decode() == "Opus 5.5 · ctx 42% · $1.23"
+
+
+def test_status_line_shows_the_users_bar_even_if_fleet_cannot_load(tmp_path, synapse):
+    """Without fleet/common.py (or tomllib, on 3.10) the wrapped bar must still show."""
+    lone = tmp_path / "orch" / "fleet"
+    lone.mkdir(parents=True)
+    (lone / "statusline.py").write_text(STATUSLINE.read_text())
+    env = make_env(tmp_path, synapse.url)
+    wrap = base64.b64encode(b"printf MY-BAR").decode()
+    r = hook(env, STATUS_IN, lone / "statusline.py", ["--wrap-b64", wrap])
+    assert (r.stdout, r.returncode) == (b"MY-BAR", 0)
+    old = Path("/usr/bin/python3")
+    if old.exists() and subprocess.run([str(old), "-c", "import tomllib"], capture_output=True).returncode != 0:
+        r = subprocess.run([str(old), str(STATUSLINE), "--wrap-b64", wrap], input=json.dumps(STATUS_IN).encode(),
+                           env=env, capture_output=True, timeout=20)
+        assert (r.stdout, r.returncode) == (b"MY-BAR", 0), "a Python without tomllib still shows the bar"
 
 
 def test_status_line_early_session_nulls(tmp_path, synapse):
@@ -287,6 +325,121 @@ def test_status_line_early_session_nulls(tmp_path, synapse):
     assert r.stdout.decode() == "M"
     ev = synapse.wait(1)[-1]
     assert ev["payload"] == {"context_window": 200000, "model": "m"}
+
+
+# --- review round 1 regressions -------------------------------------------------------
+
+def test_redirect_is_never_followed_so_the_token_stays_home(tmp_path, synapse):
+    elsewhere = synapse  # records anything that reaches it
+    class R(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            self.send_response(302)
+            self.send_header("Location", elsewhere.url + "/steal")
+            self.end_headers()
+        def log_message(self, *a):
+            pass
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), R)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        env = make_env(tmp_path, f"http://127.0.0.1:{srv.server_address[1]}")
+        assert hook(env, base("Stop")).returncode == 0
+        time.sleep(0.5)
+        assert elsewhere.requests == []
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.parametrize("subject", [
+    "Rotate the DB password hunter2 on prod",
+    "Use password Tr0ub4dor&3 for staging login",
+    "Set API key to 4f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c",
+    "Login as admin:S3cr3tP@ss to the router",
+    "export OPENAI_API_KEY=sk-abc",
+    "mail jane.doe@example.com about it",
+    "SSN 123-45-6789 on the form",
+    "token ghp9aZ8bY7cX6dW5eV4fU3",
+])
+def test_prose_secrets_in_task_subjects_are_redacted(tmp_path, synapse, subject):
+    env = make_env(tmp_path, synapse.url)
+    hook(env, base("TaskCreated", task_id="1", task_subject=subject))
+    (ev,) = synapse.wait(1)
+    sent = ev["payload"].get("subject", "")
+    for secret in ("hunter2", "Tr0ub4dor", "4f9a8b7c6d5e", "S3cr3tP", "sk-abc", "jane.doe", "123-45-6789", "ghp9aZ8bY7"):
+        assert secret not in sent, f"{secret!r} left the machine in {sent!r}"
+
+
+def test_plain_task_subject_survives(tmp_path, synapse):
+    env = make_env(tmp_path, synapse.url)
+    hook(env, base("TaskCreated", task_id="1", task_subject="Write the PR body for the fleet reporter"))
+    (ev,) = synapse.wait(1)
+    assert ev["payload"]["subject"] == "Write the PR body for the fleet reporter"
+
+
+def test_subject_omitted_when_the_scrubber_cannot_load(tmp_path):
+    empty = tmp_path / "no-scrubber"
+    empty.mkdir()
+    code = ("import sys; sys.path.insert(0, %r); from fleet.common import scrub_subject; "
+            "print(repr(scrub_subject('deploy key abc', scrubber_dir=__import__('pathlib').Path(%r))))") % (str(ORCH), str(empty))
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, cwd=str(tmp_path))
+    assert r.stdout.strip() == "None", r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("handle", ["../other", "a/b", ".hidden"])
+def test_handle_with_path_chars_reports_nothing(tmp_path, synapse, handle):
+    env = make_env(tmp_path, synapse.url)
+    toml = Path(env["MS4CC_SYNAPSE_TOML"])
+    toml.write_text(toml.read_text().replace('handle = "plumb"', f'handle = "{handle}"'))
+    (tmp_path / "other.token").write_text("someone-elses-token")
+    assert hook(env, base("Stop")).returncode == 0
+    time.sleep(0.3)
+    assert synapse.requests == []
+
+
+def test_session_id_cannot_escape_the_state_dir(tmp_path, synapse):
+    env = make_env(tmp_path, synapse.url)
+    hook(env, base("PostToolUse", session_id="../../escape", tool_name="Read", tool_input={}, tool_response={}))
+    synapse.wait(1)
+    state = Path(env["MS4CC_SYNAPSE_HOME"]) / "fleet"
+    assert not list(tmp_path.rglob("escape*")) or all(state in p.parents for p in tmp_path.rglob("escape*"))
+    assert not (tmp_path / "escape.tool").exists() and not (tmp_path.parent / "escape.tool").exists()
+
+
+@pytest.mark.parametrize("inp,typ,payload", [
+    (base("PostToolUseFailure", tool_name="Bash", tool_input={"command": SECRET}, error=SECRET), "tool", {"tool_name": "Bash"}),
+    (base("Notification", notification_type="elicitation_url_dialog", message=SECRET), "needs_input", {"kind": "elicitation_url_dialog"}),
+    (base("Notification", notification_type="agent_needs_input", message=SECRET), "needs_input", {"kind": "agent_needs_input"}),
+    (base("SessionStart", source="clear", cwd="/"), "session.started", {"source": "clear"}),
+])
+def test_round1_mappings(tmp_path, synapse, inp, typ, payload):
+    env = make_env(tmp_path, synapse.url)
+    hook(env, inp)
+    (ev,) = synapse.wait(1)
+    assert (ev["type"], ev["payload"]) == (typ, payload)
+    assert SECRET not in synapse.requests[0]["raw"]
+
+
+def test_session_start_prunes_state_older_than_14_days(tmp_path, synapse):
+    env = make_env(tmp_path, synapse.url)
+    state = Path(env["MS4CC_SYNAPSE_HOME"]) / "fleet"
+    state.mkdir(parents=True)
+    old, new = state / "dead-session.tool", state / "live-session.tool"
+    for p in (old, new):
+        p.write_text("1")
+    os.utime(old, (time.time() - 15 * 86400,) * 2)
+    hook(env, base("SessionStart", source="startup"))
+    synapse.wait(1)
+    assert not old.exists() and new.exists()
+
+
+def test_parallel_tool_burst_sends_one(tmp_path, synapse):
+    env = make_env(tmp_path, synapse.url)
+    procs = [subprocess.Popen([sys.executable, str(REPORT)], stdin=subprocess.PIPE, env=env)
+             for _ in range(20)]
+    for p in procs:
+        p.communicate(json.dumps(base("PostToolUse", tool_name="Read", tool_input={}, tool_response={})).encode())
+    time.sleep(0.5)
+    assert len([e for e in synapse.events() if e["type"] == "tool"]) == 1
 
 
 # --- latency with Synapse down (done item 6) ----------------------------------------------

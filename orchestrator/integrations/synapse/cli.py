@@ -207,6 +207,27 @@ def _merge_synapse_hooks_into_settings() -> dict:
     }
 
 
+def _kept_fleet_lines(path: Path) -> list[str]:
+    """The `[fleet]` table of an existing synapse.toml, re-emitted so `setup` doesn't drop it.
+
+    Only the keys Fleet reads (`enabled`, `machine`) are carried over, with their types
+    checked; anything unreadable is left out rather than guessed at."""
+    try:
+        import tomllib
+        with path.open("rb") as f:
+            fleet = tomllib.load(f).get("fleet")
+    except Exception:
+        return []
+    if not isinstance(fleet, dict):
+        return []
+    lines = ["[fleet]"]
+    if isinstance(fleet.get("enabled"), bool):
+        lines.append(f"enabled = {'true' if fleet['enabled'] else 'false'}")
+    if isinstance(fleet.get("machine"), str):
+        lines.append(f"machine = {json.dumps(fleet['machine'])}")
+    return lines + [""] if len(lines) > 1 else []
+
+
 def cmd_setup(_args: argparse.Namespace) -> int:
     """Interactive setup — replaces the manual config + token-paste dance.
 
@@ -315,7 +336,7 @@ def cmd_setup(_args: argparse.Namespace) -> int:
         "fresh_session_seconds = 43200",
         "http_timeout = 5",
         "",
-    ]
+    ] + _kept_fleet_lines(CONFIG_PATH)  # Fleet's opt-in survives a re-run of setup
     CONFIG_PATH.write_text("\n".join(config_lines), encoding="utf-8")
 
     # Write token.

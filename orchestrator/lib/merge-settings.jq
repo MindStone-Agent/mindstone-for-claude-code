@@ -54,14 +54,19 @@ def strip_managed($orch):
 # stdin and shows its output unchanged. Every other field of the user's statusLine
 # (padding, refreshInterval, ...) is kept. A re-run sees the command is already ours and only
 # refreshes our prefix, keeping the wrapped command, so bootstrap stays idempotent and never
-# wraps us inside ourselves (matched on "/fleet/statusline.py", so a moved orchestrator dir
-# isn't wrapped either). A statusLine without a usable command is left untouched.
+# wraps us inside ourselves. "Ours" is matched on the exact shape we install
+# (<dir>/.venv/bin/python <dir>/fleet/statusline.py [--wrap-b64 <b64>]), so a moved
+# orchestrator dir is re-prefixed rather than wrapped, and a user's own script that merely has
+# fleet/statusline.py in its path is wrapped, never replaced. A statusLine that isn't an
+# object, or has no usable command, is left untouched.
 | ($frag[0].statusLine // null) as $mine
 | if $mine == null then .
   else
     (.statusLine // null) as $old
     | if $old == null then .statusLine = $mine
-      elif (($old.command // "") | type) == "string" and (($old.command // "") | contains("/fleet/statusline.py")) then
+      elif ($old | type) != "object" then .
+      elif (($old.command // "") | type) == "string"
+           and (($old.command // "") | test("^.+/\\.venv/bin/python .+/fleet/statusline\\.py( --wrap-b64 [A-Za-z0-9+/=]+)?$")) then
         ((first($old.command | scan("--wrap-b64 ([A-Za-z0-9+/=]+)")) // [null])[0]) as $w
         | .statusLine = ($old + {type: "command",
                                   command: ($mine.command + (if $w then " --wrap-b64 " + $w else "" end))})

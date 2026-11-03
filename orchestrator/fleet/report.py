@@ -11,7 +11,8 @@ SessionStart and UserPromptSubmit stdout is injected into the model's context.
 Privacy (synapse#31 section 2): each payload is built field by field from the allow-list
 below. Nothing is copied from the hook input wholesale, so a prompt, a tool input or a
 tool output cannot leave the machine through this file, whatever Claude Code adds to the
-hook JSON later. The only free text sent is a task subject, scrubbed and cut to 120 chars.
+hook JSON later. Two strings are free text: the last component of the cwd (at most 64
+chars) and a task subject, scrubbed and cut to 120 chars.
 
 Off unless `[fleet] enabled = true` in orchestrator/config/synapse.toml.
 """
@@ -25,10 +26,11 @@ from pathlib import Path
 if __package__ in (None, ""):  # run as a script by the hook command
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fleet.common import emit, fleet_config, now_iso, rate_ok, remember_mode, reset_rate, scrub_subject  # noqa: E402
+from fleet.common import emit, fleet_config, now_iso, prune_state, rate_ok, remember_mode, reset_rate, scrub_subject  # noqa: E402
 
 HARNESS = "claude-code"
-NEEDS_INPUT_KINDS = {"permission_prompt", "idle_prompt", "elicitation_dialog"}
+# Notification types that mean a person must act (synapse#31: permission, idle, elicitation).
+NEEDS_INPUT_KINDS = {"permission_prompt", "idle_prompt", "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"}
 TOOL_SAMPLE_S = 5.0
 
 
@@ -54,7 +56,7 @@ def build(inp: dict) -> tuple[str, dict, dict] | None:
     if ev == "SessionStart":
         cwd = inp.get("cwd")
         return "session.started", {
-            "cwd_name": os.path.basename(cwd.rstrip("/")) if isinstance(cwd, str) and cwd else None,
+            "cwd_name": _s(os.path.basename(cwd.rstrip("/")), 64) if isinstance(cwd, str) else None,
             "model": _model(inp.get("model")),
             "source": _s(inp.get("source"), 16),
         }, {}
@@ -64,7 +66,7 @@ def build(inp: dict) -> tuple[str, dict, dict] | None:
         return "turn.started", {}, {}
     if ev == "Stop":
         return "turn.ended", {}, {}
-    if ev == "PostToolUse":
+    if ev in ("PostToolUse", "PostToolUseFailure"):  # a failed tool is still activity
         return "tool", {"tool_name": _s(inp.get("tool_name"), 128)}, {}
     if ev in ("SubagentStart", "SubagentStop"):
         # Claude Code's own internal agents fire SubagentStop with no agent_type and no
@@ -109,7 +111,9 @@ def main() -> int:
     if mapped is None:
         return 0
     kind, payload, extras = mapped
-    if kind == "tool" and not rate_ok(cfg, session, "tool", TOOL_SAMPLE_S):
+    if kind == "session.started":
+        prune_state()
+    if kind == "tool" and not rate_ok(session, "tool", TOOL_SAMPLE_S):
         return 0
     if kind == "needs_input":
         # The board clears "needs you" on the next tool or turn event. Re-arm tool sampling

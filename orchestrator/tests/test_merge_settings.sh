@@ -136,6 +136,37 @@ if merge "$TMP/sl_user.json" > "$TMP/sl5.json" 2> "$TMP/esl5"; then
     "$(jq -r '.statusLine.command' "$TMP/sl5.json")" "$USER_SL"
 else bad "merge without fragment statusLine failed: $(cat "$TMP/esl5")"; fi
 
+echo "== statusLine: a user script that merely has fleet/statusline.py in its path is wrapped =="
+jq -n '{statusLine: {type: "command", command: "python ~/tools/fleet/statusline.py --theme dark"}}' > "$TMP/sl_lookalike.json"
+if merge_sl "$TMP/sl_lookalike.json" > "$TMP/sl6.json" 2> "$TMP/esl6"; then
+  B64=$(jq -r '.statusLine.command' "$TMP/sl6.json" | sed -n 's/.*--wrap-b64 \([A-Za-z0-9+/=]*\).*/\1/p')
+  assert "look-alike user command kept (wrapped)" "$(printf '%s' "$B64" | base64 -d 2>/dev/null || printf '%s' "$B64" | base64 -D)" "python ~/tools/fleet/statusline.py --theme dark"
+else bad "look-alike merge failed: $(cat "$TMP/esl6")"; fi
+echo '{"statusLine": "echo hi"}' > "$TMP/sl_str.json"
+if merge_sl "$TMP/sl_str.json" > "$TMP/sl7.json" 2> "$TMP/esl7"; then
+  assert "a non-object statusLine is left untouched (no jq error)" "$(jq -c '.statusLine' "$TMP/sl7.json")" '"echo hi"'
+else bad "non-object statusLine made jq fail: $(cat "$TMP/esl7")"; fi
+OTHER="/old/orch/.venv/bin/python /old/orch/fleet/statusline.py --wrap-b64 ZWNobyBoaQ=="
+jq -n --arg c "$OTHER" '{statusLine: {type: "command", command: $c}}' > "$TMP/sl_moved.json"
+if merge_sl "$TMP/sl_moved.json" > "$TMP/sl8.json" 2> "$TMP/esl8"; then
+  assert "ours from a moved orchestrator dir is re-prefixed, wrapped command kept" \
+    "$(jq -r '.statusLine.command' "$TMP/sl8.json")" "$SL --wrap-b64 ZWNobyBoaQ=="
+else bad "moved-dir merge failed: $(cat "$TMP/esl8")"; fi
+
+echo "== the REAL settings.fragment.json, substituted as bootstrap does =="
+REAL="$HERE/../settings.fragment.json"
+sed "s|\$ORCHESTRATOR_DIR|$ORCH|g" "$REAL" > "$TMP/real_frag.json"
+merge_real() { jq --arg orch "$ORCH" --slurpfile frag "$TMP/real_frag.json" -f "$FILTER" "$1"; }
+if merge_real "$TMP/sl_user.json" > "$TMP/r1.json" 2> "$TMP/er1" && merge_real "$TMP/r1.json" > "$TMP/r2.json" 2> "$TMP/er2"; then
+  assert "real fragment: re-run is byte-identical (idempotent)" "$(cmp -s "$TMP/r1.json" "$TMP/r2.json" && echo same)" "same"
+  assert "real fragment: user statusLine wrapped by ours" \
+    "$(jq -r '.statusLine.command' "$TMP/r1.json" | grep -c -- "$ORCH/fleet/statusline.py --wrap-b64 ")" "1"
+  assert "real fragment: every fleet hook is async" \
+    "$(jq '[.hooks[][].hooks[] | select(.command|contains("/fleet/report.py")) | .async] | all' "$TMP/r1.json")" "true"
+  assert "real fragment: fleet reporter on 13 events" \
+    "$(jq '[.hooks | to_entries[] | select(any(.value[].hooks[]; .command|contains("/fleet/report.py")))] | length' "$TMP/r1.json")" "13"
+else bad "real fragment merge failed: $(cat "$TMP/er1" "$TMP/er2")"; fi
+
 echo
 echo "passed: $pass   failed: $fail"
 [[ "$fail" -eq 0 ]]

@@ -1,5 +1,5 @@
 {
-  "_comment_autocompact": "CLAUDE_CODE_AUTO_COMPACT_WINDOW = the model's FULL context window in tokens (1000000 for Fable 5 [1m] / Opus 4.8 at 1M). Auto-compaction fires at CLAUDE_AUTOCOMPACT_PCT_OVERRIDE percent of THIS window, while the status meter reads against the model's full window \u2014 so the window must equal the real context size for '92' to mean 92% of the meter. If it is smaller than the real window, compaction fires earlier than the percentage implies (e.g. 92% of a 900K window = ~83% of a 1M meter). A 200K-context install should set this to 200000. Ignored by the merge (only .hooks/.autoCompactEnabled/.env are applied); documentation only.",
+  "_comment_autocompact": "CLAUDE_CODE_AUTO_COMPACT_WINDOW = the model's FULL context window in tokens (1000000 for Fable 5 [1m] / Opus 4.8 at 1M). Auto-compaction fires at CLAUDE_AUTOCOMPACT_PCT_OVERRIDE percent of THIS window, while the status meter reads against the model's full window \u2014 so the window must equal the real context size for '92' to mean 92% of the meter. If it is smaller than the real window, compaction fires earlier than the percentage implies (e.g. 92% of a 900K window = ~83% of a 1M meter). A 200K-context install should set this to 200000. Ignored by the merge (only .hooks, .autoCompactEnabled, .env and .statusLine are applied); documentation only.",
   "autoCompactEnabled": true,
   "env": {
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "92",
@@ -156,7 +156,7 @@
     ],
     "Notification": [
       {
-        "matcher": "permission_prompt|idle_prompt|elicitation_dialog",
+        "matcher": "permission_prompt|idle_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input",
         "hooks": [
           {
             "type": "command",
@@ -167,6 +167,18 @@
       }
     ],
     "PostCompact": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/report.py",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
       {
         "matcher": "*",
         "hooks": [
