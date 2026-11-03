@@ -16,8 +16,10 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
   (names only, sampled), subagent, task, needs-input and compaction events, plus a status line that
   reports context %, model, cost and rate limits at most every 10 s. Payloads are allow-listed field by
   field: no prompt text, tool inputs or tool outputs leave the machine. Sends are fire-and-forget from
-  a detached process, so hooks never wait on Synapse. Bootstrap installs the status line and wraps an
-  existing `statusLine` rather than replacing it.
+  a detached process with a 5 s deadline and no redirects, so hooks never wait on Synapse and the token
+  never leaves the configured host. Bootstrap installs the status line and wraps an existing
+  `statusLine` rather than replacing it (its output, exit code and stderr pass through). `synapse setup`
+  now keeps a `[fleet]` table when it rewrites `synapse.toml`.
 - **Checks that can fail** (`AGENTS.md`) (#131): a new subsection under Engineering discipline with
   nine verification rules: prove a check by breaking what it checks; sort a noisy check's
   findings before loosening it; loose matchers conceal; absent input fails loudly; name
