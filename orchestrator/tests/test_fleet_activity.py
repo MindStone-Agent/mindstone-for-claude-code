@@ -862,9 +862,11 @@ def test_the_retry_after_a_blocked_agent_call_keeps_its_parent(tmp_path, synapse
     hook(env, base("SessionStart", source="startup", transcript_path=str(tp)))
     hook(env, base("PreToolUse", tool_name="Agent", tool_use_id="toolu_A", transcript_path=str(tp),
                    tool_input={"subagent_type": "Explore", "description": "first try"}))
-    transcript(tp, [_blocked("toolu_A")])
     hook(env, base("PreToolUse", tool_name="Agent", tool_use_id="toolu_B", transcript_path=str(tp),
                    tool_input={"subagent_type": "Explore", "description": "second try"}))
+    # A's error result, written before B existed in reality, is seen here only after B's own
+    # tail ran: in production that tail runs detached and SubagentStart can beat it.
+    transcript(tp, [_blocked("toolu_A")])
     hook(env, base("SubagentStart", agent_id="agent_b", agent_type="Explore", transcript_path=str(tp)))
     (start,) = [e for e in synapse.wait(6) if e["type"] == "subagent.started"]
     assert (start["payload"].get("parent_tool_use_id"), start["payload"].get("description")) == ("toolu_B", "second try")
