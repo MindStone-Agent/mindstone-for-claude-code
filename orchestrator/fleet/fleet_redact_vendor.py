@@ -50,6 +50,7 @@ def _note(value: str) -> None:
         pieces.add(part)
         pieces.add(part.split("=", 1)[1] if "=" in part.rstrip("=") else part)
     for v in pieces:
+        v = v.strip(" \t\r\n\"'\\,;")
         for w in (v, v.rstrip("=")):
             if len(w) >= 6:
                 sink.add(w)
@@ -129,14 +130,14 @@ EXTRA: list[tuple[re.Pattern[str], str]] = [
     # Round 4 (Plumb): credential headers written as dict or JSON keys
     # ({"Authorization": "Basic ..."}, 'Cookie': 'sid=...'), either quote,
     # and JSON inside a string ({\"Authorization\": \"...\"}, round 5).
-    (re.compile(r"(?i)(\\?[\"'](?:proxy-)?authorization\\?[\"'][ \t]{0,8}:[ \t]{0,8}\\?[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}?(\\?[\"'])"), r"\1" + _R + r"\2"),
-    (re.compile(r"(?i)(\\?[\"'](?:set-)?cookie\\?[\"'][ \t]{0,8}:[ \t]{0,8}\\?[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}?(\\?[\"'])"), r"\1" + _R + r"\2"),
-    (re.compile(r"(?i)(\\?[\"']x-[a-z0-9-]{0,40}(?:key|token|secret|auth)\\?[\"'][ \t]{0,8}:[ \t]{0,8}\\?[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}?(\\?[\"'])"), r"\1" + _R + r"\2"),
+    (re.compile(r"(?i)(\\?[\"'](?:proxy-)?authorization\\?[\"'][ \t]{0,8}:[ \t]{0,8}\\?[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}(\\?[\"'])"), r"\1" + _R + r"\2"),
+    (re.compile(r"(?i)(\\?[\"'](?:set-)?cookie\\?[\"'][ \t]{0,8}:[ \t]{0,8}\\?[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}(\\?[\"'])"), r"\1" + _R + r"\2"),
+    (re.compile(r"(?i)(\\?[\"']x-[a-z0-9-]{0,40}(?:key|token|secret|auth)\\?[\"'][ \t]{0,8}:[ \t]{0,8}\\?[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}(\\?[\"'])"), r"\1" + _R + r"\2"),
     # A bare secret key in lower case with any value, dotted or not
     # (password=correct.horse.battery.staple; Plumb, round 3). The scrubber
     # takes a dotted value for code; this over-redacts code like
     # password=args.password, which is the safe side.
-    (re.compile(r"(?i)(?<![A-Za-z0-9_.\-])((?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|access[_-]?key)[ \t]{0,8}=[ \t]{0,8}[\"']?)(?!\[REDACTED)[^\s\"']{1,4096}"), r"\1" + _R),
+    (re.compile(r"(?i)(?<![A-Za-z0-9_])((?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|access[_-]?key)[ \t]{0,8}=[ \t]{0,8}(?:\\?[\"'])?)(?!\[REDACTED)[^\s\"']{1,4096}"), r"\1" + _R),
     # Round 3: JSON keys naming a secret, any value (punctuation, short).
     (re.compile(r"(?i)(\"[A-Za-z0-9_\-]{0,40}(?:secret|password|passwd|passphrase|token|api[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret)(?:[_-]?(?:value|data|b64|base64))?\"[ \t]{0,8}:[ \t]{0,8}\")(?!\[REDACTED)(?:[^\"\\\n]|\\.){1,4096}\""), r"\1" + _R + "\""),
 ]
@@ -365,7 +366,16 @@ _JSON_DATA_OPEN = re.compile(r"\\?\"(?:data|stringData)\\?\"[ \t]*:[ \t]*\{")
 # last-applied-configuration annotation). A value may hold braces.
 _JSON_PAIR = {
     '"': re.compile(r"[ \t\r\n,]*(\"[^\"\\\n]{1,253}\"[ \t]*:[ \t]*\")((?:[^\"\\\n]|\\.){0,65536})(\")"),
-    '\\"': re.compile(r"[ \t\r\n,]*(\\\"(?:[^\"\\\n]|\\\\\\\\){1,253}\\\"[ \t]*:[ \t]*\\\")((?:[^\"\\\n]|\\\\\\\\|\\\\[nrt/])*?)(\\\")"),
+    # inside a string: a value's own escapes are \\\\ (a backslash), \\\" (a
+    # quote) and \\x (\\n, \\u0026, ...), none of which ends the value
+    '\\"': re.compile(r"[ \t\r\n,]*(\\\"(?:[^\"\\\n]|\\\\\\\\){1,253}\\\"[ \t]*:[ \t]*\\\")((?:[^\"\\\n]|\\{4}|\\{3}\"|\\{2}[^\"\\\n])*)(\\\")"),
+}
+# The same pairs anywhere on a line: what's left of a data object the pair
+# scan couldn't follow (a null or number value, a nested object) is redacted
+# rather than skipped (round 6).
+_JSON_ANY_PAIR = {
+    '"': re.compile(r"(\"[^\"\\\n]{1,253}\"[ \t]*:[ \t]*\")((?:[^\"\\\n]|\\.){0,65536})(\")"),
+    '\\"': re.compile(r"(\\\"(?:[^\"\\\n]|\\\\\\\\){1,253}\\\"[ \t]*:[ \t]*\\\")((?:[^\"\\\n]|\\{4}|\\{3}\"|\\{2}[^\"\\\n])*)(\\\")"),
 }
 
 
@@ -380,12 +390,26 @@ def _json_secret_data(doc: str) -> str:
     for m in _JSON_DATA_OPEN.finditer(doc):
         if m.start() < i:
             continue
-        pair = _JSON_PAIR['\\"' if doc[m.start()] == "\\" else '"']
+        q = '\\"' if doc[m.start()] == "\\" else '"'
+        pair = _JSON_PAIR[q]
         out.append(doc[i:m.end()])
         i = m.end()
         while True:
             p = pair.match(doc, i)
             if not p:
+                rest = doc[i:].lstrip(" \t\r\n,")
+                if not rest.startswith("}") and not rest.startswith("\\}"):
+                    eol = doc.find("\n", i)
+                    eol = len(doc) if eol < 0 else eol
+
+                    def any_pair(a: re.Match[str]) -> str:
+                        if a.group(2).startswith("[REDACTED"):
+                            return a.group(0)
+                        _note(a.group(2))
+                        return a.group(1) + _R + a.group(3)
+
+                    out.append(_JSON_ANY_PAIR[q].sub(any_pair, doc[i:eol]))
+                    i = eol
                 break
             out.append(doc[i:p.start(2)])
             if not p.group(2).startswith("[REDACTED"):
@@ -437,7 +461,7 @@ def _long_b64(m: re.Match[str]) -> str:
 # No "=" or ":" in the run, so a key in front of its value ("password=[RED")
 # isn't one.
 _REMNANT_BEFORE = re.compile(r"(?<![A-Za-z0-9_\-+/])[A-Za-z0-9_\-+/]{8,4096}(?=\[REDACTED)")
-_REMNANT_AFTER = re.compile(r"(\[REDACTED[A-Z\-]{0,40}\])[A-Za-z0-9_\-+/]{8,4096}")
+_REMNANT_AFTER = re.compile(r"(\[REDACTED[A-Z\-]{0,40}\])[A-Za-z0-9_\-+/.]{8,4096}")
 
 
 def _remnants(text: str) -> str:
