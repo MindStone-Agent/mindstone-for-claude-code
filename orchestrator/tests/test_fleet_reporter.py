@@ -825,21 +825,44 @@ def test_two_status_lines_writing_at_once_never_leave_corrupt_json(tmp_path, syn
     assert r.stdout.strip() in ("90.0", "5.0"), r.stdout + r.stderr
 
 
-@pytest.mark.parametrize("stdin", [b"[" * 100000 + b"]" * 100000,
-                                   b'{"session_id": "s", "context_window": {"used_percentage": 1' + b"0" * 400 + b"}}",
-                                   b'{"session_id": "s", "cost": {"total_cost_usd": Infinity}}'],
-                         ids=["deeply-nested", "400-digit-int", "infinity"])
-def test_malformed_status_input_still_shows_the_wrapped_bar(tmp_path, synapse, stdin):
-    """#144 review S3-3: RecursionError and OverflowError escaped main() and blanked the bar."""
+@pytest.mark.parametrize("stdin,own", [
+    (b"[" * 100000 + b"]" * 100000, b""),
+    (b'{"session_id": "s", "model": {"display_name": "M"}, "context_window": {"used_percentage": 1'
+     + b"0" * 400 + b"}}", b"M"),
+    (b'{"session_id": "s", "model": {"display_name": "M"}, "cost": {"total_cost_usd": Infinity}}', b"M"),
+], ids=["deeply-nested", "400-digit-int", "infinity"])
+def test_malformed_status_input_still_shows_a_bar(tmp_path, synapse, stdin, own):
+    """#144 review S3-3: RecursionError and OverflowError escaped main() and blanked the bar.
+    The wrapped bar shows whatever the input; without a wrap, our own bar shows what it can."""
     env = make_env(tmp_path, synapse.url)
     wrap = base64.b64encode(b"cat >/dev/null; printf MY-BAR").decode()
     r = subprocess.run([sys.executable, str(STATUSLINE), "--wrap-b64", wrap], input=stdin, env=env,
                        capture_output=True, timeout=20)
     assert (r.stdout, r.returncode) == (b"MY-BAR", 0), r.stderr
     r = subprocess.run([sys.executable, str(STATUSLINE)], input=stdin, env=env, capture_output=True, timeout=20)
-    assert r.returncode == 0 and b"Traceback" not in r.stderr, r.stderr
+    assert (r.stdout, r.returncode) == (own, 0), r.stderr
     time.sleep(0.3)
     assert all("Infinity" not in q["raw"] and "inf" not in json.dumps(q["json"]) for q in synapse.requests)
+
+
+PARSE_ERROR = r"""import sys, json
+sys.path.insert(0, %r)
+from fleet import statusline as sl
+def boom(*a, **k):
+    raise RecursionError("maximum recursion depth exceeded")  # Python < 3.14 on deep nesting
+json.loads = boom
+sys.exit(sl.main(sys.argv[1:]))
+"""
+
+
+def test_a_parse_error_that_is_not_a_valueerror_still_shows_the_wrapped_bar(tmp_path, synapse):
+    """#144 review S3-3, made deterministic: 3.14's decoder no longer raises RecursionError on
+    deep nesting, so the input above can't reach the guard here; the error is forced instead."""
+    env = make_env(tmp_path, synapse.url)
+    wrap = base64.b64encode(b"cat >/dev/null; printf MY-BAR").decode()
+    r = subprocess.run([sys.executable, "-c", PARSE_ERROR % str(ORCH), "--wrap-b64", wrap], input=b"{}",
+                       env=env, capture_output=True, timeout=20)
+    assert (r.stdout, r.returncode) == (b"MY-BAR", 0), r.stderr
 
 
 def test_wrapped_command_past_the_timeout_is_killed_with_everything_it_started(tmp_path, monkeypatch):
