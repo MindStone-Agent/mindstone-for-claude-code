@@ -151,8 +151,8 @@ def test_session_started_shape_and_auth(tmp_path, synapse):
     (base("PreCompact", trigger="auto", custom_instructions=SECRET), "compact", {"phase": "pre"}),
     (base("PostCompact", trigger="auto", compact_summary=SECRET), "compact", {"phase": "post"}),
     (base("Notification", notification_type="idle_prompt", message=f"waiting {SECRET}"), "needs_input", {"kind": "idle_prompt"}),
-    (base("Notification", notification_type="permission_prompt", message="Claude needs your permission to use Bash"),
-     "needs_input", {"kind": "permission_prompt", "tool_name": "Bash"}),
+    (base("Notification", notification_type="permission_prompt", message=f"Claude needs your permission {SECRET}"),
+     "needs_input", {"kind": "permission_prompt"}),
 ])
 def test_allow_list(tmp_path, synapse, inp, typ, payload):
     env = make_env(tmp_path, synapse.url)

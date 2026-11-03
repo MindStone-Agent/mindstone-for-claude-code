@@ -19,9 +19,7 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
-import time
 from pathlib import Path
 
 if __package__ in (None, ""):  # run as a script by the hook command
@@ -32,7 +30,6 @@ from fleet.common import emit, fleet_config, now_iso, rate_ok, remember_mode, re
 HARNESS = "claude-code"
 NEEDS_INPUT_KINDS = {"permission_prompt", "idle_prompt", "elicitation_dialog"}
 TOOL_SAMPLE_S = 5.0
-_TOOL_IN_MESSAGE = re.compile(r"permission to use ([A-Za-z0-9_.:-]{1,64})")
 
 
 def _s(v: object, limit: int = 64) -> str | None:
@@ -85,11 +82,10 @@ def build(inp: dict) -> tuple[str, dict, dict] | None:
         kind = inp.get("notification_type")
         if kind not in NEEDS_INPUT_KINDS:
             return None
-        payload: dict = {"kind": kind}
-        m = _TOOL_IN_MESSAGE.search(inp.get("message") or "") if kind == "permission_prompt" else None
-        if m:
-            payload["tool_name"] = m.group(1)
-        return "needs_input", payload, {}
+        # `tool_name` is optional in #31 and isn't available: on 2.1.312 the permission
+        # notification's message is just "Claude needs your permission", and the message
+        # text itself is never sent.
+        return "needs_input", {"kind": kind}, {}
     if ev in ("PreCompact", "PostCompact"):
         return "compact", {"phase": "pre" if ev == "PreCompact" else "post"}, {}
     return None
