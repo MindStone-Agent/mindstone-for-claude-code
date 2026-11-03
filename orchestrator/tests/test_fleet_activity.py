@@ -731,8 +731,8 @@ def test_an_owed_reply_is_skipped_once_only(tmp_path, synapse):
 
 # --- shared fixtures with the server (synapse tests/fixtures/fleet_secrets.json) ---------------
 # Stored base64-encoded so the repo's privacy scan doesn't flag the fake secrets; byte-identical
-# to synapse's copy at 3ea87e6 (sha256 below). Refresh both together.
-FLEET_SECRETS_SHA256 = "81757dd2266f9a75ddd89154e55bc346f3e9faf2b104677855e08aeae6e990e6"
+# to synapse's copy at 8f4f46f (sha256 below). Refresh both together.
+FLEET_SECRETS_SHA256 = "091d86bb41942f5b59b720c879b614ac06004c9dfc93567607289d15d6a887aa"
 
 
 def _shared_fixtures() -> dict:
@@ -763,7 +763,7 @@ def test_scrubbing_many_distinct_secrets_stays_bounded():
     assert "xyzSECRET" not in text
 
 
-SERVER_REDACT_SHA256 = "3443b34e733b4ab33c136453c7f2c158680839c3c0f6f15b8fbea3c80e8536ce"  # synapse 3ea87e6
+SERVER_REDACT_SHA256 = "7bb106460c67651d289acd8618b490b636361562c197e9d2a629e3f8dda299f1"  # synapse 8f4f46f
 
 
 def test_the_vendored_server_redaction_is_verbatim():

@@ -105,6 +105,11 @@ EXTRA: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)([\"'](?:proxy-)?authorization[\"'][ \t]{0,8}:[ \t]{0,8}[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}([\"'])"), r"\1" + _R + r"\2"),
     (re.compile(r"(?i)([\"'](?:set-)?cookie[\"'][ \t]{0,8}:[ \t]{0,8}[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}([\"'])"), r"\1" + _R + r"\2"),
     (re.compile(r"(?i)([\"']x-[a-z0-9-]{0,40}(?:key|token|secret|auth)[\"'][ \t]{0,8}:[ \t]{0,8}[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}([\"'])"), r"\1" + _R + r"\2"),
+    # A bare secret key in lower case with any value, dotted or not
+    # (password=correct.horse.battery.staple; Plumb, round 3). The scrubber
+    # takes a dotted value for code; this over-redacts code like
+    # password=args.password, which is the safe side.
+    (re.compile(r"(?i)(?<![A-Za-z0-9_.\-])((?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|access[_-]?key)[ \t]{0,8}=[ \t]{0,8}[\"']?)(?!\[REDACTED)[^\s\"']{1,4096}"), r"\1" + _R),
     # Round 3: JSON keys naming a secret, any value (punctuation, short).
     (re.compile(r"(?i)(\"[A-Za-z0-9_\-]{0,40}(?:secret|password|passwd|passphrase|token|api[_-]?key|private[_-]?key|access[_-]?key|client[_-]?secret)(?:[_-]?(?:value|data|b64|base64))?\"[ \t]{0,8}:[ \t]{0,8}\")(?!\[REDACTED)(?:[^\"\\\n]|\\.){1,4096}\""), r"\1" + _R + "\""),
 ]
@@ -373,7 +378,10 @@ def _remnants(text: str) -> str:
 
 def redact_preview(text: str) -> str:
     """scrub() (bounded, above), then the extras. Irreversible; never raises
-    on a str."""
+    on a str. Line endings are normalised first: a line-anchored rule's `$`
+    doesn't match before a \r, so Windows (CRLF) text got past 9 of them
+    (Plumb, round 3)."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = _scrub_bounded(text)
     for pattern, repl in EXTRA:
         text = pattern.sub(repl, text)
