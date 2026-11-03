@@ -30,6 +30,16 @@ def strip_managed($orch):
   map(.hooks = ((.hooks // []) | map(select((.command // "") | contains($orch + "/") | not))))
   | map(select((.hooks | length) > 0));
 
+# The status line we install: one absolute <repo>/orchestrator dir used twice, then optionally
+# the wrapped command. Anchoring on /orchestrator keeps a user's own <dir>/.venv/bin/python
+# <dir>/fleet/statusline.py from being taken for ours (and removed with Fleet off).
+def is_ours_statusline:
+  type == "object" and ((.command // "") | type) == "string"
+  and ((.command // "") | gsub("^\\s+|\\s+$"; "")
+       | test("^(/\\S+/orchestrator)/\\.venv/bin/python \\1/fleet/statusline\\.py( --wrap-b64 [A-Za-z0-9+/=]+)?$"));
+
+def wrapped_b64: ((first(.command | scan("--wrap-b64 ([A-Za-z0-9+/=]+)")) // [null])[0]);
+
 ($frag[0].hooks // {}) as $new
 | (
     (.hooks // {})
@@ -48,3 +58,44 @@ def strip_managed($orch):
      then .autoCompactEnabled = $frag[0].autoCompactEnabled
      else . end)
 | .env = ((.env // {}) + ($frag[0].env // {}))
+# statusLine (Fleet, synapse#31 section 5). Installed only while Fleet is on (bootstrap
+# passes --argjson fleet true when synapse.toml has [fleet] enabled = true), and removed again
+# when it is off:
+# - Fleet on: install the fragment's status line, but WRAP an existing one, never replace it.
+#   The user's command rides along base64-encoded after `--wrap-b64` (shell-safe, no quoting),
+#   and fleet/statusline.py runs it with the same stdin and shows its output unchanged. Every
+#   other field of the user's statusLine (padding, refreshInterval, ...) is kept. A re-run sees
+#   the command is already ours and only refreshes our prefix, keeping the wrapped command, so
+#   bootstrap stays idempotent and never wraps us inside ourselves.
+# - Fleet off, or a fragment with no statusLine: if the status line is ours, put the wrapped
+#   command back (other fields kept), or remove the key if we installed the only one there was.
+# "Ours" is the exact shape we install, one absolute <repo>/orchestrator dir used twice
+# (<dir>/.venv/bin/python <dir>/fleet/statusline.py [--wrap-b64 <b64>]), so a moved install is
+# still recognised, while a user's own command (a relative or ~ path, two different dirs, a dir
+# not named orchestrator, a compound `cd x && ...`) is wrapped, never replaced or removed. A statusLine
+# that isn't an object, or has no usable command, is left untouched.
+| ($frag[0].statusLine // null) as $mine
+| (($ARGS.named.fleet // false) == true) as $fleet_on
+| (.statusLine // null) as $old
+| if ($old | is_ours_statusline) then
+    ($old | wrapped_b64) as $w
+    | if $mine != null and $fleet_on then
+        .statusLine = ($old + {type: "command",
+                               command: ($mine.command + (if $w then " --wrap-b64 " + $w else "" end))})
+      elif $w == null then del(.statusLine)
+      else (try ($w | @base64d) catch null) as $cmd
+        # Our wrap is @base64 of a jq string, so it round-trips exactly. One that doesn't (edited
+        # by hand, invalid UTF-8, bad padding) is left as it is; statusline.py shows its own bar
+        # for it. A user's line that really contains U+FFFD round-trips, and is restored.
+        | if ($cmd | type) == "string" and ($cmd | length) > 0 and ($cmd | @base64) == $w
+          then .statusLine = ($old + {command: $cmd})
+          else . end
+      end
+  elif $mine == null or ($fleet_on | not) then .
+  elif $old == null then .statusLine = $mine
+  elif ($old | type) != "object" then .
+  elif (($old.type // "command") == "command") and (($old.command // "") | type) == "string"
+       and (($old.command // "") | length) > 0 then
+    .statusLine = ($old + {type: "command", command: ($mine.command + " --wrap-b64 " + ($old.command | @base64))})
+  else .
+  end

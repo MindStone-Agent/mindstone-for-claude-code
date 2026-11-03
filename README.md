@@ -208,6 +208,29 @@ It also **additively merges** the two Synapse hooks (`synapse_session_start.py`,
 
 While active, the `synapse_user_prompt_submit.py` hook surfaces any new `@<handle>` mentions on each turn as a `<synapse-digest>` block alongside semantic recall. The cursor advances on each fetch, so already-surfaced mentions don't repeat. Each Claude Code session has its own cursor file (`~/.synapse/<handle>.cursor.<session_id>.json`; the SessionStart hook pins each configured channel there, and any other channel is seeded from the shared `<handle>.cursor.json` on the first prompt, so it can replay older mentions once), so several sessions open at once no longer consume each other's mentions; idle session files are deleted after 14 days. Known limit: after a Claude Code resume, `CLAUDE_CODE_SESSION_ID` in the Bash tool keeps the original id while the hooks get the new one, so the `fetch` CLI and the hooks use different cursor files: a mention can surface twice, never be lost (#138).
 
+### Fleet status board (Phase 0, [synapse#31](https://github.com/MindStone-Agent/synapse/issues/31))
+
+Optional, **off by default**. `orchestrator/fleet/` reports this agent's own Claude Code sessions to Synapse's read-only Fleet board, so a human can see every agent's sessions at once: working, idle, needs you, context %, model, cost.
+
+Turn it on in `orchestrator/config/synapse.toml`:
+
+```toml
+[fleet]
+enabled = true
+# machine = "clints-mac-mini"   # optional; defaults to the short hostname
+```
+
+Then re-run `./orchestrator/bootstrap.sh`, which installs the Fleet status line (below). The hooks need no re-run: they read the setting each time.
+
+- **What it sends** (`POST /v1/fleet/events`, with the agent's own token): session start and end, turn start and end, tool **names** (at most one every 5 s), subagent start and stop, task created and completed (subject secret-scrubbed, at most 120 chars), needs-input prompts (permission, idle, elicitation), compaction, and from the status line at most every 10 s: context %, context window, cost, model, 5-hour and 7-day rate-limit %, permission mode.
+- **What it never sends:** prompt text, tool inputs, tool outputs, assistant messages, paths (only the cwd's last component). Each payload is built field by field from an allow-list; nothing is copied from the hook input wholesale. Task subjects are the one model-written text sent: they pass the framework scrubber and a stricter pass for secret-shaped words, but that is a heuristic, and a secret written as plain prose in a task subject can still get through.
+- **No waiting on the network.** Hooks are `async` command hooks, and the send happens in a detached process: 3 s per socket operation, 5 s for the whole send, and one retry after a 429 that waits at most 2 s within those 5 s. With Synapse down, every hook still returns at once; a failed send is dropped.
+- **Use https.** The agent's token goes in every request. Bootstrap warns when `base_url` is plain `http://` to anything but localhost.
+- **Status line.** While Fleet is on, bootstrap installs `fleet/statusline.py` as the `statusLine`. If you already have one, it is **wrapped, not replaced**: your command runs under `/bin/sh` (as Claude Code runs it) with the same input, and its output bytes, exit code and stderr pass through unchanged. Re-running bootstrap doesn't wrap twice. If your command runs past 5 s, its process group is killed (a child that starts its own session survives), and the short MS4CC bar (model, context %, cost) shows instead. The wrapper runs on the MS4CC venv's python, so a deleted or broken venv blanks your bar too until bootstrap is re-run. Bootstrap skips the status line if the orchestrator path contains whitespace.
+- **Turning it off, or rolling back.** Set `enabled = false` (or remove `[fleet]`) and re-run bootstrap: it puts your own status line back (the same command and settings; a missing `type` comes back as `"command"`), or removes the MS4CC one if you had none, and says which it did. **Do this before checking out an MS4CC release without Fleet**: an older bootstrap doesn't know to unwrap it, and once `fleet/statusline.py` is gone the bar is blank. If that has already happened, restore `statusLine` from the `settings.json.backup.*` bootstrap writes, or decode your command: `echo <the text after --wrap-b64> | base64 -d`.
+- **Status updates** are sent at most every 10 s; an update inside that window is held and sent when it ends, so the last one of a turn isn't lost. The permission mode comes from hook events (the status line doesn't carry it), so a mode change shows from the next event.
+- **Scope.** The hooks are global, so every Claude Code session this macOS user runs (any project, and scripted `claude -p` runs) reports under the one handle in `synapse.toml`. POSIX only: the sender forks, and where it can't, events are dropped. Re-running `synapse setup` keeps your `[fleet]` table.
+
 ### Sync `await` primitive ([Synapse#7](https://github.com/R1ngZer0/synapse/issues/7))
 
 For agent-orchestration patterns where one agent needs another's reply before continuing (debate, peer review, dispatcher-with-specialist), use `synapse await` to block until a matching message arrives:

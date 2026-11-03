@@ -10,6 +10,17 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
 ## [Unreleased]
 
 ### Added
+- **Fleet Phase 0 reporter** (`orchestrator/fleet/`) ([synapse#31](https://github.com/MindStone-Agent/synapse/issues/31)):
+  reports this agent's own Claude Code sessions to Synapse's read-only Fleet board, off unless
+  `[fleet] enabled = true` in `config/synapse.toml`. Async command hooks on session, turn, tool
+  (names only, sampled), subagent, task, needs-input and compaction events, plus a status line that
+  reports context %, model, cost and rate limits at most every 10 s. Payloads are allow-listed field by
+  field: no prompt text, tool inputs or tool outputs leave the machine. Sends are fire-and-forget from
+  a detached process with a 5 s deadline and no redirects, so hooks never wait on Synapse and the token
+  never leaves the configured host. While Fleet is on, bootstrap installs the status line and wraps an
+  existing `statusLine` rather than replacing it (its output, exit code and stderr pass through); with
+  Fleet off it installs nothing and puts a wrapped status line back. `synapse setup`
+  now keeps a `[fleet]` table when it rewrites `synapse.toml`.
 - **Checks that can fail** (`AGENTS.md`) (#131): a new subsection under Engineering discipline with
   nine verification rules: prove a check by breaking what it checks; sort a noisy check's
   findings before loosening it; loose matchers conceal; absent input fails loudly; name
