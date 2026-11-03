@@ -1,5 +1,5 @@
 {
-  "_comment_autocompact": "CLAUDE_CODE_AUTO_COMPACT_WINDOW = the model's FULL context window in tokens (1000000 for Fable 5 [1m] / Opus 4.8 at 1M). Auto-compaction fires at CLAUDE_AUTOCOMPACT_PCT_OVERRIDE percent of THIS window, while the status meter reads against the model's full window — so the window must equal the real context size for '92' to mean 92% of the meter. If it is smaller than the real window, compaction fires earlier than the percentage implies (e.g. 92% of a 900K window = ~83% of a 1M meter). A 200K-context install should set this to 200000. Ignored by the merge (only .hooks/.autoCompactEnabled/.env are applied); documentation only.",
+  "_comment_autocompact": "CLAUDE_CODE_AUTO_COMPACT_WINDOW = the model's FULL context window in tokens (1000000 for Fable 5 [1m] / Opus 4.8 at 1M). Auto-compaction fires at CLAUDE_AUTOCOMPACT_PCT_OVERRIDE percent of THIS window, while the status meter reads against the model's full window \u2014 so the window must equal the real context size for '92' to mean 92% of the meter. If it is smaller than the real window, compaction fires earlier than the percentage implies (e.g. 92% of a 900K window = ~83% of a 1M meter). A 200K-context install should set this to 200000. Ignored by the merge (only .hooks/.autoCompactEnabled/.env are applied); documentation only.",
   "autoCompactEnabled": true,
   "env": {
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "92",
@@ -17,6 +17,11 @@
           {
             "type": "command",
             "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/hooks/synapse_session_start.py"
+          },
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/report.py",
+            "async": true
           }
         ]
       }
@@ -28,6 +33,11 @@
           {
             "type": "command",
             "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/hooks/session_end.py"
+          },
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/report.py",
+            "async": true
           }
         ]
       }
@@ -43,6 +53,11 @@
           {
             "type": "command",
             "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/hooks/synapse_user_prompt_submit.py"
+          },
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/report.py",
+            "async": true
           }
         ]
       }
@@ -54,6 +69,11 @@
           {
             "type": "command",
             "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/hooks/pre_compact.py"
+          },
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/report.py",
+            "async": true
           }
         ]
       }
@@ -65,9 +85,104 @@
           {
             "type": "command",
             "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/hooks/post_tool_handoff.py"
+          },
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/report.py",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/report.py",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/report.py",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/report.py",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/report.py",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/report.py",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt|idle_prompt|elicitation_dialog",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/report.py",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/report.py",
+            "async": true
           }
         ]
       }
     ]
+  },
+  "_comment_fleet": "Fleet Phase 0 (synapse#31): fleet/report.py rides every event above as an async command hook and posts nothing unless [fleet] enabled = true in config/synapse.toml. statusLine is fleet/statusline.py; if settings.json already has a statusLine, the merge WRAPS it (passes its command base64-encoded via --wrap-b64, its output shown unchanged) and never replaces it.",
+  "statusLine": {
+    "type": "command",
+    "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/statusline.py",
+    "padding": 0
   }
 }

@@ -105,6 +105,37 @@ else
   bad "merge onto '{}' exited non-zero: $(cat "$TMP/err3")"
 fi
 
+echo "== statusLine: install, wrap an existing one, stay idempotent (synapse#31) =="
+SL="$ORCH/.venv/bin/python $ORCH/fleet/statusline.py"
+jq --arg sl "$SL" '. + {statusLine: {type: "command", command: $sl, padding: 0}}' "$TMP/fragment.json" > "$TMP/frag_sl.json"
+merge_sl() { jq --arg orch "$ORCH" --slurpfile frag "$TMP/frag_sl.json" -f "$FILTER" "$1"; }
+USER_SL='bash -c "echo \"$(whoami) | x\"" ~/.claude/my statusline.sh'
+jq -n --arg c "$USER_SL" '{statusLine: {type: "command", command: $c, padding: 2, refreshInterval: 5}}' > "$TMP/sl_user.json"
+if merge_sl "$TMP/empty.json" > "$TMP/sl1.json" 2> "$TMP/esl1"; then
+  assert "no existing statusLine: ours installed as-is" "$(jq -r '.statusLine.command' "$TMP/sl1.json")" "$SL"
+else bad "statusLine merge onto {} failed: $(cat "$TMP/esl1")"; fi
+if merge_sl "$TMP/sl_user.json" > "$TMP/sl2.json" 2> "$TMP/esl2"; then
+  B64=$(jq -r '.statusLine.command' "$TMP/sl2.json" | sed -n 's/.*--wrap-b64 \([A-Za-z0-9+/=]*\).*/\1/p')
+  assert "existing statusLine wrapped, not replaced (decodes back exactly)" \
+    "$(printf '%s' "$B64" | base64 -d 2>/dev/null || printf '%s' "$B64" | base64 -D)" "$USER_SL"
+  assert "wrapped command starts with ours" "$(jq -r '.statusLine.command' "$TMP/sl2.json" | cut -c1-${#SL})" "$SL"
+  assert "user's padding kept" "$(jq -r '.statusLine.padding' "$TMP/sl2.json")" "2"
+  assert "user's refreshInterval kept" "$(jq -r '.statusLine.refreshInterval' "$TMP/sl2.json")" "5"
+else bad "statusLine wrap merge failed: $(cat "$TMP/esl2")"; fi
+if merge_sl "$TMP/sl2.json" > "$TMP/sl3.json" 2> "$TMP/esl3"; then
+  assert "re-run keeps the same wrapped command (idempotent, no double wrap)" \
+    "$(jq -r '.statusLine.command' "$TMP/sl3.json")" "$(jq -r '.statusLine.command' "$TMP/sl2.json")"
+  assert "re-run: exactly one --wrap-b64" "$(jq -r '.statusLine.command' "$TMP/sl3.json" | grep -o -- '--wrap-b64' | wc -l | tr -d ' ')" "1"
+else bad "statusLine re-run merge failed: $(cat "$TMP/esl3")"; fi
+if merge_sl "$TMP/sl1.json" > "$TMP/sl4.json" 2> "$TMP/esl4"; then
+  assert "re-run over our own bare statusLine: unchanged, no wrap of ourselves" \
+    "$(jq -r '.statusLine.command' "$TMP/sl4.json")" "$SL"
+else bad "statusLine re-run over ours failed: $(cat "$TMP/esl4")"; fi
+if merge "$TMP/sl_user.json" > "$TMP/sl5.json" 2> "$TMP/esl5"; then
+  assert "a fragment without statusLine leaves the user's untouched" \
+    "$(jq -r '.statusLine.command' "$TMP/sl5.json")" "$USER_SL"
+else bad "merge without fragment statusLine failed: $(cat "$TMP/esl5")"; fi
+
 echo
 echo "passed: $pass   failed: $fail"
 [[ "$fail" -eq 0 ]]
