@@ -640,3 +640,22 @@ def test_a_failed_state_write_keeps_the_old_state(tmp_path, monkeypatch):
 def test_an_unbroken_token_cut_by_the_limit_is_dropped_whole():
     text, cut = preview("A" * 40000, 1000)
     assert cut and "A" not in text
+
+
+def test_an_owed_reply_is_skipped_once_only(tmp_path, synapse):
+    """A final reply sent from the hook skips its transcript line once; the same words written
+    again later are a new reply and are sent."""
+    env = act_env(tmp_path, synapse.url)
+    main = tmp_path / "proj" / f"{SID}.jsonl"
+    sub = main.parent / SID / "subagents" / "agent-sa1.jsonl"
+    transcript(sub, [])
+    hook(env, base("SubagentStop", agent_id="sa1", agent_type="Explore", transcript_path=str(main),
+                   last_assistant_message="Done."))
+    transcript(sub, [assistant("s1", "Done.")])  # the owed line: skipped
+    tool = base("PostToolUse", agent_id="sa1", tool_name="Read", tool_use_id="r9", tool_input={}, tool_response="",
+                transcript_path=str(main))
+    hook(env, tool)
+    transcript(sub, [assistant("s2", "Done.")])  # said again later: sent
+    hook(env, dict(tool, tool_use_id="r10"))
+    msgs = [e["payload"] for e in synapse.wait(5) if e["type"] == "message"]
+    assert [(m["message_id"].split(".")[0], m["text"]) for m in msgs] == [("last", "Done."), ("s2", "Done.")]
