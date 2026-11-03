@@ -105,6 +105,17 @@ def test_disabled_sends_nothing(tmp_path, synapse):
     assert synapse.requests == []
 
 
+@pytest.mark.parametrize("fleet_table", ["[fleet]\nenabled = false\n", '[fleet]\nenabled = "true"\n', "[fleet]\nmachine = \"x\"\n"])
+def test_fleet_table_without_enabled_true_sends_nothing(tmp_path, synapse, fleet_table):
+    env = make_env(tmp_path, synapse.url, enabled=False)
+    toml = Path(env["MS4CC_SYNAPSE_TOML"])
+    toml.write_text(toml.read_text() + fleet_table)
+    assert hook(env, base("SessionStart", source="startup")).returncode == 0
+    assert hook(env, STATUS_IN, STATUSLINE).returncode == 0
+    time.sleep(0.3)
+    assert synapse.requests == []
+
+
 def test_enabled_but_no_token_sends_nothing(tmp_path, synapse):
     env = make_env(tmp_path, synapse.url)
     (Path(env["MS4CC_SYNAPSE_HOME"]) / "plumb.token").unlink()
