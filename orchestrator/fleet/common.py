@@ -364,6 +364,21 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 _OPENER = urllib.request.build_opener(_NoRedirect)
+# To this machine, never through a proxy: an http_proxy env var or a macOS system proxy
+# without a localhost exception would otherwise carry plain-http activity off the box.
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+
+
+def _loopback(base_url: str) -> bool:
+    try:
+        return (urllib.parse.urlsplit(base_url).hostname or "") in ("localhost", "127.0.0.1", "::1")
+    except ValueError:
+        return False
+
+
+def body_bytes(obj: object) -> bytes:
+    """The wire form: UTF-8 JSON, non-ASCII unescaped (a CJK char is 3 bytes, not 6)."""
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "replace")
 
 
 RETRY_AFTER_MAX_S = 2.0
@@ -374,7 +389,8 @@ def _post_once(cfg: FleetConfig, body: bytes) -> tuple[int | None, float | None]
         cfg.base_url + "/v1/fleet/events", data=body, method="POST",
         headers={"Authorization": f"Bearer {cfg.token}", "Content-Type": "application/json"})
     try:
-        with _OPENER.open(req, timeout=HTTP_TIMEOUT_S) as r:
+        opener = _LOCAL_OPENER if _loopback(cfg.base_url) else _OPENER
+        with opener.open(req, timeout=HTTP_TIMEOUT_S) as r:
             return r.status, None
     except urllib.error.HTTPError as e:
         try:
@@ -392,7 +408,7 @@ def post(cfg: FleetConfig, events: list[dict]) -> int | None:
     """POST /v1/fleet/events. Returns the HTTP status, or None on any failure (dropped).
 
     A 429 is retried once, after its Retry-After (at most 2 s), then dropped (synapse#31)."""
-    body = json.dumps({"events": events}, separators=(",", ":")).encode()
+    body = body_bytes({"events": events})
     status, wait = _post_once(cfg, body)
     if status == 429:
         time.sleep(min(max(wait or 0.0, 0.0), RETRY_AFTER_MAX_S))
@@ -453,7 +469,7 @@ def batches(events: list[dict]) -> list[list[dict]]:
     out: list[list[dict]] = [[]]
     size = 0
     for ev in events:
-        n = len(json.dumps(ev, separators=(",", ":")).encode()) + 1
+        n = len(body_bytes(ev)) + 1
         if out[-1] and (size + n > BATCH_MAX_BYTES or len(out[-1]) >= 100):
             out.append([])
             size = 0
@@ -466,13 +482,20 @@ def emit(cfg: FleetConfig, events: list[dict]) -> None:
     detach(lambda: send_now(cfg, events))
 
 
-def emit_later(cfg: FleetConfig, make_events) -> None:
-    """Build the events in the detached grandchild (a transcript tail can read megabytes), then
-    send them in batches that fit the server's limits, inside the same deadline."""
+def emit_later(cfg: FleetConfig, events: list[dict], make_more) -> None:
+    """Send `events`, then build more in the detached grandchild (a transcript tail can read
+    megabytes) and send those, in batches that fit the server's limits, inside one deadline.
+    The events go first, so a tail that fails or runs out of time can't take them with it."""
     def run() -> None:
         if os.environ.get("MS4CC_FLEET_INLINE") != "1":
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
             signal.alarm(SEND_DEADLINE_S * 2)
-        for batch in batches(make_events()):
+        for batch in batches(events):
+            post(cfg, batch)
+        try:
+            more = make_more()
+        except Exception:
+            return
+        for batch in batches(more):
             post(cfg, batch)
     detach(run)

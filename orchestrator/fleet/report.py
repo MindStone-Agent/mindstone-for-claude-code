@@ -1,4 +1,4 @@
-"""Fleet Phase 0 reporter: one Claude Code hook event in, at most one fleet event out (synapse#31).
+"""Fleet reporter: one Claude Code hook event in, fleet events out (synapse#31).
 
 Run as a `command` hook for every event the fragment registers:
 
@@ -8,11 +8,12 @@ It reads the hook's JSON from stdin, maps it to a fleet event, and posts that ev
 Synapse from a detached grandchild, so the hook itself returns at once. It never prints:
 SessionStart and UserPromptSubmit stdout is injected into the model's context.
 
-Privacy (synapse#31 section 2): each payload is built field by field from the allow-list
-below. Nothing is copied from the hook input wholesale, so a prompt, a tool input or a
-tool output cannot leave the machine through this file, whatever Claude Code adds to the
-hook JSON later. Two strings are free text: the last component of the cwd (at most 64
-chars) and a task subject, scrubbed and cut to 120 chars.
+Privacy (synapse#31 section 2): each status payload is built field by field from the
+allow-list below; nothing is copied from the hook input wholesale. Two strings are free text:
+the last component of the cwd (at most 64 chars) and a task subject, scrubbed and cut to 120
+chars. With `[fleet] activity = true` (and https, or http to this machine), fleet/activity.py
+adds redacted previews of tool inputs and outputs and the agent's replies, each built per tool
+from its own allow-list; its docstring says what is never sent.
 
 Off unless `[fleet] enabled = true` in orchestrator/config/synapse.toml.
 """
@@ -121,6 +122,12 @@ def _activity(cfg, inp: dict, session: str, mapped) -> list[dict] | None:
             a.remember_agent_call(session, inp)
         return [_event(cfg, "tool.started", session, payload, agent_id)]
     if ev in ("PostToolUse", "PostToolUseFailure"):
+        if inp.get("tool_name") in a.AGENT_TOOLS:
+            resp = inp.get("tool_response")
+            # A background agent's PostToolUse comes at launch, maybe before its SubagentStart:
+            # keep that call for pairing. A finished or failed call can't start one any more.
+            if not (isinstance(resp, dict) and resp.get("status") == "async_launched"):
+                a.forget_agent_call(session, inp.get("tool_use_id"))
         payload = a.tool_finished(inp, ok=ev == "PostToolUse")
         return [_event(cfg, "tool.finished", session, payload, agent_id)] if payload else []
     if ev == "SubagentStart" and mapped is not None:
@@ -138,10 +145,11 @@ def _tail(inp: dict, session: str) -> tuple[Path, str | None, bool] | None:
     ev = inp.get("hook_event_name")
     tp = inp.get("transcript_path")
     agent_id = _s(inp.get("agent_id"), 128)
-    if ev in ("PostToolUse", "PostToolUseFailure", "Stop", "SubagentStop") and agent_id:
+    # PreToolUse too, so "Let me run X" shows before X, not after it finishes.
+    if ev in ("PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "SubagentStop") and agent_id:
         path = a.subagent_transcript(tp, session, agent_id)
         return (path, agent_id, False) if path else None
-    if ev in ("PostToolUse", "PostToolUseFailure", "Stop") and isinstance(tp, str) and tp:
+    if ev in ("PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop") and isinstance(tp, str) and tp:
         return Path(tp), None, True
     return None
 
@@ -188,11 +196,17 @@ def main() -> int:
         return 0
     path, tail_agent, at_end = tail
 
-    def make() -> list[dict]:
+    def more() -> list[dict]:
         last = inp.get("last_assistant_message") if inp.get("hook_event_name") in ("Stop", "SubagentStop") else None
-        msgs = a.tail_messages(session, path, tail_agent, start_at_end=at_end, last_message=last)
-        return events + [_event(cfg, "message", session, m, tail_agent) for m in msgs]
-    emit_later(cfg, make)
+        out = []
+        for m in a.tail_messages(session, path, tail_agent, start_at_end=at_end, last_message=last):
+            ts = m.pop("ts", None)
+            ev = _event(cfg, "message", session, m, tail_agent)
+            if ts:
+                ev["ts"] = ts  # when it was said; the server clamps it to +-5 min
+            out.append(ev)
+        return out
+    emit_later(cfg, events or [], more)
     return 0
 
 

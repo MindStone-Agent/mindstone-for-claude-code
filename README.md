@@ -234,14 +234,17 @@ Then re-run `./orchestrator/bootstrap.sh`, which installs the Fleet status line 
 #### Activity layer (opt-in, `[fleet] activity = true`)
 
 Adds what each agent is doing to the board (synapse#31, scope change of 2026-11-03):
-- **Tool calls**, each as `tool.started` and `tool.finished` (not sampled): a redacted input preview (Bash: the command; Read, Edit, Write: the path and a line count, never file contents; Glob, Grep: the pattern; WebFetch: the URL; Agent: the subagent type and description, never its prompt; other tools: their input as JSON), and a redacted output preview (head and tail, up to 16 KB) or the error.
-- **The agent's own replies**: text blocks of `assistant` lines, tailed from the transcript from the session's start (no history), and a subagent's from its own transcript. Your prompts are never read or sent; neither are thinking blocks.
+- **Tool calls**, each as `tool.started` and `tool.finished` (not sampled). Inputs and outputs are both built per tool from an allow-list, then redacted:
+  - input: Bash, the command; Read, the path; Edit and Write, the path and a line count; Glob and Grep, the pattern; WebFetch, the URL; Agent, the subagent type and description; SendMessage, the recipient; any other tool, its input as JSON;
+  - output (head and tail, at most 16 KB as sent): Bash, stdout and stderr; Glob and Grep, the matches; WebFetch, the result; Agent, the subagent's answer; Read, a line count; Edit and Write, "updated" and the path; AskUserQuestion, "answered"; any other tool, its output as JSON; or the error.
+  - **Never sent:** file contents (what Read returns, what Write and Edit write), instruction text to another agent (the Agent prompt, a SendMessage message, any `prompt` or `message` argument, removed at any depth from other tools' JSON), and your answers to AskUserQuestion.
+- **The agent's own replies**: text blocks of `assistant` lines, tailed from the transcript from the session's start (no history), and a subagent's from its own transcript, before each tool call as well as after it, each stamped with the time it was written. Your prompts are never read or sent; neither are thinking blocks.
 - **The subagent tree**: `subagent.started` names the Agent call that launched it and its description.
-- **Redaction** runs on the machine before anything is cut: the framework scrubber, plus `Authorization:` headers of any scheme and `.env`-style `NAME=value` for secret-named variables. The server runs it again.
-- **Transport:** activity is sent only over https, or to a localhost `base_url`. Over plain http to another host it stays off, and the status layer carries on.
+- **Redaction** runs on the machine before anything is cut: the framework scrubber, then credential headers of any scheme (Authorization, Cookie, API-key headers), secret-named `NAME=value` and `name: value` pairs, passwords given as command arguments (`curl -u`, `sshpass -p`, `docker login -p`, `redis-cli -a`, `mysql -p`, `htpasswd -b`, `openssl pass:`, `aws configure set`), `.netrc` lines, Stripe keys, Slack webhooks and base64-encoded private keys. These are heuristics: a secret in a shape they don't know gets through. The server runs the scrubber again.
+- **Transport:** activity is sent only over https, or to a localhost `base_url` (never through a proxy). Over plain http to another host it stays off and the status layer carries on; `synapse status` says so.
 - The transcript tail and the sends run in the detached sender, never in the hook.
 
- ([Synapse#7](https://github.com/R1ngZer0/synapse/issues/7))
+### Sync `await` primitive ([Synapse#7](https://github.com/R1ngZer0/synapse/issues/7))
 
 For agent-orchestration patterns where one agent needs another's reply before continuing (debate, peer review, dispatcher-with-specialist), use `synapse await` to block until a matching message arrives:
 
