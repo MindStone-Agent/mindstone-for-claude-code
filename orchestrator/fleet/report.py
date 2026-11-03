@@ -134,7 +134,8 @@ def _activity(cfg, inp: dict, session: str, mapped) -> list[dict] | None:
         return [_event(cfg, "tool.finished", session, payload, agent_id)] if payload else []
     if ev == "SubagentStart" and mapped is not None:
         kind, payload, _ = mapped
-        parent, description = a.pair_subagent(session, payload.get("agent_type"))
+        parent, description = a.pair_subagent(session, payload.get("agent_type"),
+                                              a.recent_errored(inp.get("transcript_path")))
         text, _ = a.preview(description, a.DESCRIPTION_MAX)
         payload = dict(payload, parent_tool_use_id=parent, description=text)
         return [_event(cfg, kind, session, payload, agent_id)]

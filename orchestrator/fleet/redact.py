@@ -126,6 +126,14 @@ def clean(text: str) -> str:
     if not (ORCHESTRATOR_DIR / "hooks" / "scrubber.py").is_file():
         raise ImportError("hooks/scrubber.py is missing")
     from fleet import fleet_redact_vendor as server
+    # Line-anchored rules end in $, which doesn't match before \r (activity review round 3).
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # The whole-text rules first, before the chunked scrub: a value the chunk scrubber cuts in
+    # two (DB_PASSWORD=correct | .horse.battery.staple) has its head redacted in one chunk, and
+    # every later rule skips what follows a [REDACTED marker (activity review round 3).
+    for pattern, repl in server.EXTRA:
+        text = pattern.sub(repl, text)
+    text = redact(text)
     return redact(server.redact_preview(text))
 
 

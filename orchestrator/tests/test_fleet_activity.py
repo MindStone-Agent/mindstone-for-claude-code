@@ -731,8 +731,8 @@ def test_an_owed_reply_is_skipped_once_only(tmp_path, synapse):
 
 # --- shared fixtures with the server (synapse tests/fixtures/fleet_secrets.json) ---------------
 # Stored base64-encoded so the repo's privacy scan doesn't flag the fake secrets; byte-identical
-# to synapse's copy at 929660c (sha256 below). Refresh both together.
-FLEET_SECRETS_SHA256 = "1aa3199d4d59e1a89ced85622a74f8c1a38858af8aa6b42a1df0116a8e47f0c5"
+# to synapse's copy at 3ea87e6 (sha256 below). Refresh both together.
+FLEET_SECRETS_SHA256 = "81757dd2266f9a75ddd89154e55bc346f3e9faf2b104677855e08aeae6e990e6"
 
 
 def _shared_fixtures() -> dict:
@@ -763,7 +763,7 @@ def test_scrubbing_many_distinct_secrets_stays_bounded():
     assert "xyzSECRET" not in text
 
 
-SERVER_REDACT_SHA256 = "5d12cd489d7de990ab8e8291ba1bf4415fa8e8592982424cb82f659cc5bb31de"  # synapse 929660c
+SERVER_REDACT_SHA256 = "3443b34e733b4ab33c136453c7f2c158680839c3c0f6f15b8fbea3c80e8536ce"  # synapse 3ea87e6
 
 
 def test_the_vendored_server_redaction_is_verbatim():
@@ -822,3 +822,76 @@ def test_credential_headers_as_dict_keys_are_redacted(raw, secret):
     forms of the same headers went out whole."""
     assert secret not in clean(raw)
     assert secret not in (preview(A.output_text("mcp__http__get", json.loads(raw) if raw.startswith("{\"") else raw), A.OUTPUT_MAX)[0] or "")
+
+
+# --- activity review round 3 ------------------------------------------------------------------
+
+@pytest.mark.parametrize("password", ["correct.horse.battery.staple", "s3cr3t!P@ssw0rd!2024", "Xk2$mQ9#vLpq7Rz8wT"])
+@pytest.mark.parametrize("key", ["DB_PASSWORD", "password"])
+def test_a_punctuated_password_across_the_chunk_cut_leaves_no_fragment(password, key):
+    """Round 3, finding 1: the chunk scrubber redacted the head of the value in one chunk; the
+    rest, starting with punctuation, sat after the marker in the next chunk, where every rule
+    skips text that follows [REDACTED. Docker-env shaped output, every cut alignment."""
+    entries = "".join(f',"LOG_{i}=info"' for i in range(80))
+    for pad in range(900, 1060):
+        raw = '["PATH=/usr/bin","NOTE=' + "x" * pad + f'","{key}={password}"' + entries + "]"
+        text, _ = preview(A.output_text("Bash", {"stdout": raw, "stderr": ""}), A.OUTPUT_MAX)
+        for i in range(len(password) - 3):
+            assert password[i:i + 4] not in text, (pad, password[i:i + 4])
+
+
+@pytest.mark.parametrize("case", _shared_fixtures()["secret"], ids=lambda c: c["name"])
+def test_a_secret_in_crlf_text_never_survives(case):
+    """Round 3, finding 2: the line-anchored rules end in $, which doesn't match before \\r, so
+    10 fixtures leaked once Windows line endings were used."""
+    out, _ = preview(case["input"].replace("\n", "\r\n") + "\r\n", A.OUTPUT_MAX)
+    assert case["leak"] not in out
+
+
+
+def _blocked(tool_use_id: str) -> dict:
+    return {"type": "user", "uuid": "u-" + tool_use_id, "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": tool_use_id, "is_error": True, "content": "PreToolUse:Agent hook error"}]}}
+
+
+def test_the_retry_after_a_blocked_agent_call_keeps_its_parent(tmp_path, synapse):
+    """Round 3, finding 4: A is blocked, the model retries at once as B, and B's subagent
+    starts before any tail has forgotten A. A's error result is already in the transcript."""
+    env = act_env(tmp_path, synapse.url)
+    tp = transcript(tmp_path / "proj" / f"{SID}.jsonl", [])
+    hook(env, base("SessionStart", source="startup", transcript_path=str(tp)))
+    hook(env, base("PreToolUse", tool_name="Agent", tool_use_id="toolu_A", transcript_path=str(tp),
+                   tool_input={"subagent_type": "Explore", "description": "first try"}))
+    transcript(tp, [_blocked("toolu_A")])
+    hook(env, base("PreToolUse", tool_name="Agent", tool_use_id="toolu_B", transcript_path=str(tp),
+                   tool_input={"subagent_type": "Explore", "description": "second try"}))
+    hook(env, base("SubagentStart", agent_id="agent_b", agent_type="Explore", transcript_path=str(tp)))
+    (start,) = [e for e in synapse.wait(6) if e["type"] == "subagent.started"]
+    assert (start["payload"].get("parent_tool_use_id"), start["payload"].get("description")) == ("toolu_B", "second try")
+
+
+def test_a_failure_that_lands_before_its_start_is_not_closed_twice(tmp_path, synapse):
+    """Round 3, finding 3: the hooks are async, so PostToolUseFailure can run before the
+    PreToolUse that opens the call; the later tail then closed it again with a made-up label."""
+    env = act_env(tmp_path, synapse.url)
+    tp = transcript(tmp_path / "proj" / f"{SID}.jsonl", [])
+    hook(env, base("SessionStart", source="startup", transcript_path=str(tp)))
+    hook(env, base("PostToolUseFailure", tool_name="mcp__x__y", tool_use_id="toolu_D", tool_input={},
+                   error="MCP error -32000: boom", transcript_path=str(tp)))
+    hook(env, base("PreToolUse", tool_name="mcp__x__y", tool_use_id="toolu_D", tool_input={}, transcript_path=str(tp)))
+    transcript(tp, [_blocked("toolu_D")])
+    hook(env, base("Stop", transcript_path=str(tp)))
+    done = [e["payload"] for e in synapse.wait(5) if e["type"] == "tool.finished"]
+    assert [d["error"] for d in done] == ["MCP error -32000: boom"]
+
+
+def test_only_a_user_lines_error_result_closes_a_call(tmp_path, synapse):
+    """api-request-blob lines also carry "is_error":true; only the user line's result counts."""
+    env = act_env(tmp_path, synapse.url)
+    tp = transcript(tmp_path / "proj" / f"{SID}.jsonl", [])
+    hook(env, base("SessionStart", source="startup", transcript_path=str(tp)))
+    hook(env, base("PreToolUse", tool_name="Bash", tool_use_id="toolu_Q", tool_input={"command": "x"}, transcript_path=str(tp)))
+    blob = dict(_blocked("toolu_Q"), type="api-request-blob")
+    transcript(tp, [blob])
+    hook(env, base("Stop", transcript_path=str(tp)))
+    assert [e for e in synapse.wait(3) if e["type"] == "tool.finished"] == []

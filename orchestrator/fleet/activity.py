@@ -295,13 +295,41 @@ def remember_agent_call(session: str, inp: dict) -> None:
         os.close(fd)
 
 
-def pair_subagent(session: str, agent_type: str | None) -> tuple[str | None, str | None]:
-    """(parent_tool_use_id, raw description) for a starting subagent, or (None, None)."""
+def recent_errored(transcript_path: object, window: int = 256 * 1024) -> set[str]:
+    """tool_use_ids with an error tool_result in the last `window` bytes of a transcript. A
+    blocked or denied Agent call's result is written before the model can retry it, so by the
+    time the retry's subagent starts, the failed call is known (activity review round 3)."""
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return set()
+    try:
+        with open(transcript_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - window))
+            chunk = f.read(window)
+    except OSError:
+        return set()
+    out: set[str] = set()
+    for line in chunk.splitlines():
+        if b'"is_error":true' not in line.replace(b" ", b""):
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("type") == "user":
+            out.update(_errored_ids(d))
+    return out
+
+
+def pair_subagent(session: str, agent_type: str | None, failed: set[str] | frozenset = frozenset()
+                  ) -> tuple[str | None, str | None]:
+    """(parent_tool_use_id, raw description) for a starting subagent, or (None, None). Calls
+    in `failed` (an error tool_result, see recent_errored) are dropped first."""
     fd, calls = _locked_json(session, "agentcalls")
     if fd is None:
         return None, None
     try:
-        calls = _live(calls)
+        calls = [x for x in _live(calls) if x.get("id") not in failed]
         same = [i for i, call in enumerate(calls) if call.get("type") == (agent_type or DEFAULT_AGENT_TYPE)]
         found = (None, None)
         # Only an unambiguous match is paired. Claude Code fires no PostToolUse for a denied or
@@ -340,28 +368,41 @@ def forget_agent_call(session: str, tool_use_id: object) -> None:
 # for ever (activity review round 2, S2-3). Open calls are kept here; the transcript tail closes
 # any whose tool_result is an error while it is still open.
 
+def _open_state(state: object) -> tuple[list[dict], list[str]]:
+    state = state if isinstance(state, dict) else {}
+    calls = [x for x in state.get("open") or [] if isinstance(x, dict)]
+    closed = [x for x in state.get("closed") or [] if isinstance(x, str)]
+    return calls, closed
+
+
 def open_call(session: str, tool_use_id: str, name: str) -> None:
-    fd, calls = _locked_json(session, "open")
+    """A call has started. The hooks are async, so its PostToolUse(Failure) may already have
+    run: a closed id is never opened again (activity review round 3)."""
+    fd, state = _locked_json(session, "open")
     if fd is None:
         return
     try:
-        calls = [x for x in (calls if isinstance(calls, list) else []) if isinstance(x, dict)][-199:]
-        calls.append({"id": tool_use_id, "name": name})
-        _write_locked(fd, calls)
+        calls, closed = _open_state(state)
+        if tool_use_id not in closed:
+            calls = (calls + [{"id": tool_use_id, "name": name}])[-200:]
+            _write_locked(fd, {"open": calls, "closed": closed})
     finally:
         os.close(fd)
 
 
 def close_call(session: str, tool_use_id: object) -> str | None:
-    """Mark a call finished. Its tool name if it was open, else None."""
-    fd, calls = _locked_json(session, "open")
+    """Mark a call finished, and remember it as closed. Its tool name if it was open."""
+    if not isinstance(tool_use_id, str):
+        return None
+    fd, state = _locked_json(session, "open")
     if fd is None:
         return None
     try:
-        calls = [x for x in (calls if isinstance(calls, list) else []) if isinstance(x, dict)]
+        calls, closed = _open_state(state)
         hit = next((x for x in calls if x.get("id") == tool_use_id), None)
-        if hit is not None:
-            _write_locked(fd, [x for x in calls if x is not hit])
+        calls = [x for x in calls if x is not hit]
+        closed = [x for x in closed if x != tool_use_id][-199:] + [tool_use_id]
+        _write_locked(fd, {"open": calls, "closed": closed})
         return hit.get("name") if hit else None
     finally:
         os.close(fd)

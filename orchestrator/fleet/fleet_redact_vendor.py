@@ -139,8 +139,11 @@ _PROPAGATE_MAX = 64
 
 _PEM_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----")
 _PEM_END = re.compile(r"-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----")
-# Key material as it appears raw or JSON-escaped (a service-account file).
-_PEM_BODY = re.compile(r"(?:[A-Za-z0-9+/=\s]|\\[nrt]){0,16384}")
+# Key material after a BEGIN line with no END: base64 runs of 20+, each
+# after up to 20 separators (newlines raw or JSON-escaped, spaces, a line
+# number from `cat -n` or a Read tool's "N→"). Modelled on the scrubber's own
+# truncated-key rule, so prose after the key ("Now I will run...") is kept.
+_PEM_BODY = re.compile(r"(?:(?:\\[nrt]|\s|\d{1,9}(?:\t|\\t|\u2192)){0,20}[A-Za-z0-9+/=]{20,4096}){0,400}")
 
 
 def _pem_blocks(text: str) -> str:
@@ -162,7 +165,13 @@ def _pem_blocks(text: str) -> str:
             stop = e.end()
         else:
             body = _PEM_BODY.match(text, m.end())
-            stop = body.end() if body else m.end()
+            if body is None or body.end() == m.end():
+                # No key material we recognise: leave the BEGIN line for the
+                # scrubber's own truncated-key rule, which needs it.
+                out.append(text[i:m.end()])
+                i = m.end()
+                continue
+            stop = body.end()
         out.append(text[i:m.start()])
         out.append("[REDACTED-PRIVATE-KEY]")
         i = stop
@@ -181,6 +190,11 @@ def _chunks(text: str) -> list[str]:
         j = text.rfind("\n", lo, hi)
         if j < 0:
             j = max(text.rfind(" ", lo, hi), text.rfind("\t", lo, hi))
+        if j < 0:
+            # No whitespace (minified JSON): after a quote, bracket or
+            # backtick, which can't be inside a key=value value, so the cut
+            # doesn't split one (round 4).
+            j = max(text.rfind(c, lo, hi) for c in "\"'<>`\\")
         end = j + 1 if j >= 0 else hi
         out.append(text[i:end])
         i = end
@@ -208,6 +222,24 @@ def _propagate(text: str, found: set[str]) -> str:
     return text
 
 
+_BOUNDARY = " \t\n\"'<>`,;()[]{}"
+
+
+def _snap(text: str, lo: int, hi: int) -> tuple[int, int]:
+    """Move a window's edges out to the nearest boundary (up to 64 characters),
+    so it doesn't start or end mid-token: a token cut by the window's edge
+    looks like a standalone one to the scrubber (round 4)."""
+    for k in range(lo, max(0, lo - 64) - 1, -1):
+        if k == 0 or text[k - 1] in _BOUNDARY:
+            lo = k
+            break
+    for k in range(hi, min(len(text), hi + 64) + 1):
+        if k == len(text) or text[k] in _BOUNDARY:
+            hi = k
+            break
+    return lo, hi
+
+
 def _scrub_bounded(text: str) -> str:
     """scrub(), kept linear. Private-key blocks go first, on the whole text.
     Then the scrubber runs per chunk, and again on a window of _SEAM either
@@ -228,7 +260,7 @@ def _scrub_bounded(text: str) -> str:
         cuts.append(pos)
     text = "".join(parts)
     for cut in reversed(cuts[:-1]):
-        lo, hi = max(0, cut - _SEAM), min(len(text), cut + _SEAM)
+        lo, hi = _snap(text, max(0, cut - _SEAM), min(len(text), cut + _SEAM))
         clean, values = scrub_collect(text[lo:hi])
         text = text[:lo] + clean + text[hi:]
         found |= values
@@ -276,6 +308,20 @@ def _secret_doc(doc: str) -> str:
     return "\n".join(lines)
 
 
+_JSON_KIND_SECRET = re.compile(r"\"kind\"[ \t]*:[ \t]*\"Secret\"")
+_JSON_DATA_OBJ = re.compile(r"(\"(?:data|stringData)\"[ \t]*:[ \t]*\{)([^{}]{0,65536})(\})")
+_JSON_DATA_VAL = re.compile(r"(\"[^\"\n]{1,253}\"[ \t]*:[ \t]*\")(?:[^\"\\\n]|\\.){0,65536}(\")")
+
+
+def _json_secret_data(doc: str) -> str:
+    """A Secret as one-line JSON (kubectl -o json | jq -c, an API response):
+    the values inside its "data"/"stringData" object."""
+    if not _JSON_KIND_SECRET.search(doc):
+        return doc
+    return _JSON_DATA_OBJ.sub(
+        lambda m: m.group(1) + _JSON_DATA_VAL.sub(r"\1" + _R + r"\2", m.group(2)) + m.group(3), doc)
+
+
 def _k8s_secret_data(text: str) -> str:
     """Values under a Secret's data: block (`kubectl get secret -o yaml|json`,
     a manifest), per document, so a ConfigMap beside it keeps its values.
@@ -286,7 +332,7 @@ def _k8s_secret_data(text: str) -> str:
     seps = _DOC_SPLIT.findall(text)
     out = []
     for k, doc in enumerate(docs):
-        out.append(_secret_doc(doc) if _KIND_SECRET.search(doc) else doc)
+        out.append(_json_secret_data(_secret_doc(doc) if _KIND_SECRET.search(doc) else doc))
         if k < len(seps):
             out.append(seps[k])
     return "".join(out)
