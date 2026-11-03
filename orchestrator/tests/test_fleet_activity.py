@@ -731,7 +731,7 @@ def test_an_owed_reply_is_skipped_once_only(tmp_path, synapse):
 
 # --- shared fixtures with the server (synapse tests/fixtures/fleet_secrets.json) ---------------
 # Stored base64-encoded so the repo's privacy scan doesn't flag the fake secrets; byte-identical
-# to synapse's copy at 48329bc (sha256 below). Refresh both together.
+# to synapse's copy at cb786ec (sha256 below). Refresh both together.
 FLEET_SECRETS_SHA256 = "fe2288cf418b591eb3de7ac7ddaeafc5f0b90b2b1b1a13a80cb44906866c28de"
 
 
@@ -763,7 +763,7 @@ def test_scrubbing_many_distinct_secrets_stays_bounded():
     assert "xyzSECRET" not in text
 
 
-SERVER_REDACT_SHA256 = "6d69e18ee236a2a1b0fd4ea02d724cf4fde8cf9449cf06b3334bca7effa5f35d"  # synapse 48329bc
+SERVER_REDACT_SHA256 = "97db9901a75107dd6ecbfeaa1ef7e066c484496f42ad2deed14a6f0a8aa64ab1"  # synapse cb786ec
 
 
 def test_the_vendored_server_redaction_is_verbatim():
@@ -903,17 +903,38 @@ def test_only_a_user_lines_error_result_closes_a_call(tmp_path, synapse):
 
 # --- activity review round 4 ------------------------------------------------------------------
 
+def _repeat_value(case):
+    """The secret as a later bare repeat would carry it (echo $TOKEN, a second .env line): the
+    whole token around the fixture's leak, a flag's value without the flag, a multi-word value
+    as the rest of its line. The same helper as synapse's tests/test_fleet_redact.py."""
+    inp, leak = case["input"], case["leak"]
+    if " " in leak:
+        line = next(x for x in inp.split("\n") if leak in x)
+        return line.split(":", 1)[-1].split("=", 1)[-1].strip()
+    delim = " \t\n\"',{}()[]<>\\|;"
+    i = inp.find(leak)
+    s, e = i, i + len(leak)
+    while s > 0 and inp[s - 1] not in delim:
+        s -= 1
+    while e < len(inp) and inp[e] not in delim:
+        e += 1
+    value = inp[s:e]
+    return value[2:] if value.startswith("-p") and len(value) > 8 else value
+
+
 @pytest.mark.parametrize("case", _shared_fixtures()["secret"], ids=lambda c: c["name"])
-def test_a_secret_repeated_bare_later_is_never_kept_where_the_server_removes_it(case):
-    """Round 4, S1-1: redacting a keyed value before the scrubber ran hid it from the scrubber's
-    propagation, so a repeat of it ("auth ok using <it>") went out whole where the server's own
-    pass removes it (6 fixtures). Repeats of values only the extra rules catch are not
-    propagated on either side yet: a follow-up for the shared fixtures, not this check."""
-    from fleet import fleet_redact_vendor as server
-    raw = case["input"] + "\nlater: " + case["leak"] + " done"
-    out, _ = preview(raw, A.OUTPUT_MAX)
-    if case["leak"] not in server.redact_preview(raw):
-        assert case["leak"] not in out
+def test_a_secret_repeated_bare_later_is_redacted_too(case):
+    """Round 4, S1-1, and Hearth's blocker on both suites: a value found in its keyed form must
+    also go where it is repeated bare later (echo $TOKEN, a second .env line). Values under 6
+    characters or plain lowercase words aren't propagated (the scrubber's own rule), so those
+    fixtures are skipped, as on the server."""
+    sys.path.insert(0, str(ORCH / "hooks"))
+    from scrubber import _propagatable
+    value = _repeat_value(case)
+    if len(value) < 6 or not _propagatable(value):
+        pytest.skip(f"not propagated by design: {value!r}")
+    out, _ = preview(case["input"] + "\nlater: " + value, A.OUTPUT_MAX)
+    assert case["leak"] not in out, value
 
 
 @pytest.mark.parametrize("password", ["s3cr3t!P@ssw0rd!2024", "correct.horse.battery.staple", "Xk2$mQ9#vLpq7Rz8wT"])

@@ -22,11 +22,37 @@ from __future__ import annotations
 
 # ruff: noqa: E501  (the patterns read best on one line each)
 import re
+from contextvars import ContextVar
 
 import sys as _sys  # vendored change: the scrubber is hooks/scrubber.py here
 from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "hooks"))
 from scrubber import _propagatable, scrub_collect  # noqa: E402
+
+# What this pass has redacted so far, so redact_preview can remove each value
+# where it repeats bare too (Hearth's blocker, round 5). Per call (the API
+# redacts in a threadpool), so a context variable, not a global.
+_SINK: ContextVar[set[str] | None] = ContextVar("fleet_redact_sink", default=None)
+
+
+def _note(value: str) -> None:
+    sink = _SINK.get()
+    if sink is None:
+        return
+    value = value.strip(" \t\r\n\"'\\,;")
+    if "[REDACTED" in value or "\n" in value:
+        return
+    # The value, and the pieces a repeat is likely to carry on its own: the
+    # credential after a scheme ("Basic dXNl..."), a cookie's value after its
+    # name (sid=...), and each without base64 padding.
+    pieces = {value}
+    for part in re.split(r"[\s;,&]+", value):
+        pieces.add(part)
+        pieces.add(part.split("=", 1)[1] if "=" in part.rstrip("=") else part)
+    for v in pieces:
+        for w in (v, v.rstrip("=")):
+            if len(w) >= 6:
+                sink.add(w)
 
 _R = "[REDACTED-SECRET]"
 
@@ -134,6 +160,7 @@ def _key_tail(text: str) -> str:
         lines[i] = "[REDACTED-PRIVATE-KEY]" + line[m.end():]
         j = i - 1
         while j >= 0 and i - j <= 200 and _B64_LINE.fullmatch(lines[j]):
+            _note(lines[j])
             lines[j] = "[REDACTED-PRIVATE-KEY]"
             j -= 1
     return "\n".join(lines)
@@ -148,9 +175,14 @@ _PEM_END = re.compile(r"-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----")
 # Key material after a BEGIN line with no END: base64 runs of 20+, each
 # after up to 256 separators (indentation counts: a key in a YAML block
 # nested 16 deep, round 5) (newlines raw or JSON-escaped, spaces, a line
-# number from `cat -n` or a Read tool's "N→"). Modelled on the scrubber's own
+# number from `cat -n`, `nl`, `awk '{print NR, $0}'` or a Read tool's "N→"). Modelled on the scrubber's own
 # truncated-key rule, so prose after the key ("Now I will run...") is kept.
-_PEM_BODY = re.compile(r"(?:(?:\\[nrt]|\s|\d{1,9}(?:\t|\\t|\u2192)){0,256}[A-Za-z0-9+/=]{20,4096}){0,400}")
+_PEM_SEP = r"(?:\\[nrt]|\s|\d{1,9}(?:[ \t:\-]|\\t|\u2192))"
+_PEM_BODY = re.compile(
+    rf"(?:{_PEM_SEP}{{0,256}}[A-Za-z0-9+/=]{{20,4096}}){{0,400}}"
+    # and a last, shorter line of the key (4+), alone on its line
+    rf"(?:{_PEM_SEP}{{0,256}}[A-Za-z0-9+/=]{{4,19}}(?=[ \t]*(?:\n|\\n|$)))?"
+)
 
 
 def _pem_blocks(text: str) -> str:
@@ -179,6 +211,8 @@ def _pem_blocks(text: str) -> str:
                 i = m.end()
                 continue
             stop = body.end()
+        for run in re.findall(r"[A-Za-z0-9+/=]{20,}", text[m.end():stop]):
+            _note(run)
         out.append(text[i:m.start()])
         out.append("[REDACTED-PRIVATE-KEY]")
         i = stop
@@ -247,7 +281,11 @@ def _snap(text: str, lo: int, hi: int) -> tuple[int, int]:
     return lo, hi
 
 
-def _scrub_bounded(text: str) -> str:
+def _scrub_bounded_noted(text: str) -> str:
+    return _scrub_bounded(text, _SINK.get())
+
+
+def _scrub_bounded(text: str, sink: set[str] | None = None) -> str:
     """scrub(), kept linear. Private-key blocks go first, on the whole text.
     Then the scrubber runs per chunk, and again on a window of _SEAM either
     side of every cut, so a key and its value on either side of one (a
@@ -257,6 +295,8 @@ def _scrub_bounded(text: str) -> str:
     text = _pem_blocks(text)
     if len(text) <= _CHUNK:
         clean, found = scrub_collect(text)
+        if sink is not None:
+            sink |= found
         return _propagate(clean, found)
     parts, found, cuts, pos = [], set(), [], 0
     for piece in _chunks(text):
@@ -271,6 +311,8 @@ def _scrub_bounded(text: str) -> str:
         clean, values = scrub_collect(text[lo:hi])
         text = text[:lo] + clean + text[hi:]
         found |= values
+    if sink is not None:
+        sink |= found
     return _propagate(text, found)
 
 
@@ -303,10 +345,12 @@ def _secret_doc(doc: str) -> str:
                 m = (_JSON_KV if json_block else _YAML_KV).match(line)
                 if m:
                     if not m.group(2).startswith("[REDACTED"):
+                        _note(m.group(2))
                         tail = m.group(3) if json_block else ""
                         lines[i] = m.group(1) + _R + tail
                 elif not stripped.startswith("[REDACTED"):
                     # a block scalar's line, or a value on its own line
+                    _note(stripped)
                     lines[i] = line[:lead] + _R
                 continue
         m = _SECRET_DATA_HDR.match(line)
@@ -344,6 +388,8 @@ def _json_secret_data(doc: str) -> str:
             if not p:
                 break
             out.append(doc[i:p.start(2)])
+            if not p.group(2).startswith("[REDACTED"):
+                _note(p.group(2))
             out.append(p.group(2) if p.group(2).startswith("[REDACTED") else _R)
             out.append(p.group(3))
             i = p.end(3)
@@ -379,6 +425,7 @@ def _long_b64(m: re.Match[str]) -> str:
     if s.count("/") * 20 > len(s):
         return s
     if any(c.isupper() for c in s) and any(c.islower() for c in s) and any(c.isdigit() for c in s):
+        _note(s)
         return "[REDACTED-KEY-MATERIAL]"
     return s
 
@@ -396,8 +443,16 @@ _REMNANT_AFTER = re.compile(r"(\[REDACTED[A-Z\-]{0,40}\])[A-Za-z0-9_\-+/]{8,4096
 def _remnants(text: str) -> str:
     if "[REDACTED" not in text:
         return text
-    text = _REMNANT_BEFORE.sub(_R, text)
-    return _REMNANT_AFTER.sub(r"\1" + _R, text)
+    def before(m: re.Match[str]) -> str:
+        _note(m.group(0))
+        return _R
+
+    def after(m: re.Match[str]) -> str:
+        _note(m.group(0)[len(m.group(1)):])
+        return m.group(1) + _R
+
+    text = _REMNANT_BEFORE.sub(before, text)
+    return _REMNANT_AFTER.sub(after, text)
 
 
 def redact_preview(text: str) -> str:
@@ -406,9 +461,38 @@ def redact_preview(text: str) -> str:
     doesn't match before a \r, so Windows (CRLF) text got past 9 of them
     (Plumb, round 3)."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = _scrub_bounded(text)
-    for pattern, repl in EXTRA:
-        text = pattern.sub(repl, text)
-    text = _B64_RUN.sub(_long_b64, text)
-    text = _k8s_secret_data(text)
-    return _remnants(_key_tail(text))
+    found: set[str] = set()
+    token = _SINK.set(found)
+    try:
+        text = _scrub_bounded_noted(text)
+        for pattern, repl in EXTRA:
+            text = pattern.sub(_capturing(repl), text)
+        text = _B64_RUN.sub(_long_b64, text)
+        text = _k8s_secret_data(text)
+        text = _remnants(_key_tail(text))
+        # Every value redacted above by its context (a key, a header, a
+        # Secret, a key block) is a known secret where it repeats bare too
+        # (echo $TOKEN, a second .env line), the same propagation the
+        # scrubber gives its own finds (Hearth's blocker, round 5).
+        return _remnants(_propagate(text, found))
+    finally:
+        _SINK.reset(token)
+
+
+def _capturing(repl: str):  # type: ignore[no-untyped-def]
+    """An EXTRA replacement that also records what it removed: the part of
+    the match that the replacement doesn't keep (between the common prefix
+    and suffix of the two)."""
+
+    def sub(m: re.Match[str]) -> str:
+        old, new = m.group(0), m.expand(repl)
+        i = 0
+        while i < len(old) and i < len(new) and old[i] == new[i]:
+            i += 1
+        j = 0
+        while j < len(old) - i and j < len(new) - i and old[-1 - j] == new[-1 - j]:
+            j += 1
+        _note(old[i:len(old) - j])
+        return new
+
+    return sub
