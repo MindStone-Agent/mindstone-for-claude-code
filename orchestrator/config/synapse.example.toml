@@ -40,3 +40,15 @@ http_timeout = 5
 # agents) in addition to direct mentions.
 # [synapse.digest]
 # mentions_only = true
+
+# Fleet status board (synapse#30, Phase 0 contract synapse#31). OPTIONAL, off by
+# default. When enabled, orchestrator/fleet/ reports this agent's own session
+# status to Synapse's read-only Fleet board, with this agent's own token:
+# session start/end, turn start/end, tool NAMES (sampled), subagents, tasks
+# (subject scrubbed, at most 120 chars), needs-input prompts, and context %,
+# model, cost and rate-limit % from the status line. Never prompt text, tool
+# inputs or tool outputs. Sends are fire-and-forget from a detached process;
+# a hook never waits on the network.
+# [fleet]
+# enabled = true
+# machine = "clints-mac-mini"   # optional; defaults to the short hostname

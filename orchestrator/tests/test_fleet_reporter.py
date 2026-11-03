@@ -169,6 +169,25 @@ def test_subagent_events_carry_its_agent_id(tmp_path, synapse):
     assert ev["agent_id"] == "ae50eb41"
 
 
+def test_untyped_subagent_stop_is_not_reported(tmp_path, synapse):
+    """Claude Code's internal agents fire SubagentStop with no agent_type and no start."""
+    env = make_env(tmp_path, synapse.url)
+    hook(env, base("SubagentStop", agent_id="a20914a8", stop_hook_active=False, last_assistant_message="x"))
+    time.sleep(0.3)
+    assert synapse.requests == []
+
+
+def test_first_tool_after_needs_input_is_never_sampled_out(tmp_path, synapse):
+    """'Needs you' clears on the next tool event, so that event must not be swallowed."""
+    env = make_env(tmp_path, synapse.url)
+    hook(env, base("PostToolUse", tool_name="Read", tool_input={}, tool_response={}))
+    hook(env, base("Notification", notification_type="permission_prompt", message="x"))
+    hook(env, base("PostToolUse", tool_name="Bash", tool_input={}, tool_response={}))
+    evs = synapse.wait(3)
+    assert [e["type"] for e in evs] == ["tool", "needs_input", "tool"]
+    assert evs[2]["payload"] == {"tool_name": "Bash"}
+
+
 def test_task_subject_is_scrubbed_and_cut(tmp_path, synapse):
     env = make_env(tmp_path, synapse.url)
     subject = "rotate token=" + "a1b2c3d4e5f6" * 4 + " then " + "x" * 300
@@ -213,7 +232,7 @@ STATUS_IN = {
     "session_id": SID, "cwd": "/x", "transcript_path": f"/x/{SECRET}",
     "model": {"id": "claude-opus-5-5", "display_name": "Opus 5.5"},
     "workspace": {"current_dir": "/x", "project_dir": "/x"}, "version": "2.1.312",
-    "cost": {"total_cost_usd": 1.234, "total_duration_ms": 5},
+    "cost": {"total_cost_usd": 1.23400000001, "total_duration_ms": 5},
     "context_window": {"total_input_tokens": 1, "context_window_size": 1000000, "used_percentage": 42.5,
                        "current_usage": {"input_tokens": 1}},
     "rate_limits": {"five_hour": {"used_percentage": 23.5, "resets_at": 1}, "seven_day": {"used_percentage": 41.2, "resets_at": 1}},

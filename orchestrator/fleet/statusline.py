@@ -93,6 +93,8 @@ def status_event(inp: dict, machine: str) -> dict | None:
         "rate_7d_pct": _num(_get(inp, "rate_limits", "seven_day", "used_percentage")),
         "permission_mode": read_mode(session[:128]),
     }
+    if payload["cost_usd"] is not None:
+        payload["cost_usd"] = round(payload["cost_usd"], 4)
     if payload["context_window"] is not None:
         payload["context_window"] = int(payload["context_window"])
     if isinstance(payload["model"], str):

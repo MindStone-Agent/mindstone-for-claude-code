@@ -27,7 +27,7 @@ from pathlib import Path
 if __package__ in (None, ""):  # run as a script by the hook command
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fleet.common import emit, fleet_config, now_iso, rate_ok, remember_mode, scrub_subject  # noqa: E402
+from fleet.common import emit, fleet_config, now_iso, rate_ok, remember_mode, reset_rate, scrub_subject  # noqa: E402
 
 HARNESS = "claude-code"
 NEEDS_INPUT_KINDS = {"permission_prompt", "idle_prompt", "elicitation_dialog"}
@@ -70,8 +70,14 @@ def build(inp: dict) -> tuple[str, dict, dict] | None:
     if ev == "PostToolUse":
         return "tool", {"tool_name": _s(inp.get("tool_name"), 128)}, {}
     if ev in ("SubagentStart", "SubagentStop"):
+        # Claude Code's own internal agents fire SubagentStop with no agent_type and no
+        # matching SubagentStart (seen on 2.1.312); reporting them would unbalance the
+        # board's open-subagent count, so only typed subagents are reported.
+        agent_type = _s(inp.get("agent_type"), 64)
+        if agent_type is None:
+            return None
         kind = "subagent.started" if ev == "SubagentStart" else "subagent.stopped"
-        return kind, {"agent_type": _s(inp.get("agent_type"), 64)}, {}
+        return kind, {"agent_type": agent_type}, {}
     if ev in ("TaskCreated", "TaskCompleted"):
         kind = "task.created" if ev == "TaskCreated" else "task.completed"
         return kind, {"task_id": _s(inp.get("task_id"), 128), "subject": scrub_subject(inp.get("task_subject", inp.get("subject")))}, {}
@@ -109,6 +115,10 @@ def main() -> int:
     kind, payload, extras = mapped
     if kind == "tool" and not rate_ok(cfg, session, "tool", TOOL_SAMPLE_S):
         return 0
+    if kind == "needs_input":
+        # The board clears "needs you" on the next tool or turn event. Re-arm tool sampling
+        # so the first tool after the answer is always sent, not swallowed by the 5 s sample.
+        reset_rate(session, "tool")
     event = {
         "type": kind,
         "ts": now_iso(),

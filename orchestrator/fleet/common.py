@@ -94,6 +94,13 @@ def rate_ok(cfg: FleetConfig, session: str, what: str, every_s: float) -> bool:
     return True
 
 
+def reset_rate(session: str, what: str) -> None:
+    try:
+        _state_file(session, what).unlink()
+    except OSError:
+        pass
+
+
 PERMISSION_MODES = {"default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions"}
 
 
