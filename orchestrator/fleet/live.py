@@ -19,8 +19,10 @@ it, but coalesces writes into one `change` near the end. So:
 A foreground command that finishes before the first poll sends nothing: tool.finished
 already carries its output.
 
-`tool.output` payload: task_id, tool_use_id (when known), seq, text (at most CHUNK_MAX as
-sent), truncated (output was skipped before this chunk), done.
+`tool.output` payload (Cairn's contract on #31, 2026-11-03 20:32Z): task_id, tool_use_id (when
+known), seq (from 0 per task; the server drops a repeated seq, so a resend is safe), text (at
+most CHUNK_MAX as sent; empty on the final event), truncated (output was skipped before this
+chunk), done.
 """
 from __future__ import annotations
 
@@ -259,9 +261,9 @@ def follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str) -> None:
             tool_use_id = c.short(c._state_file(session, f"task.{task_id}").read_text(), 128)
         except OSError:
             pass
-        seq += 1
-        payload = {"task_id": task_id, "tool_use_id": tool_use_id, "seq": seq, "text": text,
-                   "truncated": truncated or None, "done": done}
+        payload = {"task_id": task_id, "tool_use_id": tool_use_id, "seq": seq, "text": text or "",
+                   "truncated": bool(truncated), "done": done}
+        seq += 1  # the next one: seq counts from 0 per task (Cairn's contract on #31)
         return {"type": "tool.output", "ts": c.now_iso(), "machine": cfg.machine, "harness": "claude-code",
                 "session_id": session, "agent_id": None, "parent_agent_id": None,
                 "payload": {k: v for k, v in payload.items() if v is not None}}

@@ -68,8 +68,8 @@ def test_lines_stream_in_order_then_done_when_the_file_goes(tmp_path, synapse, f
     f.unlink()
     t.join(5)
     out = outputs(synapse)
-    assert "".join(p.get("text", "") for p in out) == "".join(f"line{i}\n" for i in range(1, 6))
-    assert [p["seq"] for p in out] == list(range(1, len(out) + 1))
+    assert "".join(p["text"] for p in out) == "".join(f"line{i}\n" for i in range(1, 6))
+    assert [p["seq"] for p in out] == list(range(len(out)))  # from 0, per task
     assert out[-1]["done"] is True and all(p["done"] is False for p in out[:-1])
     assert all(p["task_id"] == "b1" for p in out)
 
@@ -95,7 +95,8 @@ def test_a_partial_line_waits_and_is_flushed_at_the_end(tmp_path, synapse, fast)
     append(f, " 20%\nno newline at the end")
     t.join(5)  # idle, not running: finishes
     out = outputs(synapse)
-    assert [p.get("text") for p in out] == ["progress 10% 20%\n", "no newline at the end", None]
+    assert [p["text"] for p in out] == ["progress 10% 20%\n", "no newline at the end", ""]
+    assert [p["truncated"] for p in out] == [False, False, False]
 
 
 def test_a_burst_is_capped_per_poll_and_marked_truncated(tmp_path, synapse, fast):
@@ -131,8 +132,8 @@ def test_an_idle_task_still_running_is_followed(tmp_path, synapse, fast):
     time.sleep(0.3)
     L.remember_running(SID, [])
     t.join(5)
-    texts = [p.get("text") for p in outputs(synapse)]
-    assert texts == ["start\n", "later\n", None]
+    texts = [p["text"] for p in outputs(synapse)]
+    assert texts == ["start\n", "later\n", ""]
 
 
 def test_session_end_stops_the_follower(tmp_path, synapse, fast):
@@ -154,8 +155,8 @@ def test_a_restarted_follower_resumes_where_the_last_stopped(tmp_path, synapse, 
     start(synapse.url, f).join(5)
     out = outputs(synapse)
     # "part" went out when the first follower finished; the board joins chunks in seq order
-    assert [p.get("text") for p in out] == ["one\n", "part", None, "ial two\nthree\n", None]
-    assert [p["seq"] for p in out] == [1, 2, 3, 4, 5]
+    assert [p["text"] for p in out] == ["one\n", "part", "", "ial two\nthree\n", ""]
+    assert [p["seq"] for p in out] == [0, 1, 2, 3, 4]
 
 
 def test_the_stream_names_its_call_once_known(tmp_path, synapse, fast):
@@ -228,7 +229,7 @@ def test_file_changed_add_starts_a_follower(tmp_path, synapse):
     (d / "b9.output").write_text("hello from the task\n")
     hook(env, file_changed(tmp_path, "add", d / "b9.output"))  # inline: follows until idle
     out = [e["payload"] for e in synapse.wait(2) if e["type"] == "tool.output"]
-    assert [p.get("text") for p in out] == ["hello from the task\n", None]
+    assert [(p["text"], p["done"]) for p in out] == [("hello from the task\n", False), ("", True)]
 
 
 @pytest.mark.parametrize("where", ["outside", "badname", "unlink"])
