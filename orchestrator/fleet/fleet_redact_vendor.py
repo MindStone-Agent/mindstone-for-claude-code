@@ -101,10 +101,11 @@ EXTRA: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(\bsshpass\b[^\n]{0,40}?[ \t]-p[ \t]{0,8})(['\"])[^'\"\n]{1,256}\2"), r"\1\2" + _R + r"\2"),
     (re.compile(r"(\becho[ \t]{1,8}(?:-[ne][ \t]{1,8})?)(['\"]?)[^\s'\"|]{1,256}\2([ \t]{0,8}\|[ \t]{0,8}sudo\b[^\n]{0,40}?[ \t]-S\b)"), r"\1\2" + _R + r"\2\3"),
     # Round 4 (Plumb): credential headers written as dict or JSON keys
-    # ({"Authorization": "Basic ..."}, 'Cookie': 'sid=...'), either quote.
-    (re.compile(r"(?i)([\"'](?:proxy-)?authorization[\"'][ \t]{0,8}:[ \t]{0,8}[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}([\"'])"), r"\1" + _R + r"\2"),
-    (re.compile(r"(?i)([\"'](?:set-)?cookie[\"'][ \t]{0,8}:[ \t]{0,8}[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}([\"'])"), r"\1" + _R + r"\2"),
-    (re.compile(r"(?i)([\"']x-[a-z0-9-]{0,40}(?:key|token|secret|auth)[\"'][ \t]{0,8}:[ \t]{0,8}[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}([\"'])"), r"\1" + _R + r"\2"),
+    # ({"Authorization": "Basic ..."}, 'Cookie': 'sid=...'), either quote,
+    # and JSON inside a string ({\"Authorization\": \"...\"}, round 5).
+    (re.compile(r"(?i)(\\?[\"'](?:proxy-)?authorization\\?[\"'][ \t]{0,8}:[ \t]{0,8}\\?[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}?(\\?[\"'])"), r"\1" + _R + r"\2"),
+    (re.compile(r"(?i)(\\?[\"'](?:set-)?cookie\\?[\"'][ \t]{0,8}:[ \t]{0,8}\\?[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}?(\\?[\"'])"), r"\1" + _R + r"\2"),
+    (re.compile(r"(?i)(\\?[\"']x-[a-z0-9-]{0,40}(?:key|token|secret|auth)\\?[\"'][ \t]{0,8}:[ \t]{0,8}\\?[\"'])(?!\[REDACTED)(?:[^\"'\\\n]|\\.){1,4096}?(\\?[\"'])"), r"\1" + _R + r"\2"),
     # A bare secret key in lower case with any value, dotted or not
     # (password=correct.horse.battery.staple; Plumb, round 3). The scrubber
     # takes a dotted value for code; this over-redacts code like
@@ -145,10 +146,11 @@ _PROPAGATE_MAX = 64
 _PEM_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----")
 _PEM_END = re.compile(r"-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----")
 # Key material after a BEGIN line with no END: base64 runs of 20+, each
-# after up to 20 separators (newlines raw or JSON-escaped, spaces, a line
+# after up to 256 separators (indentation counts: a key in a YAML block
+# nested 16 deep, round 5) (newlines raw or JSON-escaped, spaces, a line
 # number from `cat -n` or a Read tool's "N→"). Modelled on the scrubber's own
 # truncated-key rule, so prose after the key ("Now I will run...") is kept.
-_PEM_BODY = re.compile(r"(?:(?:\\[nrt]|\s|\d{1,9}(?:\t|\\t|\u2192)){0,20}[A-Za-z0-9+/=]{20,4096}){0,400}")
+_PEM_BODY = re.compile(r"(?:(?:\\[nrt]|\s|\d{1,9}(?:\t|\\t|\u2192)){0,256}[A-Za-z0-9+/=]{20,4096}){0,400}")
 
 
 def _pem_blocks(text: str) -> str:
@@ -313,18 +315,40 @@ def _secret_doc(doc: str) -> str:
     return "\n".join(lines)
 
 
-_JSON_KIND_SECRET = re.compile(r"\"kind\"[ \t]*:[ \t]*\"Secret\"")
-_JSON_DATA_OBJ = re.compile(r"(\"(?:data|stringData)\"[ \t]*:[ \t]*\{)([^{}]{0,65536})(\})")
-_JSON_DATA_VAL = re.compile(r"(\"[^\"\n]{1,253}\"[ \t]*:[ \t]*\")(?:[^\"\\\n]|\\.){0,65536}(\")")
+_JSON_KIND_SECRET = re.compile(r"\\?\"kind\\?\"[ \t]*:[ \t]*\\?\"Secret\\?\"")
+_JSON_DATA_OPEN = re.compile(r"\\?\"(?:data|stringData)\\?\"[ \t]*:[ \t]*\{")
+# One "key": "value" pair, plain or JSON-escaped (inside a string, as in the
+# last-applied-configuration annotation). A value may hold braces.
+_JSON_PAIR = {
+    '"': re.compile(r"[ \t\r\n,]*(\"[^\"\\\n]{1,253}\"[ \t]*:[ \t]*\")((?:[^\"\\\n]|\\.){0,65536})(\")"),
+    '\\"': re.compile(r"[ \t\r\n,]*(\\\"(?:[^\"\\\n]|\\\\\\\\){1,253}\\\"[ \t]*:[ \t]*\\\")((?:[^\"\\\n]|\\\\\\\\|\\\\[nrt/])*?)(\\\")"),
+}
 
 
 def _json_secret_data(doc: str) -> str:
-    """A Secret as one-line JSON (kubectl -o json | jq -c, an API response):
-    the values inside its "data"/"stringData" object."""
+    """A Secret as one-line JSON (kubectl -o json | jq -c, an API response,
+    or escaped inside another string): every value in its "data" or
+    "stringData" object, pair by pair, so a value holding braces (an
+    embedded config.json) doesn't stop the scan (round 5)."""
     if not _JSON_KIND_SECRET.search(doc):
         return doc
-    return _JSON_DATA_OBJ.sub(
-        lambda m: m.group(1) + _JSON_DATA_VAL.sub(r"\1" + _R + r"\2", m.group(2)) + m.group(3), doc)
+    out, i = [], 0
+    for m in _JSON_DATA_OPEN.finditer(doc):
+        if m.start() < i:
+            continue
+        pair = _JSON_PAIR['\\"' if doc[m.start()] == "\\" else '"']
+        out.append(doc[i:m.end()])
+        i = m.end()
+        while True:
+            p = pair.match(doc, i)
+            if not p:
+                break
+            out.append(doc[i:p.start(2)])
+            out.append(p.group(2) if p.group(2).startswith("[REDACTED") else _R)
+            out.append(p.group(3))
+            i = p.end(3)
+    out.append(doc[i:])
+    return "".join(out)
 
 
 def _k8s_secret_data(text: str) -> str:
