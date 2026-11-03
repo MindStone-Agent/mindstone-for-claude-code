@@ -229,7 +229,9 @@ def _keyish(w: str) -> bool:
     """A word that looks like a credential rather than an identifier: 16+ chars with three
     or more digits, or upper, lower and digits mixed with any of: 20+ chars, two digit runs,
     a trailing digit run (Welcome123), or digits inside lower case (Sup3rS3cret). OAuth2Client,
-    Base64Encoder and S3Bucket stay; a version-suffixed name like Python312 is redacted."""
+    Base64Encoder and S3Bucket stay. A mixed-case word of 8+ chars ending in digits is redacted,
+    which includes version-suffixed names (Python312) and camelCase names such as fromBase64,
+    handleV2 and LoginForm2: over-redaction, chosen over letting Welcome123 through."""
     digits = sum(ch.isdigit() for ch in w)
     if len(w) >= 16 and digits >= 3:
         return True

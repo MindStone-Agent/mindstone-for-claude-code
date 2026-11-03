@@ -163,8 +163,8 @@ def report(inp: dict) -> None:
         """Wait out the window, then send the newest pending snapshot. The claim is released
         before the snapshot is taken, so any update that lands after that point gets a flusher
         of its own. If a direct send opened a new window first, the snapshot goes back (unless a
-        newer one is waiting, or it is older than what was sent) under a re-taken claim, and the
-        wait repeats."""
+        newer one is waiting, or it is older than what was sent), and this flusher waits again
+        unless another flusher holds the claim, in which case that one sends it."""
         for _ in range(6):
             time.sleep(c.rate_remaining(sid, "status", STATUS_EVERY_S) + 0.05)
             release()  # from here on, an update that lands starts a flusher of its own
@@ -179,18 +179,15 @@ def report(inp: dict) -> None:
                 c.mark_sent(sid, ev.get("ts", ""))
                 c.send_now(cfg, [ev])
                 return
-            try:  # wait again, unless another flusher already holds the claim
-                os.close(os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
-                mine = True
-            except OSError:
-                mine = False  # that flusher sends whatever is pending, which may be this very snapshot
-            try:  # put it back either way, unless a newer snapshot is already pending
+            try:  # put it back, unless a newer snapshot is already pending
                 fd = os.open(pending, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
                 os.write(fd, json.dumps(ev).encode())
                 os.close(fd)
             except OSError:
                 pass
-            if not mine:
+            try:  # then wait again, unless another flusher holds the claim: it hasn't read
+                os.close(os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            except OSError:  # yet (holders release before reading), so it sends what is pending now
                 return
         release()
     c.detach(flush)
