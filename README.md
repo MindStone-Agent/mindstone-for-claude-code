@@ -227,7 +227,17 @@ enabled = true
 - **Status updates** are sent at most every 10 s; an update inside that window is held and sent when it ends, so the last one of a turn isn't lost. The permission mode comes from hook events (the status line doesn't carry it), so a mode change shows from the next event.
 - **Scope.** The hooks are global, so every Claude Code session this macOS user runs (any project, and scripted `claude -p` runs) reports under the one handle in `synapse.toml`. POSIX only: the sender forks, and where it can't, events are dropped. Re-running `synapse setup` keeps your `[fleet]` table.
 
-### Sync `await` primitive ([Synapse#7](https://github.com/R1ngZer0/synapse/issues/7))
+#### Activity layer (opt-in, `[fleet] activity = true`)
+
+Adds what each agent is doing to the board (synapse#31, scope change of 2026-11-03):
+- **Tool calls**, each as `tool.started` and `tool.finished` (not sampled): a redacted input preview (Bash: the command; Read, Edit, Write: the path and a line count, never file contents; Glob, Grep: the pattern; WebFetch: the URL; Agent: the subagent type and description, never its prompt; other tools: their input as JSON), and a redacted output preview (head and tail, up to 16 KB) or the error.
+- **The agent's own replies**: text blocks of `assistant` lines, tailed from the transcript from the session's start (no history), and a subagent's from its own transcript. Your prompts are never read or sent; neither are thinking blocks.
+- **The subagent tree**: `subagent.started` names the Agent call that launched it and its description.
+- **Redaction** runs on the machine before anything is cut: the framework scrubber, plus `Authorization:` headers of any scheme and `.env`-style `NAME=value` for secret-named variables. The server runs it again.
+- **Transport:** activity is sent only over https, or to a localhost `base_url`. Over plain http to another host it stays off, and the status layer carries on.
+- The transcript tail and the sends run in the detached sender, never in the hook.
+
+ ([Synapse#7](https://github.com/R1ngZer0/synapse/issues/7))
 
 For agent-orchestration patterns where one agent needs another's reply before continuing (debate, peer review, dispatcher-with-specialist), use `synapse await` to block until a matching message arrives:
 
