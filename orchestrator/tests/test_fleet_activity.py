@@ -9,6 +9,7 @@ PostToolUseFailure inside and outside a subagent, SubagentStart / Stop, transcri
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -937,7 +938,8 @@ def test_a_secret_repeated_bare_later_is_redacted_too(case):
     assert case["leak"] not in out, value
 
 
-@pytest.mark.parametrize("password", ["s3cr3t!P@ssw0rd!2024", "correct.horse.battery.staple", "Xk2$mQ9#vLpq7Rz8wT"])
+@pytest.mark.parametrize("password", ["s3cr3t!P@ssw0rd!2024", "correct.horse.battery.staple", "Xk2$mQ9#vLpq7Rz8wT",
+                                      "Tr0ub4dorXk2mQ9vLpq.tail!2024", "hunter2hunter2hunter2#Zq8"])
 @pytest.mark.parametrize("key", ["passwd:", "password:", "Password:", "pwd:", "passphrase:", "DB_PASSWORD=",
                                  "PGPASSWORD=", "password=", "db_password="])
 @pytest.mark.parametrize("pad", ["Q", "Q,", "a;"])
@@ -949,3 +951,46 @@ def test_a_split_value_leaves_no_fragment_for_any_key_form(password, key, pad):
         text, _ = preview(raw, A.OUTPUT_MAX)
         for i in range(len(password) - 3):
             assert password[i:i + 4] not in text, (p, key, password[i:i + 4])
+
+
+
+# --- activity review round 5 ------------------------------------------------------------------
+
+def _fragments(secret: str, n: int = 5) -> list[str]:
+    return [secret[i:i + n] for i in range(len(secret) - n + 1)]
+
+
+@pytest.mark.parametrize("case", [c for c in _SINGLE_LINE], ids=lambda c: c["name"])
+def test_no_fragment_of_a_one_line_fixture_survives_a_seam(case):
+    """Round 5, S1-2: when a typed rule (the GitHub token rule, a JWT rule) took the head of a
+    value split by the 1 KB cut, the tail stayed glued after its typed marker. Check every
+    5-character fragment of the value, not only the fixture's leak string."""
+    value = _repeat_value(case)
+    # the part of the token that holds the secret, not its key (db_password=, postgres://user:)
+    secret = next((part for part in re.split(r"[=:]", value) if case["leak"] in part), value)
+    if len(secret) < 12:
+        pytest.skip("too short to leave a 5-character fragment that means anything")
+    for k in range(1, len(value)):
+        raw = "," * (1024 - k) + case["input"] + "," * 1200
+        text, _ = preview(raw, A.OUTPUT_MAX)
+        for f in _fragments(secret):
+            # token-like fragments only: a digit, or mixed case. Plain words (a command name, a
+            # host) and a vendor's fixed prefix (ATATT) are not secret material.
+            tokenish = any(ch.isdigit() for ch in f) or (f.lower() != f and f.upper() != f)
+            if f.isalnum() and tokenish and f not in case["input"].replace(secret, ""):
+                assert f not in text, (k, f)
+
+
+def test_two_markers_back_to_back_both_lose_their_tails():
+    """Round 5, S1-1: the server can emit [REDACTED-SECRET][REDACTED-SECRET].tail; the glued
+    rule ate the second marker and its tail survived."""
+    out = A.preview("password=[REDACTED-SECRET][REDACTED-SECRET].tail!2024, next", A.OUTPUT_MAX)[0]
+    assert "tail" not in out and "2024" not in out and out.endswith(", next")
+
+
+def test_a_glued_tail_longer_than_256_characters_goes_whole():
+    """Round 5, S2-1: a cap of 256 cut the run mid-way and left the rest, sometimes a whole
+    credential further along the same run."""
+    raw = "git clone https://deploy:Zq8vX2mN4pL7@git.example.com/a/b/" + "x" * 225 + "?MY_CREDENTIAL=SuperSecretValue123 done"
+    out, _ = preview(raw, A.OUTPUT_MAX)
+    assert "SuperSecretValue123" not in out and "Zq8vX2mN4pL7" not in out

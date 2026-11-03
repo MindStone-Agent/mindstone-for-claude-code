@@ -104,13 +104,16 @@ def _htpasswd(m: re.Match) -> str:
 # the run, so `API_TOKEN=[REDACTED-SECRET]` keeps its name.
 # Anchored at the start of a run: unanchored, a long run with no marker was tried from every
 # position (7 s on 256 KB of KEY_KEY_...).
-_REMNANT_BEFORE = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{8,4096}(?=\[REDACTED-)")
-# The tail of a value the chunk scrubber cut in two: its head became [REDACTED-SECRET] in one
+_REMNANT_BEFORE = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{4,4096}(?=\[REDACTED-)")  # 4: ATATT3 + a cut (round 5)
+# The tail of a value the chunk scrubber cut in two: its head became a marker in one
 # chunk, and every later rule skips what follows a marker, so `passwd:[REDACTED-SECRET]!2024`
 # kept its tail (activity review rounds 3 and 4). Anything glued to the marker up to a
 # separator goes too. Redacting the value before the scrubber instead hid it from the
 # scrubber's own propagation, so a repeat of it elsewhere went out whole (round 4, S1-1).
-_GLUED_AFTER_SECRET = re.compile(r"\[REDACTED-SECRET\][^\s\"'`<>\\,;)}\]]{1,256}")
+# Any marker, typed or not (the GitHub-token or JWT rule can take the head as well), and no cap:
+# a cap cut long runs mid-way and left the rest. `[` ends the run, so a marker right after
+# another keeps its own match (activity review round 5). The marker stays, the tail goes.
+_GLUED_AFTER_SECRET = re.compile(r"(\[REDACTED-[A-Z-]{1,40}\])[^\s\"'`<>\\,;)}\]\[]+")
 _REMNANT_AFTER = re.compile(r"(\[REDACTED-[A-Z-]{0,40}\])[A-Za-z0-9+/_-]{8,4096}")
 
 
@@ -118,7 +121,7 @@ def redact(text: str) -> str:
     """The reporter's own rules, after the server's full pass."""
     text = _REMNANT_BEFORE.sub(_R, text)
     text = _REMNANT_AFTER.sub(r"\1" + _R, text)
-    text = _GLUED_AFTER_SECRET.sub(_R, text)
+    text = _GLUED_AFTER_SECRET.sub(r"\1", text)
     for pattern, repl in _MORE:
         text = pattern.sub(repl, text)
     text = _HTPASSWD.sub(_htpasswd, text)
