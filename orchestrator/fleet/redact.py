@@ -111,9 +111,10 @@ _REMNANT_BEFORE = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{4,4096}(?=\[R
 # separator goes too. Redacting the value before the scrubber instead hid it from the
 # scrubber's own propagation, so a repeat of it elsewhere went out whole (round 4, S1-1).
 # Any marker, typed or not (the GitHub-token or JWT rule can take the head as well), and no cap:
-# a cap cut long runs mid-way and left the rest. `[` ends the run, so a marker right after
-# another keeps its own match (activity review round 5). The marker stays, the tail goes.
-_GLUED_AFTER_SECRET = re.compile(r"(\[REDACTED-[A-Z-]{1,40}\])[^\s\"'`<>\\,;)}\]\[]+")
+# a cap cut long runs mid-way and left the rest. The next marker ends the run, so a marker right
+# after another keeps its own match (round 5); a `[` inside a password doesn't (round 6). The
+# marker stays, the tail goes.
+_GLUED_AFTER_SECRET = re.compile(r"(\[REDACTED-[A-Z-]{1,40}\])(?:(?!\[REDACTED-)[^\s\"'`<>\\,;)}\]])+")
 _REMNANT_AFTER = re.compile(r"(\[REDACTED-[A-Z-]{0,40}\])[A-Za-z0-9+/_-]{8,4096}")
 
 

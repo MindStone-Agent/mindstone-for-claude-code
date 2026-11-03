@@ -939,7 +939,8 @@ def test_a_secret_repeated_bare_later_is_redacted_too(case):
 
 
 @pytest.mark.parametrize("password", ["s3cr3t!P@ssw0rd!2024", "correct.horse.battery.staple", "Xk2$mQ9#vLpq7Rz8wT",
-                                      "Tr0ub4dorXk2mQ9vLpq.tail!2024", "hunter2hunter2hunter2#Zq8"])
+                                      "Tr0ub4dorXk2mQ9vLpq.tail!2024", "hunter2hunter2hunter2#Zq8",
+                                      "Tr0ub4dor[Xk2mQ9vLpq7", "hunter2hunter2[hunter2#Zq8"])
 @pytest.mark.parametrize("key", ["passwd:", "password:", "Password:", "pwd:", "passphrase:", "DB_PASSWORD=",
                                  "PGPASSWORD=", "password=", "db_password="])
 @pytest.mark.parametrize("pad", ["Q", "Q,", "a;"])
