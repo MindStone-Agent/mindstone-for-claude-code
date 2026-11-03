@@ -503,21 +503,25 @@ def test_parallel_tool_burst_sends_one(tmp_path, synapse):
 
 def test_sampling_check_holds_a_lock(tmp_path, synapse):
     """Deterministic twin of the burst test: while another process holds the sampling lock,
-    a hook waits for it instead of checking and marking unlocked."""
+    a hook never checks and marks unlocked. Since #144 review S3-6 it waits a bounded time
+    (LOCK_WAIT_S), then gives up and sends nothing; with the lock free it samples normally."""
     import fcntl
     env = make_env(tmp_path, synapse.url)
     state = Path(env["MS4CC_SYNAPSE_HOME"]) / "fleet"
     state.mkdir(parents=True)
     fd = os.open(state / f"{SID}.tool", os.O_RDWR | os.O_CREAT, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX)
-    p = subprocess.Popen([sys.executable, str(REPORT)], stdin=subprocess.PIPE, env=env)
-    p.stdin.write(json.dumps(base("PostToolUse", tool_name="Read", tool_input={}, tool_response={})).encode())
-    p.stdin.close()
-    time.sleep(1.0)
-    still_waiting = p.poll() is None
-    os.close(fd)
-    p.wait(timeout=10)
-    assert still_waiting, "the hook didn't wait for the lock"
+    tool = base("PostToolUse", tool_name="Read", tool_input={}, tool_response={})
+    try:
+        t = time.perf_counter()
+        r = hook(env, tool)
+        took = time.perf_counter() - t
+    finally:
+        os.close(fd)
+    assert r.returncode == 0 and took < 3, f"took {took:.1f} s"
+    time.sleep(0.3)
+    assert [e for e in synapse.events() if e["type"] == "tool"] == [], "checked and marked without the lock"
+    hook(env, tool)
     assert [e["type"] for e in synapse.wait(1)] == ["tool"]
 
 
@@ -736,3 +740,167 @@ def test_fork_path_still_delivers(tmp_path, synapse):
     assert time.perf_counter() - t < 0.2 and r.stdout == b""
     (ev,) = synapse.wait(1, timeout=5)
     assert ev["type"] == "turn.ended"
+
+
+# --- #144 review (Cairn) ---------------------------------------------------------------
+
+S3_1_RACE = r"""import sys, threading, time, json
+sys.path.insert(0, %r)
+from fleet import statusline as sl
+from fleet import common as c
+sl.STATUS_EVERY_S = 1.0
+sent = []
+c.send_now = lambda cfg, evs: sent.append(evs[0]["payload"]["context_pct"])
+c.emit = c.send_now
+threads = []
+def detach(fn):
+    t = threading.Thread(target=fn); threads.append(t); t.start()
+c.detach = detach
+def inp(p): return {"session_id": "S1", "context_window": {"used_percentage": p}}
+real_loads = json.loads
+fired = []
+def loads(s, *a, **k):
+    # The flusher has its snapshot in hand. A direct send opens a new window, and an update
+    # lands inside it before the flusher removes what it took.
+    if threads and threading.current_thread() is threads[0] and not fired:
+        fired.append(1)
+        c.reset_rate("S1", "status"); time.sleep(0.002)
+        sl.report(inp(25))
+        time.sleep(0.002)
+        sl.report(inp(30))
+    return real_loads(s, *a, **k)
+json.loads = loads
+sl.report(inp(10)); time.sleep(0.002)
+sl.report(inp(20))
+for _ in range(60):
+    for t in list(threads): t.join()
+    time.sleep(0.05)
+print(sent, "pending left:", c._state_file("S1", "status.pending").exists())
+"""
+
+
+def test_flusher_never_removes_a_snapshot_newer_than_the_one_it_took(tmp_path, synapse):
+    """#144 review S3-1 (Cairn's reproduction): the flusher read the pending snapshot, then
+    unlinked the PATH, so a newer snapshot written between the two was deleted unseen."""
+    env = make_env(tmp_path, synapse.url)
+    r = subprocess.run([sys.executable, "-c", S3_1_RACE % str(ORCH)], env=env, capture_output=True, text=True,
+                       timeout=60, cwd=str(tmp_path))
+    assert r.stdout.strip() == "[10.0, 25.0, 30.0] pending left: False", r.stdout + r.stderr
+
+
+S3_2_WRITERS = r"""import sys, os, time, json, multiprocessing, pathlib
+mp = multiprocessing.get_context("fork")
+sys.path.insert(0, %r)
+from fleet import statusline as sl
+from fleet import common as c
+c.emit = c.send_now = lambda cfg, evs: None
+c.detach = lambda fn: None
+barrier = mp.Barrier(2)
+def writer(pct, late):
+    def write_text(self, data, *a, **k):  # open (truncating), meet the other writer, then write
+        with open(self, "w") as f:
+            barrier.wait(5)
+            if late:
+                time.sleep(0.3)
+            f.write(data)
+    pathlib.Path.write_text = write_text
+    sl.report({"session_id": "S1", "model": {"id": "m" * pct}, "context_window": {"used_percentage": pct}})
+sl.report({"session_id": "S1", "context_window": {"used_percentage": 1}})  # opens the window
+ps = [mp.Process(target=writer, args=(90, False)), mp.Process(target=writer, args=(5, True))]
+for p in ps: p.start()
+for p in ps: p.join(10)
+try:
+    print(json.loads(c._state_file("S1", "status.pending").read_text())["payload"]["context_pct"])
+except ValueError:
+    print("CORRUPT")
+"""
+
+
+def test_two_status_lines_writing_at_once_never_leave_corrupt_json(tmp_path, synapse):
+    """#144 review S3-2: every writer used one temp name, so two concurrent writes could
+    interleave (a long one, then a short one over its head) and leave broken JSON pending."""
+    env = make_env(tmp_path, synapse.url)
+    r = subprocess.run([sys.executable, "-c", S3_2_WRITERS % str(ORCH)], env=env, capture_output=True, text=True,
+                       timeout=60, cwd=str(tmp_path))
+    assert r.stdout.strip() in ("90.0", "5.0"), r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("stdin", [b"[" * 100000 + b"]" * 100000,
+                                   b'{"session_id": "s", "context_window": {"used_percentage": 1' + b"0" * 400 + b"}}",
+                                   b'{"session_id": "s", "cost": {"total_cost_usd": Infinity}}'],
+                         ids=["deeply-nested", "400-digit-int", "infinity"])
+def test_malformed_status_input_still_shows_the_wrapped_bar(tmp_path, synapse, stdin):
+    """#144 review S3-3: RecursionError and OverflowError escaped main() and blanked the bar."""
+    env = make_env(tmp_path, synapse.url)
+    wrap = base64.b64encode(b"cat >/dev/null; printf MY-BAR").decode()
+    r = subprocess.run([sys.executable, str(STATUSLINE), "--wrap-b64", wrap], input=stdin, env=env,
+                       capture_output=True, timeout=20)
+    assert (r.stdout, r.returncode) == (b"MY-BAR", 0), r.stderr
+    r = subprocess.run([sys.executable, str(STATUSLINE)], input=stdin, env=env, capture_output=True, timeout=20)
+    assert r.returncode == 0 and b"Traceback" not in r.stderr, r.stderr
+    time.sleep(0.3)
+    assert all("Infinity" not in q["raw"] and "inf" not in json.dumps(q["json"]) for q in synapse.requests)
+
+
+def test_wrapped_command_past_the_timeout_is_killed_with_everything_it_started(tmp_path, monkeypatch):
+    """#144 review S3-4 and S3-5: the timeout killed only /bin/sh (its children lived on, one
+    set per refresh), and nothing tested the timeout or the fallback bar at all."""
+    sys.path.insert(0, str(ORCH))
+    from fleet import statusline as sl
+    monkeypatch.setattr(sl, "WRAP_TIMEOUT_S", 0.5)
+    pidfile = tmp_path / "child.pid"
+    t = time.perf_counter()
+    out, code = sl.bar(b"{}", STATUS_IN, f"sleep 30 & echo $! > '{pidfile}'; wait")
+    took = time.perf_counter() - t
+    assert (out.decode(), code) == ("Opus 5.5 · ctx 42% · $1.23", 0), "the MS4CC bar shows instead"
+    assert took < 3, f"took {took:.1f} s"
+    pid = int(pidfile.read_text())
+    for _ in range(100):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.02)
+    else:
+        os.kill(pid, 9)
+        pytest.fail("the wrapped command's child outlived the timeout")
+
+
+def test_a_held_rate_lock_never_stalls_the_status_line(tmp_path, synapse):
+    """#144 review S3-6: a blocking flock on the status-line path waited for as long as the
+    holder lived (a suspended process, a network home)."""
+    import fcntl
+    env = make_env(tmp_path, synapse.url, inline=False)
+    state = Path(env["MS4CC_SYNAPSE_HOME"]) / "fleet"
+    state.mkdir(mode=0o700, exist_ok=True)
+    fd = os.open(state / f"{SID}.status", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        t = time.perf_counter()
+        r = hook(env, STATUS_IN, STATUSLINE)
+        assert r.stdout.decode() == "Opus 5.5 · ctx 42% · $1.23"
+        assert time.perf_counter() - t < 2.5, "the status line waited on the lock"
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("toml,state", [
+    ('[synapse]\nbase_url = "https://syn.example"\nhandle = "p"\n', "off"),
+    ('[synapse]\nbase_url = "https://syn.example"\nhandle = "p"\n[fleet]\nenabled = false\n', "off"),
+    ('[synapse]\nbase_url = "https://syn.example"\nhandle = "p"\n[fleet]\nenabled = "true"\n', "off"),
+    ('[synapse]\nbase_url = "https://syn.example"\nhandle = "p"\n[fleet]\nenabled = true\n', "on"),
+    ('[synapse]\nbase_url = "http://localhost:8000"\nhandle = "p"\n[fleet]\nenabled = true\n', "on"),
+    ('[synapse]\nbase_url = "http://[::1]:8000"\nhandle = "p"\n[fleet]\nenabled = true\n', "on"),
+    ('[synapse]\nbase_url = "http://syn.example"\nhandle = "p"\n[fleet]\nenabled = true\n', "on plain-http"),
+    ('[synapse]\nbase_url = "HTTP://10.0.0.5:8000"\nhandle = "p"\n[fleet]\nenabled = true\n', "on plain-http"),
+    ('not toml [', "off"),
+])
+def test_bootstrap_state_decides_the_status_line_install(tmp_path, toml, state):
+    """#144 review S2-1 and S3-9: bootstrap installs the status line only while Fleet is on
+    (the token need not exist yet), and warns when the token would cross plain http."""
+    (tmp_path / "s.toml").write_text(toml)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("MS4CC_")}
+    env.update(MS4CC_SYNAPSE_TOML=str(tmp_path / "s.toml"), MS4CC_SYNAPSE_HOME=str(tmp_path / "home"))
+    r = subprocess.run([sys.executable, "-c", "from fleet.common import bootstrap_state; print(bootstrap_state())"],
+                       cwd=str(ORCH), env=env, capture_output=True, text=True, timeout=20)
+    assert r.stdout.strip() == state, r.stderr

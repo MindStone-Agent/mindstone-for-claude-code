@@ -17,8 +17,9 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
   reports context %, model, cost and rate limits at most every 10 s. Payloads are allow-listed field by
   field: no prompt text, tool inputs or tool outputs leave the machine. Sends are fire-and-forget from
   a detached process with a 5 s deadline and no redirects, so hooks never wait on Synapse and the token
-  never leaves the configured host. Bootstrap installs the status line and wraps an existing
-  `statusLine` rather than replacing it (its output, exit code and stderr pass through). `synapse setup`
+  never leaves the configured host. While Fleet is on, bootstrap installs the status line and wraps an
+  existing `statusLine` rather than replacing it (its output, exit code and stderr pass through); with
+  Fleet off it installs nothing and puts a wrapped status line back. `synapse setup`
   now keeps a `[fleet]` table when it rewrites `synapse.toml`.
 - **Checks that can fail** (`AGENTS.md`) (#131): a new subsection under Engineering discipline with
   nine verification rules: prove a check by breaking what it checks; sort a noisy check's

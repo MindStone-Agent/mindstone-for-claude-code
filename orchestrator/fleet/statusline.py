@@ -3,11 +3,13 @@
 Claude Code runs this as the `statusLine` command and shows what it prints. It does two
 things, in this order:
 
-1. **Prints the bar.** If the user already had a status line, bootstrap wrapped it rather
-   than replacing it: its command arrives here base64-encoded after `--wrap-b64`, runs with
-   the same stdin and inherited stderr, and its stdout bytes and exit code pass through
-   unchanged. With nothing to wrap, or if the wrapped command runs past WRAP_TIMEOUT_S, it
-   prints a short bar of its own (model, context %, cost). Nothing outside the standard library
+1. **Prints the bar.** Bootstrap installs this only while Fleet is on. If the user already
+   had a status line, bootstrap wrapped it rather than replacing it: its command arrives here
+   base64-encoded after `--wrap-b64`, runs under /bin/sh (as Claude Code runs it) with the
+   same stdin and inherited stderr, and its stdout bytes and exit code pass through
+   unchanged. With nothing to wrap, or if the wrapped command runs past WRAP_TIMEOUT_S (it is
+   then killed with its whole process group), it prints a short bar of its own (model,
+   context %, cost). Nothing outside the standard library
    is imported before the bar is out, so a Fleet module that can't load (no tomllib on Python
    3.10, say) can't blank the user's bar. A missing or broken MS4CC venv still can: the command
    runs on the venv's python.
@@ -22,7 +24,9 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import math
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -33,7 +37,14 @@ WRAP_TIMEOUT_S = 5.0
 
 
 def _num(v: object) -> float | None:
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    """A finite float, or None (a bool, a string, NaN, infinity, an int too big for a float)."""
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except OverflowError:
+        return None
+    return f if math.isfinite(f) else None
 
 
 def _get(d: object, *path: str) -> object:
@@ -72,12 +83,42 @@ def bar(raw: bytes, inp: dict, wrap: str | None) -> tuple[bytes, int]:
     """(bytes to show, exit code). A wrapped command's stdout and exit code pass through as
     they are, so Claude Code treats them exactly as it did before the wrap."""
     if wrap:
+        out = _run_wrapped(wrap, raw)
+        if out is not None:
+            return out
+    try:
+        return own_bar(inp), 0
+    except Exception:
+        return b"", 0
+
+
+def _run_wrapped(wrap: str, raw: bytes) -> tuple[bytes, int] | None:
+    """Run the user's command in a process group of its own, so a timeout kills everything it
+    started, not just /bin/sh. None if it can't run or runs past WRAP_TIMEOUT_S."""
+    try:
+        p = subprocess.Popen(wrap, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             start_new_session=True)
+    except OSError:
+        return None
+    try:
+        out, _ = p.communicate(raw, timeout=WRAP_TIMEOUT_S)
+        return out, p.returncode
+    except (OSError, subprocess.SubprocessError):
         try:
-            r = subprocess.run(wrap, shell=True, input=raw, stdout=subprocess.PIPE, timeout=WRAP_TIMEOUT_S)
-            return r.stdout, r.returncode
-        except (OSError, subprocess.SubprocessError):
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
             pass
-    return own_bar(inp), 0
+        try:
+            p.wait(timeout=1)
+        except subprocess.SubprocessError:
+            pass
+        for f in (p.stdin, p.stdout):
+            try:
+                if f:
+                    f.close()
+            except OSError:
+                pass
+        return None
 
 
 def status_event(inp: dict, machine: str, now_iso, read_mode) -> dict | None:
@@ -136,11 +177,15 @@ def report(inp: dict) -> None:
     # older than the window plus the send deadline is stale (its process died) and is taken.
     if not c._ensure_state_dir():
         return
-    tmp = c._state_file(sid, "status.pending.tmp")
+    tmp = c._state_file(sid, f"status.pending.{os.getpid()}.tmp")  # one per writer: no interleaving
     try:
         tmp.write_text(json.dumps(event))
         tmp.replace(pending)
     except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
         return
     claim = c._state_file(sid, "status.flusher")
     try:
@@ -168,11 +213,21 @@ def report(inp: dict) -> None:
         for _ in range(6):
             time.sleep(c.rate_remaining(sid, "status", STATUS_EVERY_S) + 0.05)
             release()  # from here on, an update that lands starts a flusher of its own
-            try:
-                ev = json.loads(pending.read_text())
-                pending.unlink()
-            except (OSError, ValueError):
+            mine = c._state_file(sid, f"status.flushing.{os.getpid()}")
+            try:  # take the snapshot by renaming it, so a newer one can't be unlinked unseen
+                os.rename(pending, mine)
+            except OSError:
                 return  # nothing waiting: a direct send already carried it
+            try:
+                ev = json.loads(mine.read_text())
+            except (OSError, ValueError):
+                ev = None
+            try:
+                mine.unlink()
+            except OSError:
+                pass
+            if not isinstance(ev, dict):
+                return
             if ev.get("ts", "") <= c.last_sent(sid):
                 return  # something newer already went out
             if c.rate_ok(sid, "status", STATUS_EVERY_S):
@@ -197,7 +252,7 @@ def main(argv: list[str]) -> int:
     raw = sys.stdin.buffer.read()
     try:
         inp = json.loads(raw or b"{}")
-    except ValueError:
+    except Exception:  # ValueError, and RecursionError for deeply nested input
         inp = {}
     if not isinstance(inp, dict):
         inp = {}

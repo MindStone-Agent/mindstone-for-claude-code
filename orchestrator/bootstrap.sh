@@ -173,6 +173,24 @@ else
   TEMP_FRAGMENT=$(mktemp)
   sed "s|\$ORCHESTRATOR_DIR|$ORCHESTRATOR_DIR|g" "$FRAGMENT_FILE" > "$TEMP_FRAGMENT"
 
+  # Fleet's status line is installed only while [fleet] enabled = true in config/synapse.toml,
+  # and the merge removes it again (restoring a wrapped status line) when Fleet is off. So
+  # re-run bootstrap after turning Fleet on or off, and BEFORE rolling MS4CC back to a release
+  # without Fleet: an older merge doesn't know to unwrap it.
+  FLEET_ON=false
+  fleet_state=$(cd "$ORCHESTRATOR_DIR" && "$VENV_DIR/bin/python" -c \
+    'from fleet.common import bootstrap_state; print(bootstrap_state())' 2>/dev/null) || fleet_state=off
+  if [[ "$fleet_state" == on* ]]; then
+    if [[ "$ORCHESTRATOR_DIR" =~ [[:space:]] ]]; then
+      echo "  WARN: Fleet is on, but $ORCHESTRATOR_DIR contains whitespace: the Fleet status line is not installed."
+    else
+      FLEET_ON=true
+    fi
+    if [[ "$fleet_state" == "on plain-http" ]]; then
+      echo "  WARN: Fleet is on and synapse.toml's base_url is plain http:// to a remote host: your token is sent unencrypted."
+    fi
+  fi
+
   if [[ -f "$SETTINGS_FILE" ]]; then
     cp "$SETTINGS_FILE" "${SETTINGS_FILE}.backup.$(date +%s)"
     # Merge hooks PER-EVENT (orchestrator/lib/merge-settings.jq): re-add the
@@ -185,14 +203,16 @@ else
     # the MS4CC compaction-handoff design — harness auto-compact is the backstop,
     # PreCompact is the handoff floor. MS4CC (Claude Code) substrate only, NOT
     # MindStone-proper (its no-compaction rule does not apply). See docs/scri-38-cc-*.md.
-    jq --arg orch "$ORCHESTRATOR_DIR" --slurpfile frag "$TEMP_FRAGMENT" \
+    jq --arg orch "$ORCHESTRATOR_DIR" --argjson fleet "$FLEET_ON" --slurpfile frag "$TEMP_FRAGMENT" \
        -f "$ORCHESTRATOR_DIR/lib/merge-settings.jq" \
        "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp"
     mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
-    echo "  MERGED: $FRAGMENT_FILE → $SETTINGS_FILE"
+    echo "  MERGED: $FRAGMENT_FILE → $SETTINGS_FILE (Fleet status line: $([[ $FLEET_ON == true ]] && echo installed || echo not installed))"
     echo "          (backup at ${SETTINGS_FILE}.backup.*)"
   else
-    cp "$TEMP_FRAGMENT" "$SETTINGS_FILE"
+    # Through the same merge, so the status line follows the Fleet setting here too.
+    echo '{}' | jq --arg orch "$ORCHESTRATOR_DIR" --argjson fleet "$FLEET_ON" --slurpfile frag "$TEMP_FRAGMENT" \
+       -f "$ORCHESTRATOR_DIR/lib/merge-settings.jq" > "$SETTINGS_FILE"
     echo "  CREATED: $SETTINGS_FILE from fragment"
   fi
 
