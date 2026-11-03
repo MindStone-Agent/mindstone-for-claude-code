@@ -378,6 +378,8 @@ def test_redirect_is_never_followed_so_the_token_stays_home(tmp_path, synapse):
     "the password for root is hunter2",
     "set the password for admin to Hunter2",
     "token=" + "x" * 495 + " AKIAIOSFODNN7EXAMPLE",
+    "run deploy --password hunter now",   # only the framework scrubber catches these two:
+    "mysql -u root -phunterpw db",        # they prove scrub() actually runs
 ])
 def test_prose_secrets_in_task_subjects_are_redacted(tmp_path, synapse, subject):
     env = make_env(tmp_path, synapse.url)
@@ -385,7 +387,7 @@ def test_prose_secrets_in_task_subjects_are_redacted(tmp_path, synapse, subject)
     (ev,) = synapse.wait(1)
     sent = ev["payload"].get("subject", "")
     for secret in ("hunter2", "Tr0ub4dor", "4f9a8b7c6d5e", "S3cr3tP", "@ss", "sk-abc", "jane.doe", "123-45-6789",
-                   "ghp9aZ8bY7", "4821", "Sup3rS3cret", "abc123def", "s3cr3t", "Hunter2", "AKIAIOSF"):
+                   "ghp9aZ8bY7", "4821", "Sup3rS3cret", "abc123def", "s3cr3t", "Hunter2", "AKIAIOSF", "hunter"):
         assert secret not in sent, f"{secret!r} left the machine in {sent!r}"
 
 
