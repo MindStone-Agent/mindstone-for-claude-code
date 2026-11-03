@@ -764,7 +764,7 @@ def test_scrubbing_many_distinct_secrets_stays_bounded():
     assert "xyzSECRET" not in text
 
 
-SERVER_REDACT_SHA256 = "38ea1785e0a35dc690fa883a595b09838133d4979bfc22d8eb1a5bb39a18ea50"  # synapse 7640e79
+SERVER_REDACT_SHA256 = "52a00190abd249172a59ea3ff1144e1880878fc88520b82212191fd9ebfe932d"  # synapse 4117afb
 
 
 def test_the_vendored_server_redaction_is_verbatim():
