@@ -36,6 +36,7 @@ class Synapse:
         self.requests: list[dict] = []
         self.latency = 0.0        # seconds before answering
         self.statuses: list[int] = []  # scripted response codes, consumed in order; then 202
+        self.retry_after = "1"
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -47,7 +48,7 @@ class Synapse:
                                        "raw": body.decode(), "json": json.loads(body), "code": code})
                 self.send_response(code)
                 if code == 429:
-                    self.send_header("Retry-After", "1")
+                    self.send_header("Retry-After", outer.retry_after)
                 self.end_headers()
                 self.wfile.write(b'{"accepted": 1}' if code == 202 else b'{}')
 
@@ -368,8 +369,15 @@ def test_redirect_is_never_followed_so_the_token_stays_home(tmp_path, synapse):
     "pw: hunter2",
     "PIN 4821",
     "login admin / Sup3rS3cret!",
-    "Bearer abcdef",
+    "Bearer abc123def456ghi",
     "the passphrase is hunter2 horse",
+    "admin password is: hunter2",
+    "secret key is s3cr3t",
+    "the secret token is hunter2",
+    "api token secret: hunter2",
+    "the password for root is hunter2",
+    "set the password for admin to Hunter2",
+    "token=" + "x" * 495 + " AKIAIOSFODNN7EXAMPLE",
 ])
 def test_prose_secrets_in_task_subjects_are_redacted(tmp_path, synapse, subject):
     env = make_env(tmp_path, synapse.url)
@@ -377,7 +385,7 @@ def test_prose_secrets_in_task_subjects_are_redacted(tmp_path, synapse, subject)
     (ev,) = synapse.wait(1)
     sent = ev["payload"].get("subject", "")
     for secret in ("hunter2", "Tr0ub4dor", "4f9a8b7c6d5e", "S3cr3tP", "@ss", "sk-abc", "jane.doe", "123-45-6789",
-                   "ghp9aZ8bY7", "4821", "Sup3rS3cret", "abcdef"):
+                   "ghp9aZ8bY7", "4821", "Sup3rS3cret", "abc123def", "s3cr3t", "Hunter2", "AKIAIOSF"):
         assert secret not in sent, f"{secret!r} left the machine in {sent!r}"
 
 
@@ -386,6 +394,11 @@ def test_prose_secrets_in_task_subjects_are_redacted(tmp_path, synapse, subject)
     "Update password reset flow", "Add secret scanning to CI", "token redirect bug", "Meeting at 10:30",
     "Fix README.md:42 typo", "Rebase feature/fleet-reporter-v2", "Investigate test_fleet_reporter2 flake",
     "Set MAX_RETRIES = 3", "Bump Python to 3.14 in CI", "Review PR #142 and #143", "see http://host:8080/path",
+    "Fix token issue in login", "Fix key tooltip", "Rotate key asap", "Handle Bearer tokens in middleware",
+    "Refactor OAuth2Client", "Add Http2Server", "Update Base64Encoder for UTF8", "Fix src/components/NavBar2.tsx",
+    "Add S3Bucket policy", "Fix the auth token refresh in api/client.py", "Add PIN entry screen",
+    "Rotate keys after the incident", "Update CHANGELOG for 2.3.1", "Migrate users table to UUID4 ids",
+    "Handle HTTP 429 from GitHub", "Port base64 helpers",
 ])
 def test_plain_task_subject_survives(tmp_path, subject):
     sys.path.insert(0, str(ORCH))
@@ -517,6 +530,42 @@ def test_update_during_the_flushers_send_is_not_lost(tmp_path, synapse):
     assert [e["payload"]["context_pct"] for e in evs] == [10, 20, 30]
 
 
+N1_RACE = r"""
+import sys, threading, time
+sys.path.insert(0, %r)
+from fleet import statusline as sl
+from fleet import common as c
+sl.STATUS_EVERY_S = 1.0
+sent = []
+c.send_now = lambda cfg, evs: sent.append(evs[0]["payload"]["context_pct"])
+c.emit = c.send_now
+stall, go = threading.Event(), threading.Event()
+real_last_sent = c.last_sent
+def slow_last_sent(sid):
+    stall.set(); go.wait(2)
+    return real_last_sent(sid)
+def inp(p): return {"session_id": "S1", "context_window": {"used_percentage": p}}
+sl.report(inp(10))
+c.last_sent = slow_last_sent
+t = threading.Thread(target=sl.report, args=(inp(20),)); t.start()
+stall.wait(5)
+c.last_sent = real_last_sent
+sl.report(inp(25)); time.sleep(0.005); sl.report(inp(30))
+go.set(); t.join(); time.sleep(1.5)
+print(sent, c._state_file("S1", "status.pending").exists())
+"""
+
+
+def test_update_landing_while_the_flusher_decides_is_not_orphaned(tmp_path, synapse):
+    """Review round 3, N1: the flusher used to hold its claim from taking the snapshot until
+    it finished, so an update landing in that window was left pending with no flusher.
+    Deterministic: the flusher is stalled inside that window (a reproduction by the reviewer)."""
+    env = make_env(tmp_path, synapse.url)
+    r = subprocess.run([sys.executable, "-c", N1_RACE % str(ORCH)], env=env, capture_output=True, text=True,
+                       timeout=30, cwd=str(tmp_path))
+    assert r.stdout.strip() == "[10.0, 25.0, 30.0] False", r.stdout + r.stderr
+
+
 def test_429_is_retried_once_then_dropped(tmp_path, synapse):
     env = make_env(tmp_path, synapse.url)
     synapse.statuses = [429]
@@ -526,6 +575,9 @@ def test_429_is_retried_once_then_dropped(tmp_path, synapse):
     synapse.statuses = [429, 429]
     hook(env, base("UserPromptSubmit", prompt="x"))
     assert [r["code"] for r in synapse.requests][2:] == [429, 429], "one retry only, then dropped"
+    synapse.statuses, synapse.retry_after = [429], "nan"
+    hook(env, base("Stop"))
+    assert [r["code"] for r in synapse.requests][4:] == [429, 202], "a NaN Retry-After still retries"
 
 
 def test_report_hook_is_silent_on_a_python_without_tomllib(tmp_path, synapse):
@@ -553,6 +605,7 @@ def test_fragment_notification_matcher_matches_the_needs_input_kinds():
     ('[fleet]\nenabled = true\nmachine = "box 💻"\n', {"enabled": True, "machine": "box 💻"}),
     ('[fleet]\nenabled = false\nmachine = "a \\"q\\" \\\\ b"\n', {"enabled": False, "machine": 'a "q" \\ b'}),
     ('[fleet]\nenabled = "yes"\nmachine = 7\n', None),
+    ('[fleet]\nenabled = true\nmachine = "a\\u007fb"\n', {"enabled": True, "machine": "a\x7fb"}),
     ('', None),
 ])
 def test_setup_keeps_the_fleet_table(tmp_path, fleet_toml, expected):

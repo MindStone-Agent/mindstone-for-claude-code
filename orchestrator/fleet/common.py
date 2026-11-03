@@ -206,12 +206,14 @@ def prune_state(max_age_s: float = STATE_MAX_AGE_S) -> None:
 # A task subject is the one model-written string the reporter sends, and the framework's
 # scrubber is tuned for transcripts, where a miss stays local. These run after it, on
 # subjects only. They are heuristics: they catch the common shapes (a secret word followed by
-# its value, credentials, keys, emails) and leave ordinary words, times, file:line references
-# and branch names alone. A secret written as plain prose can still get through.
+# its value, credentials, keys, emails) and leave most ordinary words, times, file:line
+# references, branch names and identifiers alone. They over-redact a little by design (the
+# word after "token to", "password as") and a secret written as plain prose can still get
+# through.
 _SECRET_WORD = re.compile(
     r"(?i)\b(pass(?:word|wd|phrase)?|pw|pwd|pin|secret|token|api[-_ ]?key|key|credentials?|creds|bearer)\b"
-    r"(\s*(?:is|was|to|as|=|:)\s*|\s+)(\S+)")
-_CONNECTOR = re.compile(r"(?i)\s*(?:is|was|to|as|=|:)\s*$")
+    r"(\s+for\s+\S+\s+(?:is|was|to)\b\s*[:=]?\s*|\s*(?:(?:is|was|to|as)\b\s*[:=]?|[:=])\s*|\s+)(\S+)")
+_CONNECTOR = re.compile(r"(?i)(?:\s+for\s+\S+\s+(?:is|was|to)\s*[:=]?|\s*(?:(?:is|was|to|as)\s*[:=]?|[:=]))\s*$")
 _SECRETISH = re.compile(r"[0-9!@#$%^&*+=?~]")
 _SUBJECT_RULES = [
     re.compile(r"\b[A-Z][A-Z0-9_]{2,}=\S+"),                                   # ENV_VAR=value
@@ -220,25 +222,28 @@ _SUBJECT_RULES = [
     re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),                                       # SSN shape
     re.compile(r"\b[0-9a-fA-F]{16,}\b"),                                       # long hex
 ]
-_WORD = re.compile(r"[A-Za-z0-9_+/=-]{8,}")
+_WORD = re.compile(r"[A-Za-z0-9_+=-]{8,}")  # no "/": a path's parts are judged one by one
 
 
 def _keyish(w: str) -> bool:
     """A word that looks like a credential rather than an identifier: 16+ chars with three
-    or more digits, or 8+ chars mixing upper case, lower case and digits."""
+    or more digits, or upper, lower and digits mixed either at 20+ chars or with digits inside
+    letters (Sup3rS3cret, Tr0ub4dor). OAuth2Client, Base64Encoder and S3Bucket stay."""
     digits = sum(ch.isdigit() for ch in w)
     if len(w) >= 16 and digits >= 3:
         return True
-    return digits > 0 and any(ch.islower() for ch in w) and any(ch.isupper() for ch in w)
+    mixed = digits > 0 and any(ch.islower() for ch in w) and any(ch.isupper() for ch in w)
+    return mixed and (len(w) >= 20 or re.search(r"[a-z][0-9]+[a-z]|[0-9][a-z]+[0-9]", w) is not None)
 
 
 def _strict_subject(v: str) -> str:
-    def word(m: re.Match) -> str:
-        value = m.group(3)
-        if m.group(1).lower() == "bearer" or _CONNECTOR.match(m.group(2)) or _SECRETISH.search(value):
-            return f"{m.group(1)}{m.group(2)}[redacted]"
-        return m.group(0)
-    v = _SECRET_WORD.sub(word, v)
+    pos = 0  # a word left as it is must not swallow the secret word after it ("secret key is x")
+    while (m := _SECRET_WORD.search(v, pos)):
+        if _CONNECTOR.match(m.group(2)) or _SECRETISH.search(m.group(3)):
+            v = v[:m.start(3)] + "[redacted]" + v[m.end(3):]
+            pos = m.start(3) + len("[redacted]")
+        else:
+            pos = m.end(1)
     for rule in _SUBJECT_RULES:
         v = rule.sub("[redacted]", v)
     return _WORD.sub(lambda m: "[redacted]" if _keyish(m.group(0)) else m.group(0), v)
@@ -254,7 +259,8 @@ def scrub_subject(v: object, scrubber_dir: Path | None = None) -> str | None:
     unscrubbed."""
     if not isinstance(v, str) or not v:
         return None
-    v = v[:SUBJECT_SCAN_MAX]
+    if len(v) > SUBJECT_SCAN_MAX:  # drop the word the cut split, so no fragment of it survives
+        v = v[:SUBJECT_SCAN_MAX].rsplit(None, 1)[0]
     try:
         sys.path.insert(0, str(scrubber_dir or ORCHESTRATOR_DIR / "hooks"))
         from scrubber import scrub  # type: ignore
@@ -289,6 +295,8 @@ def _post_once(cfg: FleetConfig, body: bytes) -> tuple[int | None, float | None]
         try:
             wait = float(e.headers.get("Retry-After", "1"))
         except (TypeError, ValueError):
+            wait = 1.0
+        if wait != wait:  # NaN
             wait = 1.0
         return e.code, wait
     except Exception:

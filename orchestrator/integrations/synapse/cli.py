@@ -225,7 +225,8 @@ def _kept_fleet_lines(path: Path) -> list[str]:
         lines.append(f"enabled = {'true' if fleet['enabled'] else 'false'}")
     if isinstance(fleet.get("machine"), str):
         # ensure_ascii=False: an ASCII-escaped emoji is a surrogate pair, which TOML rejects.
-        lines.append(f"machine = {json.dumps(fleet['machine'], ensure_ascii=False)}")
+        # TOML forbids raw U+007F, which ensure_ascii=False would otherwise write out.
+        lines.append(f"machine = {json.dumps(fleet['machine'], ensure_ascii=False).replace(chr(0x7f), chr(92) + 'u007f')}")
     return lines + [""] if len(lines) > 1 else []
 
 

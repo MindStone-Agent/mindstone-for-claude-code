@@ -161,32 +161,35 @@ def report(inp: dict) -> None:
 
     def flush() -> None:
         """Wait out the window, then send the newest pending snapshot. The claim is released
-        BEFORE the send, so an update arriving during the POST gets a flusher of its own. If a
-        direct send opened a new window first, the snapshot goes back (unless a newer one is
-        already waiting, or it is older than what was sent) and the wait repeats."""
-        try:
-            for _ in range(6):
-                time.sleep(c.rate_remaining(sid, "status", STATUS_EVERY_S) + 0.05)
-                try:
-                    ev = json.loads(pending.read_text())
-                    pending.unlink()
-                except (OSError, ValueError):
-                    return  # nothing waiting: a direct send already carried it
-                if ev.get("ts", "") <= c.last_sent(sid):
-                    return  # something newer already went out
-                if c.rate_ok(sid, "status", STATUS_EVERY_S):
-                    release()
-                    c.mark_sent(sid, ev.get("ts", ""))
-                    c.send_now(cfg, [ev])
-                    return
-                try:
-                    fd = os.open(pending, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                    os.write(fd, json.dumps(ev).encode())
-                    os.close(fd)
-                except OSError:
-                    pass  # a newer snapshot is already pending; send that one instead
-        finally:
-            release()
+        before the snapshot is taken, so any update that lands after that point gets a flusher
+        of its own. If a direct send opened a new window first, the snapshot goes back (unless a
+        newer one is waiting, or it is older than what was sent) under a re-taken claim, and the
+        wait repeats."""
+        for _ in range(6):
+            time.sleep(c.rate_remaining(sid, "status", STATUS_EVERY_S) + 0.05)
+            release()  # from here on, an update that lands starts a flusher of its own
+            try:
+                ev = json.loads(pending.read_text())
+                pending.unlink()
+            except (OSError, ValueError):
+                return  # nothing waiting: a direct send already carried it
+            if ev.get("ts", "") <= c.last_sent(sid):
+                return  # something newer already went out
+            if c.rate_ok(sid, "status", STATUS_EVERY_S):
+                c.mark_sent(sid, ev.get("ts", ""))
+                c.send_now(cfg, [ev])
+                return
+            try:  # wait again, unless a newer update already has a flusher of its own
+                os.close(os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            except OSError:
+                return
+            try:
+                fd = os.open(pending, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                os.write(fd, json.dumps(ev).encode())
+                os.close(fd)
+            except OSError:
+                pass  # a newer snapshot is already pending; send that one instead
+        release()
     c.detach(flush)
 
 
