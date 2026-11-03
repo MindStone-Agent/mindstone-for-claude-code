@@ -9,6 +9,7 @@ PostToolUseFailure inside and outside a subagent, SubagentStart / Stop, transcri
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -219,15 +220,20 @@ def test_subagent_started_names_its_agent_call(tmp_path, synapse):
     assert tool_started["payload"]["input_preview"] == "general-purpose check files\n\n" + PROMPT
 
 
-def test_pairing_takes_the_oldest_call_of_the_same_type(tmp_path, synapse):
+def test_pairing_happens_only_when_one_call_of_the_type_is_pending(tmp_path, synapse):
+    """Round 2, S2-1/S2-2: with two calls of a type pending (a denied one, or parallel calls
+    whose hooks race), "the oldest" is a guess the server can't undo. No parent instead."""
     env = act_env(tmp_path, synapse.url)
     for tid, typ in (("c1", "Explore"), ("c2", "general-purpose"), ("c3", "Explore")):
         hook(env, base("PreToolUse", tool_name="Agent", tool_use_id=tid, tool_input={"subagent_type": typ, "description": tid}))
-    for aid, typ in (("g1", "general-purpose"), ("e1", "Explore"), ("e2", "Explore"), ("x1", "Explore")):
+    for aid, typ in (("g1", "general-purpose"), ("e1", "Explore")):
         hook(env, base("SubagentStart", agent_id=aid, agent_type=typ))
-    starts = [e for e in synapse.wait(7) if e["type"] == "subagent.started"]
+    hook(env, base("PostToolUse", tool_name="Agent", tool_use_id="c1", tool_input={},
+                   tool_response={"status": "completed", "content": []}))
+    hook(env, base("SubagentStart", agent_id="e2", agent_type="Explore"))
+    starts = [e for e in synapse.wait(9) if e["type"] == "subagent.started"]
     assert [(e["agent_id"], e["payload"].get("parent_tool_use_id")) for e in starts] == [
-        ("g1", "c2"), ("e1", "c1"), ("e2", "c3"), ("x1", None)]
+        ("g1", "c2"), ("e1", None), ("e2", "c3")]
 
 
 # --- replies from the transcript ---------------------------------------------------------------
@@ -455,17 +461,55 @@ def test_non_ascii_output_fits_the_server(tmp_path, synapse, ch):
     assert len(json.dumps(ev["payload"]["output_preview"], ensure_ascii=False).encode()) - 2 <= A.OUTPUT_MAX
 
 
-def test_an_agent_call_that_never_starts_does_not_shift_later_pairings(tmp_path, synapse):
-    """Round 1, finding 6: a denied or failed Agent call stayed at the head of the queue and
-    every later subagent of its type got the previous call's id."""
+def test_a_denied_agent_call_never_lends_its_id_to_the_next_subagent(tmp_path, synapse):
+    """Round 1 #6 and round 2 S2-1: Claude Code sends no PostToolUse for a denied call. The
+    reviewer's case: A denied, B runs, b starts. b must not get A's id."""
     env = act_env(tmp_path, synapse.url)
-    for tid in ("A", "B", "C"):
-        hook(env, base("PreToolUse", tool_name="Agent", tool_use_id=tid, tool_input={"subagent_type": "Explore", "description": tid}))
-    hook(env, base("PostToolUseFailure", tool_name="Agent", tool_use_id="A", tool_input={}, error="denied"))
-    hook(env, base("SubagentStart", agent_id="b1", agent_type="Explore"))
-    hook(env, base("SubagentStart", agent_id="c1", agent_type="Explore"))
-    starts = [e for e in synapse.wait(8) if e["type"] == "subagent.started"]
-    assert [(e["agent_id"], e["payload"].get("parent_tool_use_id")) for e in starts] == [("b1", "B"), ("c1", "C")]
+    tp = transcript(tmp_path / "proj" / f"{SID}.jsonl", [])
+    hook(env, base("SessionStart", source="startup", transcript_path=str(tp)))
+    hook(env, base("PreToolUse", tool_name="Agent", tool_use_id="toolu_A_denied", transcript_path=str(tp),
+                   tool_input={"subagent_type": "Explore", "description": "first try"}))
+    hook(env, base("PreToolUse", tool_name="Agent", tool_use_id="toolu_B_runs", transcript_path=str(tp),
+                   tool_input={"subagent_type": "Explore", "description": "second try"}))
+    hook(env, base("SubagentStart", agent_id="agent_b", agent_type="Explore"))
+    starts = [e for e in synapse.wait(4) if e["type"] == "subagent.started"]
+    assert [e["payload"].get("parent_tool_use_id") for e in starts] == [None]
+
+
+DENIAL = {"type": "user", "uuid": "u9", "message": {"role": "user", "content": [
+    {"type": "tool_result", "tool_use_id": "toolu_D", "is_error": True,
+     "content": "The user doesn't want to proceed. DENIAL_FEEDBACK_CANARY"}]}}
+
+
+def test_a_denied_call_is_closed_from_the_transcript_without_its_text(tmp_path, synapse):
+    """Round 2, S2-3: tool.started went out, no PostToolUse ever came, and the call showed as
+    running for ever. The next tail closes it; the user's denial text is not sent."""
+    env = act_env(tmp_path, synapse.url)
+    tp = transcript(tmp_path / "proj" / f"{SID}.jsonl", [])
+    hook(env, base("SessionStart", source="startup", transcript_path=str(tp)))
+    hook(env, base("PreToolUse", tool_name="Bash", tool_use_id="toolu_D", tool_input={"command": "rm -rf x"},
+                   transcript_path=str(tp)))
+    transcript(tp, [DENIAL])
+    hook(env, base("PreToolUse", tool_name="Read", tool_use_id="toolu_E", tool_input={"file_path": "/a"},
+                   transcript_path=str(tp)))
+    hook(env, base("Stop", transcript_path=str(tp)))  # a second tail: closed once only
+    done = [e["payload"] for e in synapse.wait(6) if e["type"] == "tool.finished"]
+    assert done == [{"tool_use_id": "toolu_D", "tool_name": "Bash", "ok": False, "error": "not run (denied or blocked)"}]
+    assert "DENIAL_FEEDBACK_CANARY" not in json.dumps(synapse.requests)
+
+
+def test_an_error_result_for_a_call_already_finished_is_not_closed_twice(tmp_path, synapse):
+    env = act_env(tmp_path, synapse.url)
+    tp = transcript(tmp_path / "proj" / f"{SID}.jsonl", [])
+    hook(env, base("SessionStart", source="startup", transcript_path=str(tp)))
+    hook(env, base("PreToolUse", tool_name="Bash", tool_use_id="toolu_D", tool_input={"command": "false"},
+                   transcript_path=str(tp)))
+    hook(env, base("PostToolUseFailure", tool_name="Bash", tool_use_id="toolu_D", tool_input={}, error="exit 1",
+                   transcript_path=str(tp)))
+    transcript(tp, [DENIAL])
+    hook(env, base("Stop", transcript_path=str(tp)))
+    done = [e["payload"] for e in synapse.wait(5) if e["type"] == "tool.finished"]
+    assert [d["error"] for d in done] == ["exit 1"]
 
 
 def test_an_untyped_agent_call_is_general_purpose_not_a_wildcard(tmp_path, synapse):
@@ -688,8 +732,8 @@ def test_an_owed_reply_is_skipped_once_only(tmp_path, synapse):
 
 # --- shared fixtures with the server (synapse tests/fixtures/fleet_secrets.json) ---------------
 # Stored base64-encoded so the repo's privacy scan doesn't flag the fake secrets; byte-identical
-# to synapse's copy at 0dd221c (sha256 below). Refresh both together.
-FLEET_SECRETS_SHA256 = "1adeaff457a53756422fd8319e2502175af62ed28282845e5655105e5a9bd9de"
+# to synapse's copy at 7640e79 (sha256 below). Refresh both together.
+FLEET_SECRETS_SHA256 = "88fae2428cc9916f69187aadc334c62ea349b371cb82a218a9bc0a956ffccd3b"
 
 
 def _shared_fixtures() -> dict:
@@ -718,3 +762,236 @@ def test_scrubbing_many_distinct_secrets_stays_bounded():
     text, _ = preview(lines, A.OUTPUT_MAX)
     assert time.perf_counter() - t < 1.0
     assert "xyzSECRET" not in text
+
+
+SERVER_REDACT_SHA256 = "38ea1785e0a35dc690fa883a595b09838133d4979bfc22d8eb1a5bb39a18ea50"  # synapse 7640e79
+
+
+def test_the_vendored_server_redaction_is_verbatim():
+    """fleet_redact_vendor.py is synapse's api/fleet_redact.py with only its scrubber import
+    changed; undoing that one change must give the pinned file byte for byte."""
+    import hashlib
+    text = (ORCH / "fleet" / "fleet_redact_vendor.py").read_text()
+    ours = ("import sys as _sys  # vendored change: the scrubber is hooks/scrubber.py here\n"
+            "from pathlib import Path as _Path\n"
+            "_sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / \"hooks\"))\n"
+            "from scrubber import _propagatable, scrub_collect  # noqa: E402\n")
+    assert text.count(ours) == 1
+    original = text.replace(ours, "from api.vendor.scrubber import _propagatable, scrub_collect\n")
+    assert hashlib.sha256(original.encode()).hexdigest() == SERVER_REDACT_SHA256
+
+
+# --- activity review round 2 ------------------------------------------------------------------
+
+_SINGLE_LINE = [c for c in _shared_fixtures()["secret"] if "\n" not in c["input"]]
+
+
+@pytest.mark.parametrize("case", _SINGLE_LINE, ids=lambda c: c["name"])
+def test_a_secret_across_the_scrub_chunk_cut_never_survives(case):
+    """Round 2, S1-1: with no whitespace near it, a 1 KB chunk cut lands inside the secret and
+    the scrubber sees two harmless halves. Every single-line fixture, across offset 1024."""
+    s = case["input"]
+    base, _ = preview("," + s + ",", A.OUTPUT_MAX)  # no cut: the rules themselves catch it
+    assert case["leak"] not in base
+    for k in (1, len(s) // 2, len(s) - 1):  # the cut falls k characters into the secret
+        raw = "," * (1024 - k) + s + "," * 1200
+        text, _ = preview(raw, A.OUTPUT_MAX)
+        assert case["leak"] not in text, (k, case["name"])
+
+
+@pytest.mark.parametrize("case", _shared_fixtures()["secret"], ids=lambda c: c["name"])
+def test_a_secret_inside_compact_json_never_survives(case):
+    """Round 2, S1-2: an unknown tool's JSON was dumped, then redacted, so newlines became
+    literal \\n and quotes \\", which line-anchored and quoted-key rules can't see."""
+    for text in (A.output_text("mcp__x__y", {"result": case["input"]}),
+                 A.input_text("mcp__x__y", {"args": {"body": case["input"]}})):
+        out, _ = preview(text, A.OUTPUT_MAX)
+        assert case["leak"] not in out, case["name"]
+
+
+
+@pytest.mark.parametrize("raw,secret", [
+    ('{"headers": {"Authorization": "Basic YWRtaW46aHVudGVyMg==", "Cookie": "session=s3ss10nV4lue"}}', "YWRtaW46"),
+    ('{"headers": {"Authorization": "Basic YWRtaW46aHVudGVyMg==", "Cookie": "session=s3ss10nV4lue"}}', "s3ss10nV4lue"),
+    ("{'Authorization': 'Basic YWRtaW46aHVudGVyMg=='}", "YWRtaW46"),
+    ('"Authorization":"token abcdef123456"', "abcdef123456"),
+    ('"Proxy-Authorization": "Basic cHJveHk6cGFzcw=="', "cHJveHk6"),
+    ('"Set-Cookie": "sid=xyz987abc"', "xyz987abc"),
+])
+def test_credential_headers_as_dict_keys_are_redacted(raw, secret):
+    """Round 2, S2-5: header rules need `Name:` with nothing in between, so the dict and JSON
+    forms of the same headers went out whole."""
+    assert secret not in clean(raw)
+    assert secret not in (preview(A.output_text("mcp__http__get", json.loads(raw) if raw.startswith("{\"") else raw), A.OUTPUT_MAX)[0] or "")
+
+
+# --- activity review round 3 ------------------------------------------------------------------
+
+@pytest.mark.parametrize("password", ["correct.horse.battery.staple", "s3cr3t!P@ssw0rd!2024", "Xk2$mQ9#vLpq7Rz8wT"])
+@pytest.mark.parametrize("key", ["DB_PASSWORD", "password"])
+def test_a_punctuated_password_across_the_chunk_cut_leaves_no_fragment(password, key):
+    """Round 3, finding 1: the chunk scrubber redacted the head of the value in one chunk; the
+    rest, starting with punctuation, sat after the marker in the next chunk, where every rule
+    skips text that follows [REDACTED. Docker-env shaped output, every cut alignment."""
+    entries = "".join(f',"LOG_{i}=info"' for i in range(80))
+    for pad in range(900, 1060):
+        raw = '["PATH=/usr/bin","NOTE=' + "x" * pad + f'","{key}={password}"' + entries + "]"
+        text, _ = preview(A.output_text("Bash", {"stdout": raw, "stderr": ""}), A.OUTPUT_MAX)
+        for i in range(len(password) - 3):
+            assert password[i:i + 4] not in text, (pad, password[i:i + 4])
+
+
+@pytest.mark.parametrize("eol", ["\r\n", "\r"], ids=["crlf", "cr"])
+@pytest.mark.parametrize("case", _shared_fixtures()["secret"], ids=lambda c: c["name"])
+def test_a_secret_in_crlf_text_never_survives(case, eol):
+    """Round 3, finding 2: the line-anchored rules end in $, which doesn't match before \r, so
+    10 fixtures leaked once Windows line endings were used (7 with lone CRs, round 4 N1)."""
+    out, _ = preview(case["input"].replace("\n", eol) + eol, A.OUTPUT_MAX)
+    assert case["leak"] not in out
+
+
+
+def _blocked(tool_use_id: str) -> dict:
+    return {"type": "user", "uuid": "u-" + tool_use_id, "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": tool_use_id, "is_error": True, "content": "PreToolUse:Agent hook error"}]}}
+
+
+def test_the_retry_after_a_blocked_agent_call_keeps_its_parent(tmp_path, synapse):
+    """Round 3, finding 4: A is blocked, the model retries at once as B, and B's subagent
+    starts before any tail has forgotten A. A's error result is already in the transcript."""
+    env = act_env(tmp_path, synapse.url)
+    tp = transcript(tmp_path / "proj" / f"{SID}.jsonl", [])
+    hook(env, base("SessionStart", source="startup", transcript_path=str(tp)))
+    hook(env, base("PreToolUse", tool_name="Agent", tool_use_id="toolu_A", transcript_path=str(tp),
+                   tool_input={"subagent_type": "Explore", "description": "first try"}))
+    hook(env, base("PreToolUse", tool_name="Agent", tool_use_id="toolu_B", transcript_path=str(tp),
+                   tool_input={"subagent_type": "Explore", "description": "second try"}))
+    # A's error result, written before B existed in reality, is seen here only after B's own
+    # tail ran: in production that tail runs detached and SubagentStart can beat it.
+    transcript(tp, [_blocked("toolu_A")])
+    hook(env, base("SubagentStart", agent_id="agent_b", agent_type="Explore", transcript_path=str(tp)))
+    (start,) = [e for e in synapse.wait(6) if e["type"] == "subagent.started"]
+    assert (start["payload"].get("parent_tool_use_id"), start["payload"].get("description")) == ("toolu_B", "second try")
+
+
+def test_a_failure_that_lands_before_its_start_is_not_closed_twice(tmp_path, synapse):
+    """Round 3, finding 3: the hooks are async, so PostToolUseFailure can run before the
+    PreToolUse that opens the call; the later tail then closed it again with a made-up label."""
+    env = act_env(tmp_path, synapse.url)
+    tp = transcript(tmp_path / "proj" / f"{SID}.jsonl", [])
+    hook(env, base("SessionStart", source="startup", transcript_path=str(tp)))
+    hook(env, base("PostToolUseFailure", tool_name="mcp__x__y", tool_use_id="toolu_D", tool_input={},
+                   error="MCP error -32000: boom", transcript_path=str(tp)))
+    hook(env, base("PreToolUse", tool_name="mcp__x__y", tool_use_id="toolu_D", tool_input={}, transcript_path=str(tp)))
+    transcript(tp, [_blocked("toolu_D")])
+    hook(env, base("Stop", transcript_path=str(tp)))
+    done = [e["payload"] for e in synapse.wait(5) if e["type"] == "tool.finished"]
+    assert [d["error"] for d in done] == ["MCP error -32000: boom"]
+
+
+def test_only_a_user_lines_error_result_closes_a_call(tmp_path, synapse):
+    """api-request-blob lines also carry "is_error":true; only the user line's result counts."""
+    env = act_env(tmp_path, synapse.url)
+    tp = transcript(tmp_path / "proj" / f"{SID}.jsonl", [])
+    hook(env, base("SessionStart", source="startup", transcript_path=str(tp)))
+    hook(env, base("PreToolUse", tool_name="Bash", tool_use_id="toolu_Q", tool_input={"command": "x"}, transcript_path=str(tp)))
+    blob = dict(_blocked("toolu_Q"), type="api-request-blob")
+    transcript(tp, [blob])
+    hook(env, base("Stop", transcript_path=str(tp)))
+    assert [e for e in synapse.wait(3) if e["type"] == "tool.finished"] == []
+
+
+
+# --- activity review round 4 ------------------------------------------------------------------
+
+def _repeat_value(case):
+    """The secret as a later bare repeat would carry it (echo $TOKEN, a second .env line): the
+    whole token around the fixture's leak, a flag's value without the flag, a multi-word value
+    as the rest of its line. The same helper as synapse's tests/test_fleet_redact.py."""
+    inp, leak = case["input"], case["leak"]
+    if " " in leak:
+        line = next(x for x in inp.split("\n") if leak in x)
+        return line.split(":", 1)[-1].split("=", 1)[-1].strip()
+    delim = " \t\n\"',{}()[]<>\\|;"
+    i = inp.find(leak)
+    s, e = i, i + len(leak)
+    while s > 0 and inp[s - 1] not in delim:
+        s -= 1
+    while e < len(inp) and inp[e] not in delim:
+        e += 1
+    value = inp[s:e]
+    return value[2:] if value.startswith("-p") and len(value) > 8 else value
+
+
+@pytest.mark.parametrize("case", _shared_fixtures()["secret"], ids=lambda c: c["name"])
+def test_a_secret_repeated_bare_later_is_redacted_too(case):
+    """Round 4, S1-1, and Hearth's blocker on both suites: a value found in its keyed form must
+    also go where it is repeated bare later (echo $TOKEN, a second .env line). Values under 6
+    characters or plain lowercase words aren't propagated (the scrubber's own rule), so those
+    fixtures are skipped, as on the server."""
+    sys.path.insert(0, str(ORCH / "hooks"))
+    from scrubber import _propagatable
+    value = _repeat_value(case)
+    if len(value) < 6 or not _propagatable(value):
+        pytest.skip(f"not propagated by design: {value!r}")
+    out, _ = preview(case["input"] + "\nlater: " + value, A.OUTPUT_MAX)
+    assert case["leak"] not in out, value
+
+
+@pytest.mark.parametrize("password", ["s3cr3t!P@ssw0rd!2024", "correct.horse.battery.staple", "Xk2$mQ9#vLpq7Rz8wT",
+                                      "Tr0ub4dorXk2mQ9vLpq.tail!2024", "hunter2hunter2hunter2#Zq8",
+                                      "Tr0ub4dor[Xk2mQ9vLpq7", "hunter2hunter2[hunter2#Zq8"])
+@pytest.mark.parametrize("key", ["passwd:", "password:", "Password:", "pwd:", "passphrase:", "DB_PASSWORD=",
+                                 "PGPASSWORD=", "password=", "db_password="])
+@pytest.mark.parametrize("pad", ["Q", "Q,", "a;"])
+def test_a_split_value_leaves_no_fragment_for_any_key_form(password, key, pad):
+    """Round 4, S1-2: in whitespace-free text the 1 KB cut lands inside the value, the chunk
+    scrubber redacts its head, and every later rule skips what follows the marker."""
+    for p in range(980, 1031):
+        raw = (pad * 1100)[:p] + "," + key + password + "," + (pad * 1500)
+        text, _ = preview(raw, A.OUTPUT_MAX)
+        for i in range(len(password) - 3):
+            assert password[i:i + 4] not in text, (p, key, password[i:i + 4])
+
+
+
+# --- activity review round 5 ------------------------------------------------------------------
+
+def _fragments(secret: str, n: int = 5) -> list[str]:
+    return [secret[i:i + n] for i in range(len(secret) - n + 1)]
+
+
+@pytest.mark.parametrize("case", [c for c in _SINGLE_LINE], ids=lambda c: c["name"])
+def test_no_fragment_of_a_one_line_fixture_survives_a_seam(case):
+    """Round 5, S1-2: when a typed rule (the GitHub token rule, a JWT rule) took the head of a
+    value split by the 1 KB cut, the tail stayed glued after its typed marker. Check every
+    5-character fragment of the value, not only the fixture's leak string."""
+    value = _repeat_value(case)
+    # the part of the token that holds the secret, not its key (db_password=, postgres://user:)
+    secret = next((part for part in re.split(r"[=:]", value) if case["leak"] in part), value)
+    if len(secret) < 12:
+        pytest.skip("too short to leave a 5-character fragment that means anything")
+    for k in range(1, len(value)):
+        raw = "," * (1024 - k) + case["input"] + "," * 1200
+        text, _ = preview(raw, A.OUTPUT_MAX)
+        for f in _fragments(secret):
+            # token-like fragments only: a digit, or mixed case. Plain words (a command name, a
+            # host) and a vendor's fixed prefix (ATATT) are not secret material.
+            tokenish = any(ch.isdigit() for ch in f) or (f.lower() != f and f.upper() != f)
+            if f.isalnum() and tokenish and f not in case["input"].replace(secret, ""):
+                assert f not in text, (k, f)
+
+
+def test_two_markers_back_to_back_both_lose_their_tails():
+    """Round 5, S1-1: the server can emit [REDACTED-SECRET][REDACTED-SECRET].tail; the glued
+    rule ate the second marker and its tail survived."""
+    out = A.preview("password=[REDACTED-SECRET][REDACTED-SECRET].tail!2024, next", A.OUTPUT_MAX)[0]
+    assert "tail" not in out and "2024" not in out and out.endswith(", next")
+
+
+def test_a_glued_tail_longer_than_256_characters_goes_whole():
+    """Round 5, S2-1: a cap of 256 cut the run mid-way and left the rest, sometimes a whole
+    credential further along the same run."""
+    raw = "git clone https://deploy:Zq8vX2mN4pL7@git.example.com/a/b/" + "x" * 225 + "?MY_CREDENTIAL=SuperSecretValue123 done"
+    out, _ = preview(raw, A.OUTPUT_MAX)
+    assert "SuperSecretValue123" not in out and "Zq8vX2mN4pL7" not in out

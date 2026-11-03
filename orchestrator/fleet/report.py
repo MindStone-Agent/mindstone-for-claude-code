@@ -118,10 +118,12 @@ def _activity(cfg, inp: dict, session: str, mapped) -> list[dict] | None:
         payload = a.tool_started(inp)
         if payload is None:
             return []
+        a.open_call(session, payload["tool_use_id"], payload["tool_name"])
         if payload["tool_name"] in a.AGENT_TOOLS:
             a.remember_agent_call(session, inp)
         return [_event(cfg, "tool.started", session, payload, agent_id)]
     if ev in ("PostToolUse", "PostToolUseFailure"):
+        a.close_call(session, inp.get("tool_use_id"))
         if inp.get("tool_name") in a.AGENT_TOOLS:
             resp = inp.get("tool_response")
             # A background agent's PostToolUse comes at launch, maybe before its SubagentStart:
@@ -135,7 +137,8 @@ def _activity(cfg, inp: dict, session: str, mapped) -> list[dict] | None:
         return [_event(cfg, "tool.finished", session, payload, agent_id)] if payload else []
     if ev == "SubagentStart" and mapped is not None:
         kind, payload, _ = mapped
-        parent, description = a.pair_subagent(session, payload.get("agent_type"))
+        parent, description = a.pair_subagent(session, payload.get("agent_type"),
+                                              a.recent_errored(inp.get("transcript_path")))
         text, _ = a.preview(description, a.DESCRIPTION_MAX)
         payload = dict(payload, parent_tool_use_id=parent, description=text)
         return [_event(cfg, kind, session, payload, agent_id)]
@@ -212,8 +215,16 @@ def main() -> int:
 
     def more() -> list[dict]:
         last = inp.get("last_assistant_message") if inp.get("hook_event_name") in ("Stop", "SubagentStop") else None
-        out = []
-        for m in a.tail_messages(session, path, tail_agent, start_at_end=at_end, last_message=last):
+        out, errored = [], []
+        msgs = a.tail_messages(session, path, tail_agent, start_at_end=at_end, last_message=last, errored=errored)
+        for tool_use_id in errored:  # denied or blocked: no PostToolUse will ever come
+            name = a.close_call(session, tool_use_id)
+            if name:
+                a.forget_agent_call(session, tool_use_id)
+                out.append(_event(cfg, "tool.finished", session, {"tool_use_id": tool_use_id, "tool_name": name,
+                                                                  "ok": False, "error": "not run (denied or blocked)"},
+                                  tail_agent))
+        for m in msgs:
             ts = m.pop("ts", None)
             ev = _event(cfg, "message", session, m, tail_agent)
             if ts:

@@ -42,7 +42,7 @@ DESCRIPTION_MAX = 240
 TAIL_MAX_BYTES = 8 * 1024 * 1024   # the most new transcript read per tail; older bytes are skipped
 AGENT_TOOLS = ("Agent", "Task")
 WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
-PAIR_TTL_S = 120   # an Agent call not started within this (denied, failed, blocked) stops pairing
+PAIR_TTL_S = 600   # an Agent call not started within this stops pairing (PreToolUse comes before the permission prompt)
 DEFAULT_AGENT_TYPE = "general-purpose"  # what Claude Code runs when subagent_type is left out
 _NO_DROP: frozenset = frozenset()
 _ANSWERS = frozenset({"answers", "annotations"})  # AskUserQuestion: the user's own words
@@ -68,10 +68,41 @@ def _without(v: object, drop: frozenset, depth: int = 0) -> object:
     return v
 
 
+LEAF_CHARS = 256 * 1024  # string-leaf text redacted per dump; past it, leaves are cut
+LEAF_MAX = 2000          # string leaves redacted per dump; past it, they are left out
+
+
+def _clean_leaves(v: object, drop: frozenset) -> object:
+    """Redact every string leaf as it is, real newlines and quotes included, before the JSON
+    escaping that line-anchored and quoted-key rules can't see through (activity review
+    round 2, S1-2). The dumped JSON is then redacted again as a whole by preview(), which
+    catches "key": "value" pairs no single leaf shows."""
+    from fleet.redact import _drop_split_head, clean
+    left = {"chars": LEAF_CHARS, "leaves": LEAF_MAX}
+
+    def walk(x: object, depth: int) -> object:
+        if depth > 32:
+            return None
+        if isinstance(x, dict):
+            return {k: walk(y, depth + 1) for k, y in x.items() if k not in drop}
+        if isinstance(x, list):
+            return [walk(y, depth + 1) for y in x]
+        if isinstance(x, str):
+            if left["leaves"] <= 0 or left["chars"] <= 0:
+                return "[not shown]"
+            left["leaves"] -= 1
+            if len(x) > left["chars"]:
+                x = _drop_split_head(x[: left["chars"]]) + " … [cut]"
+            left["chars"] -= len(x)
+            return clean(x)
+        return x
+    return walk(v, 0)
+
+
 def _dump(v: object, drop: frozenset) -> str | None:
     try:
-        return json.dumps(_without(v, drop), ensure_ascii=False, separators=(", ", ": "))
-    except (TypeError, ValueError):
+        return json.dumps(_clean_leaves(v, drop), ensure_ascii=False, separators=(", ", ": "))
+    except Exception:  # no scrubber, or unserialisable: send nothing rather than unredacted
         return None
 
 
@@ -268,19 +299,50 @@ def remember_agent_call(session: str, inp: dict) -> None:
         os.close(fd)
 
 
-def pair_subagent(session: str, agent_type: str | None) -> tuple[str | None, str | None]:
-    """(parent_tool_use_id, raw description) for a starting subagent, or (None, None)."""
+def recent_errored(transcript_path: object, window: int = 256 * 1024) -> set[str]:
+    """tool_use_ids with an error tool_result in the last `window` bytes of a transcript. A
+    blocked or denied Agent call's result is written before the model can retry it, so by the
+    time the retry's subagent starts, the failed call is known (activity review round 3)."""
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return set()
+    try:
+        with open(transcript_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - window))
+            chunk = f.read(window)
+    except OSError:
+        return set()
+    out: set[str] = set()
+    for line in chunk.splitlines():
+        if b'"is_error":true' not in line.replace(b" ", b""):
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("type") == "user":
+            out.update(_errored_ids(d))
+    return out
+
+
+def pair_subagent(session: str, agent_type: str | None, failed: set[str] | frozenset = frozenset()
+                  ) -> tuple[str | None, str | None]:
+    """(parent_tool_use_id, raw description) for a starting subagent, or (None, None). Calls
+    in `failed` (an error tool_result, see recent_errored) are dropped first."""
     fd, calls = _locked_json(session, "agentcalls")
     if fd is None:
         return None, None
     try:
-        calls = _live(calls)
+        calls = [x for x in _live(calls) if x.get("id") not in failed]
+        same = [i for i, call in enumerate(calls) if call.get("type") == (agent_type or DEFAULT_AGENT_TYPE)]
         found = (None, None)
-        for i, call in enumerate(calls):
-            if call.get("type") == (agent_type or DEFAULT_AGENT_TYPE):
-                del calls[i]
-                found = (call.get("id"), call.get("description"))
-                break
+        # Only an unambiguous match is paired. Claude Code fires no PostToolUse for a denied or
+        # hook-blocked call, and parallel calls reach this file in no fixed order, so with two
+        # or more pending the oldest is a guess, and the server keeps the first parent it gets
+        # (activity review round 2, S2-1/S2-2). No parent beats a wrong one.
+        if len(same) == 1:
+            call = calls.pop(same[0])
+            found = (call.get("id"), call.get("description"))
         _write_locked(fd, calls)
         return found
     finally:
@@ -302,6 +364,61 @@ def forget_agent_call(session: str, tool_use_id: object) -> None:
         _write_locked(fd, [x for x in _live(calls) if x.get("id") != tool_use_id])
     finally:
         os.close(fd)
+
+
+# --- open calls ------------------------------------------------------------------------------
+# A call denied at the permission prompt, or blocked by a PreToolUse hook, gets a tool.started
+# (PreToolUse fires first) and never a PostToolUse(Failure), so the board would show it running
+# for ever (activity review round 2, S2-3). Open calls are kept here; the transcript tail closes
+# any whose tool_result is an error while it is still open.
+
+def _open_state(state: object) -> tuple[list[dict], list[str]]:
+    state = state if isinstance(state, dict) else {}
+    calls = [x for x in state.get("open") or [] if isinstance(x, dict)]
+    closed = [x for x in state.get("closed") or [] if isinstance(x, str)]
+    return calls, closed
+
+
+def open_call(session: str, tool_use_id: str, name: str) -> None:
+    """A call has started. The hooks are async, so its PostToolUse(Failure) may already have
+    run: a closed id is never opened again (activity review round 3)."""
+    fd, state = _locked_json(session, "open")
+    if fd is None:
+        return
+    try:
+        calls, closed = _open_state(state)
+        if tool_use_id not in closed:
+            calls = (calls + [{"id": tool_use_id, "name": name}])[-200:]
+            _write_locked(fd, {"open": calls, "closed": closed})
+    finally:
+        os.close(fd)
+
+
+def close_call(session: str, tool_use_id: object) -> str | None:
+    """Mark a call finished, and remember it as closed. Its tool name if it was open."""
+    if not isinstance(tool_use_id, str):
+        return None
+    fd, state = _locked_json(session, "open")
+    if fd is None:
+        return None
+    try:
+        calls, closed = _open_state(state)
+        hit = next((x for x in calls if x.get("id") == tool_use_id), None)
+        calls = [x for x in calls if x is not hit]
+        closed = [x for x in closed if x != tool_use_id][-199:] + [tool_use_id]
+        _write_locked(fd, {"open": calls, "closed": closed})
+        return hit.get("name") if hit else None
+    finally:
+        os.close(fd)
+
+
+def _errored_ids(d: dict) -> list[str]:
+    """tool_use_ids of error tool_results on a transcript `user` line. Only the ids and the
+    flag are read; the result text (it can carry the user's denial feedback) is not."""
+    msg = d.get("message") if isinstance(d.get("message"), dict) else {}
+    blocks = msg.get("content") if isinstance(msg.get("content"), list) else []
+    return [b["tool_use_id"] for b in blocks if isinstance(b, dict) and b.get("type") == "tool_result"
+            and b.get("is_error") is True and isinstance(b.get("tool_use_id"), str)]
 
 
 # --- the agent's replies, tailed from the transcript ----------------------------------------
@@ -337,7 +454,7 @@ def _digest(text: str) -> str:
 
 
 def tail_messages(session: str, path: Path, agent_id: str | None, start_at_end: bool,
-                  last_message: object = None) -> list[dict]:
+                  last_message: object = None, errored: list | None = None) -> list[dict]:
     """New assistant replies in `path` since the last call, as message payloads, each with the
     `ts` of its transcript line (so a reply shows where it was said, not when it was read).
 
@@ -385,6 +502,14 @@ def tail_messages(session: str, path: Path, agent_id: str | None, start_at_end: 
             end = chunk.rfind(b"\n")
             new_offset = offset + end + 1 if end >= 0 else offset
             for line in (chunk[: end + 1].splitlines() if end >= 0 else []):
+                if errored is not None and b'"is_error":true' in line.replace(b" ", b""):
+                    try:
+                        d = json.loads(line)
+                    except ValueError:
+                        d = None
+                    if isinstance(d, dict) and d.get("type") == "user":
+                        errored.extend(_errored_ids(d))
+                    continue
                 if b'"type":"assistant"' not in line and b'"type": "assistant"' not in line:
                     continue  # cheap skip: request blobs and prompts are never parsed
                 try:

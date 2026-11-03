@@ -436,12 +436,8 @@ def _fleet_status(path: Path, base_url: str) -> tuple[str, str]:
         return "off", "off"
     if fleet.get("activity") is not True:
         return "on", "off"
-    from urllib.parse import urlsplit
-    try:
-        u = urlsplit(base_url)
-        ok = u.scheme == "https" or (u.scheme == "http" and (u.hostname or "") in ("localhost", "127.0.0.1", "::1"))
-    except ValueError:
-        ok = False
+    from orchestrator.fleet.common import activity_transport_ok  # the reporter's own check
+    ok = activity_transport_ok(base_url)
     return "on", "on" if ok else "OFF: activity = true, but base_url is not https or localhost (status only)"
 
 
