@@ -21,6 +21,7 @@ whole text, so a NAME = value split across a cut is still caught.
 from __future__ import annotations
 
 # ruff: noqa: E501  (the patterns read best on one line each)
+import json
 import re
 from contextvars import ContextVar
 
@@ -486,24 +487,208 @@ def redact_preview(text: str) -> str:
     """scrub() (bounded, above), then the extras. Irreversible; never raises
     on a str. Line endings are normalised first: a line-anchored rule's `$`
     doesn't match before a \r, so Windows (CRLF) text got past 9 of them
-    (Plumb, round 3)."""
+    (Plumb, round 3). JSON string values are redacted as text of their own
+    first (_json_strings)."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    original = text
     found: set[str] = set()
     token = _SINK.set(found)
     try:
-        text = _scrub_bounded_noted(text)
-        for pattern, repl in EXTRA:
-            text = pattern.sub(_capturing(repl), text)
-        text = _B64_RUN.sub(_long_b64, text)
-        text = _k8s_secret_data(text)
-        text = _remnants(_key_tail(text))
+        text = _redact_core(_json_strings(text, 0))
         # Every value redacted above by its context (a key, a header, a
         # Secret, a key block) is a known secret where it repeats bare too
         # (echo $TOKEN, a second .env line), the same propagation the
         # scrubber gives its own finds (Hearth's blocker, round 5).
-        return _remnants(_propagate(text, found))
+        return _cut_open_string(_remnants(_propagate(text, found)), original)
     finally:
         _SINK.reset(token)
+
+
+CUT = "[REDACTED-CUT]"
+
+
+def _open_string_at(text: str) -> int | None:
+    """The earlier of two readings: by quote parity, and by structure (a quote opens a string
+    only at a line's start or after one of {[,: ). A stray quote earlier on the line (5" of
+    output: {"k": "...) evens the parity, and structure still sees the open value."""
+    a, b = _open_parity(text, False), _open_parity(text, True)
+    return b if a is None else a if b is None else min(a, b)
+
+
+def _open_parity(text: str, structural: bool) -> int | None:
+    """Where the first JSON string still open at the end of its line opens, or None. A quote
+    after an odd run of backslashes is escaped and opens nothing, and so does a run of three
+    or more (_triple)."""
+    if '"' not in text:
+        return None
+    start = 0
+    while start < len(text):
+        end = text.find("\n", start)
+        end = len(text) if end < 0 else end
+        opened, i = -1, start
+        while i < end:
+            c = text[i]
+            if c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                run = _triple(text, i, end)
+                if run:
+                    i += run
+                    continue
+                if opened >= 0:
+                    opened = -1
+                elif not structural:
+                    opened = i
+                else:
+                    j = i - 1
+                    while j >= start and text[j] in " \t":
+                        j -= 1
+                    if j < start or text[j] in "{[,:":
+                        opened = i
+            i += 1
+        if opened >= 0:
+            return opened
+        start = end + 1
+    return None
+
+
+def _triple(text: str, i: int, end: int) -> int:
+    """The length of the run of quotes at i if it is three or more, else 0. Valid JSON never
+    holds three adjacent unescaped quotes, inside a string or out, so such a run opens and
+    closes nothing: a Python or TOML \"\"\" line is not a cut JSON string (Cairn's review of
+    #41: they were 87 of the 246 false cuts in 3,000 real tool results)."""
+    j = i
+    while j < end and text[j] == '"':
+        j += 1
+    return j - i if j - i >= 3 else 0
+
+
+def _quotes(text: str, start: int) -> int:
+    """Unescaped quotes on the line that starts at start, runs of three or more not counted."""
+    end = text.find("\n", start)
+    end = len(text) if end < 0 else end
+    n, i = 0, start
+    while i < end:
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == '"':
+            run = _triple(text, i, end)
+            if run:
+                i += run
+                continue
+            n += 1
+        i += 1
+    return n
+
+
+def _cut_open_string(text: str, original: str | None = None) -> str:
+    """text (the rules' output), from the opening quote of the first JSON string still open
+    at the end of its line to the end, as one CUT marker. A tool that caps its output
+    (web_fetch's maxChars) can end the text inside a JSON string, and an unterminated literal
+    reads to the rules as escaped text: cut just before its closing quote, 16 of the 89 shared
+    secrets went out whole (MindStone #290 round 5). This runs on the redacted text, so it only
+    removes what the rules let through, never anything they hid. A stray quote in prose (5"
+    long) opens a string too: what follows it on the board is lost, which a preview can afford.
+
+    A rule can eat the escapes before a value (password=\\\" became password=[REDACTED]"),
+    leaving a raw quote that closes the string in the output though it was open in original,
+    or, with two such values on the line, reopens it past what it should have cut. So
+    original's open string is found too and its line mapped into text (counted from either end,
+    the earlier: a rule can fold lines). The cut starts at that line's start if text has no open
+    string by then, or has one on that line but a different count of quotes there than
+    original's (a rule changed them)."""
+    at = _open_string_at(text)
+    o = _open_string_at(original) if original is not None else None
+    if o is not None:
+        line = original.count("\n", 0, o)
+        k = max(0, min(line, text.count("\n") - (original.count("\n") - line)))
+        line_start = 0
+        for _ in range(k):
+            line_start = text.find("\n", line_start) + 1
+        al = None if at is None else text.count("\n", 0, at)
+        if al is None or al > k or (al == k and _quotes(text, line_start) != _quotes(original, original.rfind("\n", 0, o) + 1)):
+            at = line_start
+    return text if at is None else text[:at] + CUT
+
+
+def _redact_core(text: str) -> str:
+    """Every rule but the final propagation, on normalised text; what it removes
+    is noted in the current sink."""
+    text = _scrub_bounded_noted(text)
+    for pattern, repl in EXTRA:
+        text = pattern.sub(_capturing(repl), text)
+    text = _B64_RUN.sub(_long_b64, text)
+    text = _k8s_secret_data(text)
+    return _remnants(_key_tail(text))
+
+
+# A JSON string literal on one line: quotes, then plain characters or escapes. The second
+# branch takes an unterminated one to the end of its line, so the scan never restarts inside
+# it (tried from every quote, 64 KB of \\" took 8.3 s: Cairn's review of #40).
+_JSON_STRING = re.compile(r'"(?:[^"\\\n]|\\.){0,65536}"|"[^\n]*')
+JSON_NEST_MAX = 4
+
+
+_MARKER = re.compile(r"\[REDACTED[A-Z-]{0,40}\]")
+
+
+def _note_removed(before: str, after: str) -> None:
+    """Note what redaction took out of a decoded JSON value, piece by piece: inside its own
+    literal a value can lose its context (response="<hex>" is decoded on its own, and a hex
+    token alone is redacted by shape, which the scrubber doesn't record), and it is still a
+    known secret where it repeats bare."""
+    parts = _MARKER.split(after)
+    pos = 0
+    for i, part in enumerate(parts):
+        at = before.find(part, pos) if part else pos
+        if at < 0:
+            return  # can't align (a rule rewrote text it kept): note nothing more
+        if i:
+            _note(before[pos:at])
+        pos = at + len(part)
+    if len(parts) > 1 and pos < len(before):
+        _note(before[pos:])
+
+
+def _json_strings(text: str, depth: int) -> str:
+    """Secrets inside JSON string values: a service account's private_key, a
+    ConfigMap holding a file, a tool result wrapping JSON, NDJSON logs. JSON
+    escaping turns a value's newlines into \\n and wraps it in quotes, so the
+    line-anchored rules never see its lines (16 of the 89 shared fixtures
+    leaked from inside a JSON value: Plumb, MindStone #290 round 3). Each
+    literal that decodes to a string is redacted as text of its own (its own
+    JSON strings first, to JSON_NEST_MAX deep) and put back, re-encoded, only
+    if that changed it. Past the depth, or on a literal that doesn't decode,
+    the text is left to the rules as it stands. A stray quote earlier on a line (5" long)
+    pairs with the next one, so the value after it is left to the rules too."""
+    if depth >= JSON_NEST_MAX or '"' not in text:
+        return text
+
+    def sub(m: re.Match[str]) -> str:
+        lit = m.group(0)
+        if len(lit) < 8 or not lit.endswith('"'):  # short, or unterminated
+            return lit
+        try:
+            value = json.loads(lit)
+        except ValueError:
+            return lit
+        if not isinstance(value, str):
+            return lit
+        norm = value.replace("\r\n", "\n").replace("\r", "\n")
+        red = _redact_core(_json_strings(norm, depth + 1))
+        if red == norm:
+            return lit
+        _note_removed(norm, red)
+        out = json.dumps(red, ensure_ascii=False)
+        try:  # a lone surrogate (\\ud800) decodes raw: keep it escaped, or the text can't be UTF-8
+            out.encode("utf-8")
+        except UnicodeEncodeError:
+            out = json.dumps(red)
+        return out
+
+    return _JSON_STRING.sub(sub, text)
 
 
 def _capturing(repl: str):  # type: ignore[no-untyped-def]

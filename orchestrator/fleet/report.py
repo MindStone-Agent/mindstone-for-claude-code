@@ -15,7 +15,8 @@ chars. With `[fleet] activity = true` (and https, or http to this machine), flee
 adds redacted previews of tool inputs and outputs and the agent's replies, each built per tool
 from its own allow-list; its docstring says what is never sent.
 
-Off unless `[fleet] enabled = true` in orchestrator/config/synapse.toml.
+Off unless `[fleet] enabled = true` in orchestrator/config/synapse.toml, and silent for any
+session that isn't the agent's own (common.agent_session).
 """
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ from pathlib import Path
 if __package__ in (None, ""):  # run as a script by the hook command
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fleet.common import emit, emit_later, fleet_config, now_iso, prune_state, rate_ok, remember_mode, reset_rate, scrub_subject  # noqa: E402
+from fleet.common import agent_session, emit, release_claim, emit_later, fleet_config, now_iso, prune_state, rate_ok, remember_mode, reset_rate, scrub_subject  # noqa: E402
 
 HARNESS = "claude-code"
 # Notification types sent as needs_input (synapse#31): permission, elicitation, agent and
@@ -172,8 +173,10 @@ def main() -> int:
     if not isinstance(inp, dict):
         return 0
     session = _s(inp.get("session_id"), 128)
-    if not session:
+    if not session or not agent_session(cfg, session):  # another session on this machine: silent
         return 0
+    if inp.get("hook_event_name") == "SessionEnd":
+        release_claim(cfg, session)  # its last event still goes: the gate was passed
     remember_mode(session, inp.get("permission_mode"))  # the status line has no mode field
     mapped = build(inp)
     if mapped is not None and mapped[0] == "session.started":

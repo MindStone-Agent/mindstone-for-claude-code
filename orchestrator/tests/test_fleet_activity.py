@@ -677,6 +677,7 @@ def test_emit_later_sends_the_events_before_building_more(monkeypatch):
     monkeypatch.setattr(C, "post", lambda cfg, batch: sent.append([e["type"] for e in batch]))
     monkeypatch.setattr(C, "detach", lambda fn: fn())
     monkeypatch.setenv("MS4CC_FLEET_INLINE", "1")
+    monkeypatch.setenv("MS4CC_FLEET_AGENT", "plumb")
 
     def boom():
         raise RuntimeError("tail failed")
@@ -732,8 +733,8 @@ def test_an_owed_reply_is_skipped_once_only(tmp_path, synapse):
 
 # --- shared fixtures with the server (synapse tests/fixtures/fleet_secrets.json) ---------------
 # Stored base64-encoded so the repo's privacy scan doesn't flag the fake secrets; byte-identical
-# to synapse's copy at 7640e79 (sha256 below). Refresh both together.
-FLEET_SECRETS_SHA256 = "88fae2428cc9916f69187aadc334c62ea349b371cb82a218a9bc0a956ffccd3b"
+# to synapse's copy at synapse#40 (sha256 below). Refresh both together.
+FLEET_SECRETS_SHA256 = "ad049d690c637abf0b9054a13145210d36f6556f64eefad5095c846adca318f2"
 
 
 def _shared_fixtures() -> dict:
@@ -754,6 +755,21 @@ def test_shared_fixture_safe_text_is_unchanged(case):
     assert clean(case["input"]) == case["input"]
 
 
+# synapse#40: every fixture inside JSON (a value, pretty-printed, NDJSON, with a footer). JSON
+# escaping hid 15 of 89 from this reporter's line rules before the vendored redaction decoded
+# JSON string literals (Plumb, MindStone #290 round 3).
+@pytest.mark.parametrize("case", _shared_fixtures()["secret_in_json"], ids=lambda c: c["name"])
+def test_shared_fixture_secrets_inside_json_never_survive(case):
+    out = clean(case["input"])
+    assert case["leak"] not in out
+    assert case["leak_plain"] not in out  # the value as it reads once decoded
+
+
+@pytest.mark.parametrize("case", _shared_fixtures()["safe_in_json"], ids=lambda c: c["name"])
+def test_shared_fixture_safe_text_inside_json_is_unchanged(case):
+    assert clean(case["input"]) == case["input"]
+
+
 def test_scrubbing_many_distinct_secrets_stays_bounded():
     """Cairn's round-2 measurement: the scrubber re-scans the whole text once per secret value
     it finds (2.4 s for 108 KB here, quadratic). It runs on 1 KB chunks."""
@@ -764,7 +780,7 @@ def test_scrubbing_many_distinct_secrets_stays_bounded():
     assert "xyzSECRET" not in text
 
 
-SERVER_REDACT_SHA256 = "52a00190abd249172a59ea3ff1144e1880878fc88520b82212191fd9ebfe932d"  # synapse 4117afb
+SERVER_REDACT_SHA256 = "9fa75a7ac1b3bf6a74212945e82c398e5006eeb44ae92bfde298ccbe93eca0dd"  # synapse#42
 
 
 def test_the_vendored_server_redaction_is_verbatim():
@@ -780,6 +796,30 @@ def test_the_vendored_server_redaction_is_verbatim():
     original = text.replace(ours, "from api.vendor.scrubber import _propagatable, scrub_collect\n")
     assert hashlib.sha256(original.encode()).hexdigest() == SERVER_REDACT_SHA256
 
+
+
+@pytest.mark.parametrize("case", _shared_fixtures()["secret"], ids=lambda c: c["name"])
+def test_a_json_value_cut_before_its_closing_quote_is_hidden(case):
+    """synapse#41: output capped inside a JSON string (cut just before the value's closing
+    quote) reads to the rules as escaped text; the server cuts it from the open quote on."""
+    doc = json.dumps({"stdout": case["input"], "code": 0})
+    cut = doc[: doc.index('", "code"')]
+    text, _ = preview(cut, A.OUTPUT_MAX)
+    leaks = case["leak"] if isinstance(case["leak"], list) else [case["leak"]]
+    for leak in leaks:
+        assert json.dumps(leak)[1:-1] not in text and leak not in text
+    assert "[REDACTED-CUT]" in text
+
+
+def test_a_python_docstring_does_not_cut_the_preview():
+    """synapse#42: a run of three quotes is never JSON, so Python or TOML source with a \"\"\"
+    line (cat, a diff) keeps its preview past it; a cut JSON value later is still cut."""
+    src = 'def f():\n    """Docstring.\n\n    More.\n    """\n    return 1\n'
+    text, _ = preview(src, A.OUTPUT_MAX)
+    assert text == src
+    cut = src + '{"k": "Xk9pLm4Rt8QwZz'
+    text, _ = preview(cut, A.OUTPUT_MAX)
+    assert text.startswith(src) and text.endswith("[REDACTED-CUT]") and "Xk9p" not in text
 
 # --- activity review round 2 ------------------------------------------------------------------
 
@@ -1076,6 +1116,7 @@ def in_process_report(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "HOME_SYNAPSE", home)
     monkeypatch.setattr(C, "STATE_DIR", home / "fleet")
     monkeypatch.setenv("MS4CC_FLEET_INLINE", "1")
+    monkeypatch.setenv("MS4CC_FLEET_AGENT", "plumb")
     sent: list[dict] = []
     monkeypatch.setattr(C, "post", lambda cfg, events: sent.extend(events) or 202)
 
@@ -1115,6 +1156,20 @@ def test_every_board_visible_field_is_redacted_on_the_send_path(case, tmp_path, 
         elif case["leak"] in json.dumps(sent, ensure_ascii=False):
             leaks.append(field)
     assert not leaks, leaks
+
+
+@pytest.mark.parametrize(
+    "case", [c for c in _shared_fixtures()["secret_in_json"] if c["name"].endswith("json with a footer")],
+    ids=lambda c: c["name"])
+def test_json_embedded_secrets_are_redacted_on_the_bash_send_path(case, in_process_report):
+    """synapse#40 through the real hook and send path: `cat cfg.json; exit 1` style Bash output,
+    a JSON document followed by a footer line (Plumb's review of #147)."""
+    run, sent = in_process_report
+    run(base("PostToolUse", tool_name="Bash", tool_use_id="j1", tool_input={"command": "cat cfg.json"},
+             tool_response={"stdout": case["input"], "stderr": ""}))
+    out = json.dumps(sent, ensure_ascii=False)
+    assert sent
+    assert case["leak"] not in out and case["leak_plain"] not in out
 
 
 def test_emit_later_bounds_the_detached_send_with_an_alarm(monkeypatch):

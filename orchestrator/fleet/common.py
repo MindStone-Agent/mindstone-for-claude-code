@@ -4,8 +4,9 @@ Standard library only, POSIX only (the sender forks; without fork every event is
 Everything here is on a hook's critical path, so nothing waits on the network in the hook's
 own process.
 
-The three MS4CC_* environment variables exist for the test suite, which points the reporter
-at a temp config and a fake Synapse; nothing sets them in normal use.
+MS4CC_FLEET_AGENT is set in normal use: by an agent's launch command, to mark its sessions as
+the agent's (agent_session). The other MS4CC_* environment variables exist for the test suite,
+which points the reporter at a temp config and a fake Synapse; nothing sets them in normal use.
 """
 from __future__ import annotations
 
@@ -138,6 +139,71 @@ def fleet_config() -> FleetConfig | None:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+AGENT_ENV = "MS4CC_FLEET_AGENT"
+
+
+CLAIMS_KEPT = 50  # claimed ids kept per handle; the oldest go first
+
+
+def claimed_sessions_file(handle: str) -> Path:
+    """The session ids claimed as the agent's (fleet/claim.py), one per line."""
+    return HOME_SYNAPSE / "fleet-sessions" / handle
+
+
+def update_claims(handle: str, change) -> list[str]:
+    """Read the claimed ids, change them, write them back, all under an exclusive lock, so a
+    claim and a release at the same time can't undo each other. Returns the new list."""
+    path = claimed_sessions_file(handle)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock = os.open(path.parent / f".{handle}.lock", os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            ids = path.read_text(encoding="utf-8").split()
+        except OSError:
+            ids = []
+        new = change(list(ids))[-CLAIMS_KEPT:]
+        if new != ids:
+            tmp = path.with_name(f".{handle}.{os.getpid()}")
+            fd = os.open(tmp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write("".join(i + "\n" for i in new))
+            os.replace(tmp, path)
+        return new
+    finally:
+        os.close(lock)
+
+
+def release_claim(cfg: FleetConfig, session: str) -> None:
+    """SessionEnd: a claim ends with its session. `claude --continue` reuses the id, and a
+    person resuming the agent's conversation in their own terminal isn't the agent."""
+    if os.environ.get(AGENT_ENV) is not None:
+        return
+    try:
+        update_claims(cfg.handle, lambda ids: [i for i in ids if i != session])
+    except OSError:
+        pass
+
+
+def agent_session(cfg: FleetConfig, session: object) -> bool:
+    """Whether this Claude Code session is the agent's own. Only those report (Clint,
+    2026-11-04: "Agent sessions only"); every other session on the machine shares the same
+    settings.json and hooks, and sends nothing. Default deny, decided without the network:
+    - MS4CC_FLEET_AGENT set (by the agent's launch command): the session is the agent's if it
+      names this config's handle, and refused if it names another;
+    - otherwise only a session id claimed with fleet/claim.py, listed in
+      ~/.synapse/fleet-sessions/<handle>. A new id (/clear, a fork) isn't claimed by the old."""
+    marked = os.environ.get(AGENT_ENV)
+    if marked is not None:
+        return marked == cfg.handle
+    if not isinstance(session, str) or not session or safe_session(session) != session:
+        return False
+    try:
+        return session in claimed_sessions_file(cfg.handle).read_text(encoding="utf-8").split()
+    except OSError:
+        return False
 
 
 def safe_session(session: str) -> str:
