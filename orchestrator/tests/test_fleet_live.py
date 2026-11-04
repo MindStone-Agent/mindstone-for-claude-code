@@ -1081,3 +1081,27 @@ def test_a_follower_that_left_without_stopping_still_gets_its_done(tmp_path, sma
     monkeypatch.setattr(L, "follow", follow_then_error)
     L._start(cfg("http://127.0.0.1:9"), SID, f, f.stem)
     assert [e["payload"]["done"] for e in small.sent] == [True]
+
+
+def test_an_object_open_across_polls_is_decided_when_it_closes(tmp_path, small):
+    """The lone { came in an earlier poll than its lone }: whether an object is open is kept
+    between polls, so its close still decides its data and the log after it streams."""
+    head = '{\n  "data": {\n    "viewer": {\n'
+    tail = '      "login": "octocat"\n    }\n  }\n}\n'
+    log = "".join(f"p1 test_{k:05d} PASSED in 0.01s\n" for k in range(40))
+    f = _reset(tmp_path, small)
+    out = small(f, [_w(f, head), _w(f, tail + log)], unlink_after=False)
+    assert _wire(out) == head + tail + log
+
+
+def test_a_margin_brace_that_opened_no_object_decides_nothing(tmp_path, small):
+    """Only a } closing a lone { decides: a stray } at the margin before a Secret's kind,
+    arriving a poll later, must not release its data."""
+    text = f"apiVersion: v1\ndata:\n  a: {V}\nmetadata:\n  name: x\n}}\nkind: Secret\n"
+    assert V not in clean(text)
+    leaks = []
+    for i in range(1, len(text)):
+        f = _reset(tmp_path, small)
+        if V in _wire(small(f, [_w(f, text[:i]), _w(f, text[i:])])):
+            leaks.append(i)
+    assert leaks == []
