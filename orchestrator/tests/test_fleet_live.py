@@ -337,8 +337,11 @@ def test_a_line_forced_out_at_read_max_never_sends_the_rest_of_that_line(tmp_pat
     f = tmp_path / "b1.output"
     f.write_text("")
     t = start(synapse.url, f)
-    append(f, "word " * (L.READ_MAX // 5 + 20) + "password=")
+    append(f, "word " * (L.READ_MAX // 10))  # half a READ_MAX: waits for its newline
     time.sleep(0.3)
+    append(f, "word " * (L.READ_MAX // 10 + 20) + "password=")  # now past READ_MAX: forced out
+    time.sleep(0.3)
+    assert any("word" in p["text"] for p in outputs(synapse))  # the head did go out
     append(f, "Hunter2CorrectHorseBatteryStaple more\nnext\n")
     t.join(5)
     out = [p for p in outputs(synapse) if not p["done"]]
