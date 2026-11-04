@@ -463,7 +463,7 @@ def test_a_secret_data_block_waits_for_its_kind(tmp_path, small):
     f = _reset(tmp_path, small)
     out = small(f, [_w(f, "apiVersion: v1\ndata:\n  app: c2VjcmV0dmFsdWU=\n"), lambda: None,
                     _w(f, "kind: Secret\nmetadata:\n  name: x\n")])
-    assert "c2VjcmV0dmFsdWU=" not in _wire(out) and L.WITHHELD in _wire(out)
+    assert "c2VjcmV0dmFsdWU=" not in _wire(out) and "[REDACTED-SECRET]" in _wire(out)  # the redactor's
     assert out[0]["text"] == "apiVersion: v1\ndata:\n"  # the header goes; its values wait
     assert "kind: Secret\nmetadata:\n  name: x\n" in _wire(out)  # the withheld run isn't context
 
@@ -659,7 +659,7 @@ def test_a_secret_longer_than_the_context_in_one_burst_sends_no_value(tmp_path, 
     text, vals = _big_secret(300)  # about 12 KB; READ_MAX, CTX_MAX and HOLD_MAX are 1-2 KB here
     f = _reset(tmp_path, small)
     out = small(f, [_w(f, text)])
-    assert [v for v in vals if v in _wire(out)] == [] and "kind: Secret" in _wire(out)
+    assert [v for v in vals if v in _wire(out)] == [] and L.WITHHELD in _wire(out)  # held past HOLD_MAX
 
 
 def test_a_secret_held_past_hold_max_sends_no_value_after_it(tmp_path, small):
@@ -934,18 +934,6 @@ def test_a_later_documents_secret_never_withholds_an_earlier_documents_data(tmp_
     assert "color" in out[0]["text"] and V not in _wire(out)
 
 
-def test_a_json_object_alone_at_the_margin_is_decided_when_it_closes(tmp_path, small):
-    """gh api | jq . then a test run: the object's data is decided when its lone } closes it,
-    and the log after it streams (round 5: it waited, then was withheld past 16 KB). The trade:
-    a Secret printed in a later poll, with no --- before it, doesn't reach back to it, the same
-    as a ConfigMap whose own kind line came in an earlier poll."""
-    obj = '{\n  "data": {\n    "viewer": {\n      "login": "octocat"\n    }\n  }\n}\n'
-    log = "".join(f"p1 test_{k:05d} PASSED in 0.01s\n" for k in range(40))
-    f = _reset(tmp_path, small)
-    out = small(f, [_w(f, obj), _w(f, log)], unlink_after=False)
-    assert _wire(out) == obj + log
-
-
 def test_a_secret_in_the_same_poll_still_reaches_back_across_objects(tmp_path, small):
     """Within one poll the document is the server's: no --- between them, so the Secret's
     kind withholds the object before it too, as clean() does."""
@@ -984,15 +972,11 @@ def test_a_closer_at_the_margin_never_ends_a_secrets_document(tmp_path, small, t
     assert leaks == []
 
 
-@pytest.mark.parametrize("line", [
-    '{"apiVersion": "v1", "data":' + " " * 65536 + "x",
-    '"kind": "Secret"' + " " * 65536 + "x",
-], ids=["data header", "kind secret"])
+@pytest.mark.parametrize("line", ['{"apiVersion": "v1", "data":' + " " * 65536 + "x"], ids=["data header"])
 def test_a_long_blank_run_is_matched_in_linear_time(line):
     """Round 4 S1-B: two [ \\t]* around an optional token backtracked: 16 s and 23 s on these."""
     started = time.time()
     L._DATA_HDR.fullmatch(line)
-    L._KIND_SECRET.fullmatch(line)
     assert time.time() - started < 0.5
 
 
@@ -1033,12 +1017,33 @@ def test_a_follower_started_before_its_file_exists_marks_nothing_done(tmp_path, 
     assert L._load(SID, f.stem)["done"] is False and small.sent == []
 
 
-def test_a_kind_line_after_the_data_decides_it_in_the_same_poll(tmp_path, small):
-    """kubectl sorts data before kind: a ConfigMap's kind, at the data's indent, releases it
-    as soon as it arrives, not when the document or the command ends."""
+def test_a_data_block_waits_for_its_documents_end_then_goes_to_the_redactor_whole(tmp_path, small):
+    """Live output review 7, Hearth's (a): no kind line or object close releases a data block
+    early. It waits, and so does the output after it, until a --- or the command's end, then
+    goes with what follows to the redactor in one piece. A ConfigMap's data comes out whole at
+    the end; nothing of it went out before."""
     f = _reset(tmp_path, small)
     out = small(f, [_w(f, "data:\n  color: blue\nkind: ConfigMap\n"), lambda: None, _w(f, "after it\n")])
-    assert out[0]["text"] == "data:\n  color: blue\nkind: ConfigMap\n"
+    assert out[0]["text"] == "data:\n"  # the header goes; what follows waits for the end
+    assert _wire(out) == "data:\n  color: blue\nkind: ConfigMap\nafter it\n"
+
+
+@pytest.mark.parametrize("fmt", ["json", "yaml"])
+def test_a_secrets_value_echoed_after_its_block_is_redacted_there_too(tmp_path, small, fmt):
+    """Round 7: a Secret's data withheld by the scanner never reached the redactor, so an echo
+    of its value later in the output went out (183/183 splits for JSON, 92/92 for YAML). The
+    block now reaches the redactor with the echo, and propagation takes both (the shared
+    fixtures' echo-after-block cases)."""
+    c = next(c for c in SECRETS if c["name"] == f"k8s secret {fmt} then its value echoed")
+    text = c["input"]
+    assert c["leak"] not in clean(text)
+    assert c["leak"] in clean(text[text.rindex("$ echo"):])  # alone, only propagation takes it
+    leaks = []
+    for i in range(1, len(text)):
+        f = _reset(tmp_path, small)
+        if c["leak"] in _wire(small(f, [_w(f, text[:i]), _w(f, text[i:])])):
+            leaks.append(i)
+    assert leaks == []
 
 
 def test_a_rewrite_past_the_first_polls_bytes_is_seen(tmp_path, small):
@@ -1081,17 +1086,6 @@ def test_a_follower_that_left_without_stopping_still_gets_its_done(tmp_path, sma
     monkeypatch.setattr(L, "follow", follow_then_error)
     L._start(cfg("http://127.0.0.1:9"), SID, f, f.stem)
     assert [e["payload"]["done"] for e in small.sent] == [True]
-
-
-def test_an_object_open_across_polls_is_decided_when_it_closes(tmp_path, small):
-    """The lone { came in an earlier poll than its lone }: whether an object is open is kept
-    between polls, so its close still decides its data and the log after it streams."""
-    head = '{\n  "data": {\n    "viewer": {\n'
-    tail = '      "login": "octocat"\n    }\n  }\n}\n'
-    log = "".join(f"p1 test_{k:05d} PASSED in 0.01s\n" for k in range(40))
-    f = _reset(tmp_path, small)
-    out = small(f, [_w(f, head), _w(f, tail + log)], unlink_after=False)
-    assert _wire(out) == head + tail + log
 
 
 def test_a_margin_brace_that_opened_no_object_decides_nothing(tmp_path, small):
