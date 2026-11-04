@@ -907,3 +907,73 @@ def test_a_claimed_session_resumed_streams_again(tmp_path, synapse):
     hook(env, file_changed(tmp_path, "add", d / "b9.output"))
     out = [e["payload"] for e in synapse.wait(1) if e["type"] == "tool.output"]
     assert [p["text"] for p in out] == ["after the resume\n"]
+
+
+OWNER_REF = (f"apiVersion: v1\ndata:\n  a: {V}\nmetadata:\n  name: x\n  ownerReferences:\n"
+             "  - kind: Deployment\n    name: web\nkind: Secret\n")
+
+
+def test_a_nested_kind_never_decides_a_data_block(tmp_path, small):
+    """Only a kind line at the block's own indent or above is its document's: an owner
+    reference's kind, deeper, must not release a Secret's data before its own kind arrives."""
+    assert V not in clean(OWNER_REF)
+    leaks = []
+    for i in range(1, len(OWNER_REF)):
+        f = _reset(tmp_path, small)
+        if V in _wire(small(f, [_w(f, OWNER_REF[:i]), _w(f, OWNER_REF[i:])])):
+            leaks.append(i)
+    assert leaks == []
+
+
+@pytest.mark.parametrize("first,split", [
+    ('{\n  "data": {\n    "color": "blue"\n  }\n}\n', ""),
+    ("data:\n  color: blue\n", "---\n"),
+], ids=["json-closer", "yaml-split"])
+def test_a_later_documents_secret_never_withholds_an_earlier_documents_data(tmp_path, small, first, split):
+    """The document ends at a margin closer or a --- line: a Secret after it is another
+    document's, and the data before it is sent in the same poll."""
+    second = f"kind: Secret\ndata:\n  a: {V}\n"
+    f = _reset(tmp_path, small)
+    out = small(f, [_w(f, first + split + second), lambda: None, _w(f, "after it\n")])
+    assert "color" in out[0]["text"] and V not in _wire(out)
+
+
+def test_a_document_ending_at_the_polls_last_line_is_decided_then(tmp_path, small):
+    """Its closer at the margin ends it: the data goes in that poll, not the next."""
+    doc = '{\n  "data": {\n    "color": "blue"\n  }\n}\n'
+    f = _reset(tmp_path, small)
+    out = small(f, [_w(f, doc), lambda: None, _w(f, "after it\n")])
+    assert out[0]["text"] == doc
+
+
+def test_a_kind_line_after_the_data_decides_it_in_the_same_poll(tmp_path, small):
+    """kubectl sorts data before kind: a ConfigMap's kind, at the data's indent, releases it
+    as soon as it arrives, not when the document or the command ends."""
+    f = _reset(tmp_path, small)
+    out = small(f, [_w(f, "data:\n  color: blue\nkind: ConfigMap\n"), lambda: None, _w(f, "after it\n")])
+    assert out[0]["text"] == "data:\n  color: blue\nkind: ConfigMap\n"
+
+
+def test_a_rewrite_past_the_first_polls_bytes_is_seen(tmp_path, small):
+    """The head check grows to 64 bytes as the file does: a rewrite that keeps the first
+    poll's bytes and changes later ones restarts the read."""
+    f = _reset(tmp_path, small)
+    out = small(f, [_w(f, "abc def\n"), _w(f, "one two three four five\n"),
+                    _w(f, "abc def\nSIX SEVEN EIGHT NINE TEN ELEVEN\nand more after it\n", "w")])
+    assert _wire(out) == "abc def\none two three four five\nabc def\nSIX SEVEN EIGHT NINE TEN ELEVEN\nand more after it\n"
+    assert out[-2]["truncated"] is True
+
+
+BRACE_HDR = '{"apiVersion": "v1", "data": {\n    "pw": "' + V + '="\n  },\n  "kind": "Secret"\n}\n'
+
+
+def test_a_data_header_after_other_keys_on_its_line_is_one(tmp_path, small):
+    """{"apiVersion": "v1", "data": { opens the data block too: its values wait for the
+    document's kind (the round-3 reviewer's json-brace-hdr probe, 48 leaking splits)."""
+    assert V not in clean(BRACE_HDR)
+    leaks = []
+    for i in range(1, len(BRACE_HDR)):
+        f = _reset(tmp_path, small)
+        if V in _wire(small(f, [_w(f, BRACE_HDR[:i]), _w(f, BRACE_HDR[i:])])):
+            leaks.append(i)
+    assert leaks == []

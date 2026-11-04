@@ -291,7 +291,9 @@ _DOC_SPLIT = re.compile(r"---[ \t]*")
 # The server's own Secret test (fleet_redact_vendor._KIND_SECRET), one line at a time.
 _KIND_SECRET = re.compile(r"[ \t]*\"?kind\"?[ \t]*:[ \t]*['\"]?Secret['\"]?[ \t]*,?[ \t]*", re.I)
 _KIND = re.compile(r"[ \t]*\"?kind\"?[ \t]*:")
-_DATA_HDR = re.compile(r"[ \t]*\"?(?:data|stringData)\"?[ \t]*:[ \t]*\{?[ \t]*")
+# The key at the line's start, or after other keys of the same JSON line ({"apiVersion": "v1",
+# "data": {), as a hand-written or partly minified document has it.
+_DATA_HDR = re.compile(r"(?:[ \t]*|[^\n]{0,4096}[{,][ \t]*)\"?(?:data|stringData)\"?[ \t]*:[ \t]*\{?[ \t]*")
 _CLOSER = re.compile(r"[ \t]*[}\]],?[ \t]*")
 _B64_LINE = re.compile(r"[ \t]*[A-Za-z0-9+/=]+[ \t]*")  # inside a key block: key material, any length
 WITHHELD = "[REDACTED-SECRET-LINES]"  # stands in for a run of lines not sent
