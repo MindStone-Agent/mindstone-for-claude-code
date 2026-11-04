@@ -210,8 +210,8 @@ def _merge_synapse_hooks_into_settings() -> dict:
 def _kept_fleet_lines(path: Path) -> list[str]:
     """The `[fleet]` table of an existing synapse.toml, re-emitted so `setup` doesn't drop it.
 
-    Only the keys Fleet reads (`enabled`, `machine`) are carried over, with their types
-    checked; anything unreadable is left out rather than guessed at."""
+    Only the keys Fleet reads (`enabled`, `activity`, `machine`) are carried over, with their
+    types checked; anything unreadable is left out rather than guessed at."""
     try:
         import tomllib
         with path.open("rb") as f:
@@ -223,6 +223,8 @@ def _kept_fleet_lines(path: Path) -> list[str]:
     lines = ["[fleet]"]
     if isinstance(fleet.get("enabled"), bool):
         lines.append(f"enabled = {'true' if fleet['enabled'] else 'false'}")
+    if isinstance(fleet.get("activity"), bool):
+        lines.append(f"activity = {'true' if fleet['activity'] else 'false'}")
     if isinstance(fleet.get("machine"), str):
         # ensure_ascii=False: an ASCII-escaped emoji is a surrogate pair, which TOML rejects.
         # TOML forbids raw U+007F, which ensure_ascii=False would otherwise write out.
@@ -422,6 +424,23 @@ def _scope_grants(scopes: list[str], want: str) -> bool:
     return False
 
 
+def _fleet_status(path: Path, base_url: str) -> tuple[str, str]:
+    """(fleet, activity) as `synapse status` shows them, with the reason when activity is off."""
+    try:
+        import tomllib
+        with path.open("rb") as f:
+            fleet = tomllib.load(f).get("fleet")
+    except Exception:
+        return "off", "off"
+    if not isinstance(fleet, dict) or fleet.get("enabled") is not True:
+        return "off", "off"
+    if fleet.get("activity") is not True:
+        return "on", "off"
+    from orchestrator.fleet.common import activity_transport_ok  # the reporter's own check
+    ok = activity_transport_ok(base_url)
+    return "on", "on" if ok else "OFF: activity = true, but base_url is not https or localhost (status only)"
+
+
 def cmd_status(_args: argparse.Namespace) -> int:
     cfg = load_config()
     if cfg is None:
@@ -434,6 +453,9 @@ def cmd_status(_args: argparse.Namespace) -> int:
     print(f"  active         : {is_active(cfg)}")
     print(f"  token present  : {cfg.read_token() is not None}")
     print(f"  token path     : {cfg.token_path}")
+    fleet, activity = _fleet_status(CONFIG_PATH, cfg.base_url)
+    print(f"  fleet          : {fleet}")
+    print(f"  fleet activity : {activity}")
     cursor_path = cfg.cursor_path
     print(f"  cursor file    : {cursor_path}{' (present)' if cursor_path.exists() else ' (none)'}")
     sid = current_session_id()

@@ -52,3 +52,9 @@ http_timeout = 5
 # [fleet]
 # enabled = true
 # machine = "clints-mac-mini"   # optional; defaults to the short hostname
+#
+# Activity layer (synapse#31, separate opt-in): every tool call with a redacted preview of
+# its input (the command, path, pattern, URL) and output (head and tail), the agent's own
+# replies, and the subagent tree. Never the user's prompts. Sent only over https, or to a
+# localhost base_url; over plain http to another host it stays off.
+# activity = true
