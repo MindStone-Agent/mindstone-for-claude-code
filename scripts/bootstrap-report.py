@@ -269,6 +269,10 @@ def build_report(
     not_delivered_sum = lost_total
 
     rules = [s for s in secs if s.is_rule]
+    # the marked set is what Cairn argues for: stable, script-and-person identical. It is also
+    # narrower -- it excludes sections titled "Safety" or "Group Chats" because they carry no
+    # marker. Report both, always, so the difference is visible rather than a choice.
+    marked_rules = [s for s in secs if ("⛔" in s.title or "⚠️" in s.title)]
     rules_broken = [s for s in rules if s.status not in (STATUS_WHOLE, STATUS_STUB)]
 
     # cause attribution for every rule that did not arrive whole
@@ -332,6 +336,18 @@ def build_report(
                 CAUSE_UNKNOWN: len(unknown),
             },
             "probe_failed": bool(unknown),
+            "marked_set": {
+                "total": len(marked_rules),
+                "whole": len([s for s in marked_rules if s.status == STATUS_WHOLE]),
+                "tail_cut": len([s for s in marked_rules if s.status == STATUS_STUB]),
+                "partial": len([s for s in marked_rules if s.status in (STATUS_MARK, STATUS_BODY)]),
+                "absent": len([s for s in marked_rules if s.status == STATUS_ABSENT]),
+            },
+            # sections that are rule-class by title but carry no marker: the safety sections
+            # live here, so neither set is complete on its own
+            "unmarked_rule_class": [
+                s.title for s in rules if s not in marked_rules
+            ],
             "sums": (
                 len([s for s in rules if s.status == STATUS_WHOLE])
                 + len([s for s in rules if s.status == STATUS_STUB])
@@ -388,7 +404,13 @@ def print_report(rep: dict, rules_only: bool) -> None:
         print(f"    {k:<16} {v:>7,}{note}")
     print()
     r = rep["rules"]
-    print(f"  rules: {r['total']} total · {r['arriving']} whole · {r['arriving_stub']} whole(newline only) · {r['without_marking']} without marking · {r['absent']} absent")
+    ms = r.get("marked_set") or {}
+    print(f"  rules (rule-class): {r['total']} total · {r['arriving']} whole · {r['arriving_stub']} newline-cut · {r['without_marking']} partial · {r['absent']} absent")
+    if ms:
+        print(f"  rules (marked ⛔/⚠️):  {ms['total']} total · {ms['whole']} whole · {ms['tail_cut']} newline-cut · {ms['partial']} partial · {ms['absent']} absent")
+        un = r.get("unmarked_rule_class") or []
+        if un:
+            print(f"  in rule-class but unmarked ({len(un)}): {', '.join(t[:34] for t in un)}")
     for b in r["broken"]:
         print(f"    ⚠️  {b['status']:<16} {b['title'][:52]}")
         print(f"        cause: {b['cause']}  ({b['why']})")
