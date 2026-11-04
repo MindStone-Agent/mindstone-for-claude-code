@@ -780,7 +780,7 @@ def test_scrubbing_many_distinct_secrets_stays_bounded():
     assert "xyzSECRET" not in text
 
 
-SERVER_REDACT_SHA256 = "837e26a2fcbebeac70dbb2d61e0b1e67fde1efa0e81b48bf7ba9c3fb8274ca96"  # synapse#41
+SERVER_REDACT_SHA256 = "9fa75a7ac1b3bf6a74212945e82c398e5006eeb44ae92bfde298ccbe93eca0dd"  # synapse#42
 
 
 def test_the_vendored_server_redaction_is_verbatim():
@@ -809,6 +809,17 @@ def test_a_json_value_cut_before_its_closing_quote_is_hidden(case):
     for leak in leaks:
         assert json.dumps(leak)[1:-1] not in text and leak not in text
     assert "[REDACTED-CUT]" in text
+
+
+def test_a_python_docstring_does_not_cut_the_preview():
+    """synapse#42: a run of three quotes is never JSON, so Python or TOML source with a \"\"\"
+    line (cat, a diff) keeps its preview past it; a cut JSON value later is still cut."""
+    src = 'def f():\n    """Docstring.\n\n    More.\n    """\n    return 1\n'
+    text, _ = preview(src, A.OUTPUT_MAX)
+    assert text == src
+    cut = src + '{"k": "Xk9pLm4Rt8QwZz'
+    text, _ = preview(cut, A.OUTPUT_MAX)
+    assert text.startswith(src) and text.endswith("[REDACTED-CUT]") and "Xk9p" not in text
 
 # --- activity review round 2 ------------------------------------------------------------------
 
