@@ -760,7 +760,9 @@ def test_shared_fixture_safe_text_is_unchanged(case):
 # JSON string literals (Plumb, MindStone #290 round 3).
 @pytest.mark.parametrize("case", _shared_fixtures()["secret_in_json"], ids=lambda c: c["name"])
 def test_shared_fixture_secrets_inside_json_never_survive(case):
-    assert case["leak"] not in clean(case["input"])
+    out = clean(case["input"])
+    assert case["leak"] not in out
+    assert case["leak_plain"] not in out  # the value as it reads once decoded
 
 
 @pytest.mark.parametrize("case", _shared_fixtures()["safe_in_json"], ids=lambda c: c["name"])
@@ -1130,6 +1132,20 @@ def test_every_board_visible_field_is_redacted_on_the_send_path(case, tmp_path, 
         elif case["leak"] in json.dumps(sent, ensure_ascii=False):
             leaks.append(field)
     assert not leaks, leaks
+
+
+@pytest.mark.parametrize(
+    "case", [c for c in _shared_fixtures()["secret_in_json"] if c["name"].endswith("json with a footer")],
+    ids=lambda c: c["name"])
+def test_json_embedded_secrets_are_redacted_on_the_bash_send_path(case, in_process_report):
+    """synapse#40 through the real hook and send path: `cat cfg.json; exit 1` style Bash output,
+    a JSON document followed by a footer line (Plumb's review of #147)."""
+    run, sent = in_process_report
+    run(base("PostToolUse", tool_name="Bash", tool_use_id="j1", tool_input={"command": "cat cfg.json"},
+             tool_response={"stdout": case["input"], "stderr": ""}))
+    out = json.dumps(sent, ensure_ascii=False)
+    assert sent
+    assert case["leak"] not in out and case["leak_plain"] not in out
 
 
 def test_emit_later_bounds_the_detached_send_with_an_alarm(monkeypatch):
