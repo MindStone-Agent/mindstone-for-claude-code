@@ -369,6 +369,12 @@ def print_report(rep: dict, rules_only: bool) -> None:
         print("  ❌ THE TWO METHODS DISAGREE — do not use these numbers")
     print()
     print("  where it went:")
+    absent_count = len([x for x in rep["sections"] if x["status"] == STATUS_ABSENT])
+    ref_absent = [x for x in rep["sections"] if x["status"] == STATUS_ABSENT and not x["is_rule"]]
+    print(
+        f"    ({absent_count} sections absent in total: "
+        f"{len(ref_absent)} unmarked reference, {absent_count - len(ref_absent)} rule-class)"
+    )
     for k, v in rep["breakdown"].items():
         note = ""
         if k == STATUS_STUB:
