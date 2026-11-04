@@ -1122,8 +1122,10 @@ def test_claim_respects_a_launch_mark_and_rejects_extra_arguments(tmp_path, syna
     env = make_env(tmp_path, synapse.url, agent="plumb")
     r = _claim(env)
     assert r.returncode == 0 and "without a claim" in r.stdout and not _claim_file(env).exists()
+    assert _claim(env, "--release").returncode == 1  # a launch mark can't be released: no false "stopped"
     env["MS4CC_FLEET_AGENT"] = "cairn"
     assert _claim(env).returncode == 1 and not _claim_file(env).exists()
+    assert _claim(env, "--release").returncode == 0  # already silent
     env = make_env(tmp_path, synapse.url, agent=None)
     assert _claim(env, "--release", OTHER_SID).returncode == 2
     assert _claim(env, "--bogus").returncode == 2 and not _claim_file(env).exists()

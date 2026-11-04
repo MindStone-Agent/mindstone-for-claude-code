@@ -43,6 +43,12 @@ def main(argv: list[str]) -> int:
         return 0
     marked = os.environ.get(c.AGENT_ENV)
     if marked is not None:  # the launch mark decides, whatever is claimed
+        if argv == ["--release"]:  # rc 0 only when the session doesn't report afterwards
+            if marked == cfg.handle:
+                print(f"This session was launched as {cfg.handle} ({c.AGENT_ENV}): a release can't stop it.")
+                return 1
+            print(f"{c.AGENT_ENV}={marked!r} doesn't name {cfg.handle}: this session doesn't report.")
+            return 0
         if marked == cfg.handle:
             print(f"This session was launched as {cfg.handle} ({c.AGENT_ENV}); it reports without a claim.")
             return 0
