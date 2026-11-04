@@ -733,8 +733,8 @@ def test_an_owed_reply_is_skipped_once_only(tmp_path, synapse):
 
 # --- shared fixtures with the server (synapse tests/fixtures/fleet_secrets.json) ---------------
 # Stored base64-encoded so the repo's privacy scan doesn't flag the fake secrets; byte-identical
-# to synapse's copy at 7640e79 (sha256 below). Refresh both together.
-FLEET_SECRETS_SHA256 = "88fae2428cc9916f69187aadc334c62ea349b371cb82a218a9bc0a956ffccd3b"
+# to synapse's copy at synapse#40 (sha256 below). Refresh both together.
+FLEET_SECRETS_SHA256 = "ad049d690c637abf0b9054a13145210d36f6556f64eefad5095c846adca318f2"
 
 
 def _shared_fixtures() -> dict:
@@ -755,6 +755,21 @@ def test_shared_fixture_safe_text_is_unchanged(case):
     assert clean(case["input"]) == case["input"]
 
 
+# synapse#40: every fixture inside JSON (a value, pretty-printed, NDJSON, with a footer). JSON
+# escaping hid 15 of 89 from this reporter's line rules before the vendored redaction decoded
+# JSON string literals (Plumb, MindStone #290 round 3).
+@pytest.mark.parametrize("case", _shared_fixtures()["secret_in_json"], ids=lambda c: c["name"])
+def test_shared_fixture_secrets_inside_json_never_survive(case):
+    out = clean(case["input"])
+    assert case["leak"] not in out
+    assert case["leak_plain"] not in out  # the value as it reads once decoded
+
+
+@pytest.mark.parametrize("case", _shared_fixtures()["safe_in_json"], ids=lambda c: c["name"])
+def test_shared_fixture_safe_text_inside_json_is_unchanged(case):
+    assert clean(case["input"]) == case["input"]
+
+
 def test_scrubbing_many_distinct_secrets_stays_bounded():
     """Cairn's round-2 measurement: the scrubber re-scans the whole text once per secret value
     it finds (2.4 s for 108 KB here, quadratic). It runs on 1 KB chunks."""
@@ -765,7 +780,7 @@ def test_scrubbing_many_distinct_secrets_stays_bounded():
     assert "xyzSECRET" not in text
 
 
-SERVER_REDACT_SHA256 = "52a00190abd249172a59ea3ff1144e1880878fc88520b82212191fd9ebfe932d"  # synapse 4117afb
+SERVER_REDACT_SHA256 = "a74bc722b407ab68ca775f9355a31b28aba0ab820e93866371acae04a557cfe4"  # synapse#40
 
 
 def test_the_vendored_server_redaction_is_verbatim():
@@ -1117,6 +1132,20 @@ def test_every_board_visible_field_is_redacted_on_the_send_path(case, tmp_path, 
         elif case["leak"] in json.dumps(sent, ensure_ascii=False):
             leaks.append(field)
     assert not leaks, leaks
+
+
+@pytest.mark.parametrize(
+    "case", [c for c in _shared_fixtures()["secret_in_json"] if c["name"].endswith("json with a footer")],
+    ids=lambda c: c["name"])
+def test_json_embedded_secrets_are_redacted_on_the_bash_send_path(case, in_process_report):
+    """synapse#40 through the real hook and send path: `cat cfg.json; exit 1` style Bash output,
+    a JSON document followed by a footer line (Plumb's review of #147)."""
+    run, sent = in_process_report
+    run(base("PostToolUse", tool_name="Bash", tool_use_id="j1", tool_input={"command": "cat cfg.json"},
+             tool_response={"stdout": case["input"], "stderr": ""}))
+    out = json.dumps(sent, ensure_ascii=False)
+    assert sent
+    assert case["leak"] not in out and case["leak_plain"] not in out
 
 
 def test_emit_later_bounds_the_detached_send_with_an_alarm(monkeypatch):
