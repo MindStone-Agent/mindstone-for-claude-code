@@ -18,11 +18,11 @@ Claude Code writes every Bash command's output, foreground or background, to
    - Only complete lines are sent. A partial line waits for its end; when the command ends,
      its last line is whole and goes too.
    - A line scanner (_scan), whose state is kept across polls, withholds what spans lines: a
-     private key from BEGIN to END (any line of key characters inside it, of any length), and
-     the values under a Secret's `data:` or `stringData:`. A block is decided only by a `kind:`
-     line after it, its document's end (`---`, or a closer at the margin) or the command's end;
-     until then it waits, and past HOLD_MAX it is withheld. One WITHHELD line stands in for
-     each run.
+     private key from BEGIN to END (any line of key characters inside it, of any length, and
+     an encrypted key's headers), and the values under a Secret's `data:` or `stringData:`. A
+     block is decided only by a `kind:` line after it, its document's end (a `---` line, as the
+     server splits them) or the command's end; until then it waits, and past HOLD_MAX it is
+     withheld. One WITHHELD line stands in for each run.
    - What the scanner lets through is redacted along with up to CTX_MAX of the output before
      it (not past a withheld run). Only the part after the context's own redaction is sent;
      if the new lines change how the context redacts, nothing is sent and the gap is marked.
@@ -232,7 +232,7 @@ def _start(cfg: c.FleetConfig, session: str, path: Path, task_id: str) -> None:
             if again is not None:
                 try:
                     st = _load(session, task_id)
-                    if not st["done"]:
+                    if not st["done"] and st["stopped"]:  # not a file that never was
                         _done(cfg, session, task_id, st)
                 finally:
                     os.close(again)
@@ -289,12 +289,16 @@ _PEM_END = re.compile(r"-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----")
 _KEYISH = re.compile(r"[ \t]*[A-Za-z0-9+/=]{20,}[ \t]*")  # could be key material
 _DOC_SPLIT = re.compile(r"---[ \t]*")
 # The server's own Secret test (fleet_redact_vendor._KIND_SECRET), one line at a time.
-_KIND_SECRET = re.compile(r"[ \t]*\"?kind\"?[ \t]*:[ \t]*['\"]?Secret['\"]?[ \t]*,?[ \t]*", re.I)
+# No two [ \t]* around an optional token: a long blank run is matched one way (round 4: a 64 KB
+# line took 23 s).
+_KIND_SECRET = re.compile(r"[ \t]*\"?kind\"?[ \t]*:[ \t]*['\"]?Secret['\"]?[ \t]*(?:,[ \t]*)?", re.I)
 _KIND = re.compile(r"[ \t]*\"?kind\"?[ \t]*:")
 # The key at the line's start, or after other keys of the same JSON line ({"apiVersion": "v1",
 # "data": {), as a hand-written or partly minified document has it.
-_DATA_HDR = re.compile(r"(?:[ \t]*|[^\n]{0,4096}[{,][ \t]*)\"?(?:data|stringData)\"?[ \t]*:[ \t]*\{?[ \t]*")
+_DATA_HDR = re.compile(r"(?:[ \t]*|[^\n]{0,4096}[{,][ \t]*)\"?(?:data|stringData)\"?[ \t]*:[ \t]*(?:\{[ \t]*)?")
 _CLOSER = re.compile(r"[ \t]*[}\]],?[ \t]*")
+# An encrypted key's headers and the blank line after them are inside its block (round 4).
+_PEM_HDR = re.compile(r"(?:Proc-Type|DEK-Info|Comment)[ \t]*:[^\n]*|[ \t]*")
 _B64_LINE = re.compile(r"[ \t]*[A-Za-z0-9+/=]+[ \t]*")  # inside a key block: key material, any length
 WITHHELD = "[REDACTED-SECRET-LINES]"  # stands in for a run of lines not sent
 
@@ -308,8 +312,10 @@ def _bare(raw: str) -> str:
 
 
 def _ends_doc(line: str) -> bool:
-    """A `---` line, or a JSON document's closing brace at the margin."""
-    return bool(_DOC_SPLIT.fullmatch(line) or (_CLOSER.fullmatch(line) and _indent(line) == 0))
+    """A `---` line: where the server splits documents, and so where a Secret's reach ends. A
+    closing brace at the margin is not one (round 4: a flow mapping's own brace "ended" the
+    document before its kind: Secret, and its data went out)."""
+    return bool(_DOC_SPLIT.fullmatch(line))
 
 
 def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[list[str], int, int]:
@@ -325,8 +331,7 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
       Secret's when its document shows `kind: Secret` before it, or anywhere in what has been
       read of the document after it (kubectl prints keys sorted: data, immutable, kind). It is
       known NOT to be one only when a `kind:` line at its own indent or above has arrived, or
-      its document has ended (a `---` line, a JSON closing brace at the margin), or the output
-      has. Until then it waits; past HOLD_MAX it is withheld, and so is the rest of the
+      its document has ended (a `---` line), or the output has. Until then it waits; past HOLD_MAX it is withheld, and so is the rest of the
       document's data.
     - Key-like lines with nothing after them yet wait for the next line, so that a key's tail
       and its END line are redacted together.
@@ -339,13 +344,17 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
     n = len(raw)
     bare = [_bare(x) for x in raw]
     # One reverse pass instead of a scan per block (a long List was quadratic): where each
-    # line's document ends, whether a kind: Secret comes before that, and the next kind line.
-    doc_end, next_secret, next_kind = [n] * (n + 1), [n] * (n + 1), [n] * (n + 1)
+    # line's document ends, whether a kind: Secret comes before that, and the shallowest
+    # kind line's indent from the line to its document's end.
+    far = 1 << 30
+    doc_end, next_secret, kind_min = [n] * (n + 1), [n] * (n + 1), [far] * (n + 1)
     for x in range(n - 1, -1, -1):
         line = bare[x]
-        doc_end[x] = x if _DOC_SPLIT.fullmatch(line) else (x + 1 if _ends_doc(line) else doc_end[x + 1])
+        split = bool(_DOC_SPLIT.fullmatch(line))
+        doc_end[x] = x if split else doc_end[x + 1]
         next_secret[x] = x if _KIND_SECRET.fullmatch(line) else next_secret[x + 1]
-        next_kind[x] = x if _KIND.match(line) else next_kind[x + 1]
+        own = _indent(line) if _KIND.match(line) else far
+        kind_min[x] = far if split else min(own, kind_min[x + 1])
 
     def withhold(end: int) -> None:
         wend[0] = end
@@ -356,13 +365,9 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
     def size_from(k: int) -> int:
         return sum(len(x.encode("utf-8", "surrogateescape")) for x in raw[k:])
 
-    def kind_after(j: int, h: int, end: int) -> bool:
-        k = next_kind[j]
-        while k < end:
-            if _indent(bare[k]) <= h:
-                return True
-            k = next_kind[k + 1]
-        return False
+    def kind_after(j: int, h: int) -> bool:
+        """A kind line at indent h or above, from line j to the document's end."""
+        return kind_min[j] <= h
 
     i = 0
     while i < n:
@@ -373,7 +378,7 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
                 withhold(i + 1)
                 i += 1
                 continue
-            if _B64_LINE.fullmatch(line):
+            if _B64_LINE.fullmatch(line) or _PEM_HDR.fullmatch(line):
                 withhold(i + 1)
                 i += 1
                 continue
@@ -388,7 +393,7 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
             end = doc_end[i]
             if st["secret_doc"] or next_secret[i] < end:
                 secret = True
-            elif kind_after(j, h, end) or end < n or (end == n and n and _ends_doc(bare[n - 1])) or final:
+            elif kind_after(j, h) or end < n or final:
                 secret = False
             elif size_from(i) > HOLD_MAX:
                 secret, st["secret_doc"] = True, True  # undecided too long: withheld, and the rest

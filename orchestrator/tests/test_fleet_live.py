@@ -925,25 +925,100 @@ def test_a_nested_kind_never_decides_a_data_block(tmp_path, small):
     assert leaks == []
 
 
-@pytest.mark.parametrize("first,split", [
-    ('{\n  "data": {\n    "color": "blue"\n  }\n}\n', ""),
-    ("data:\n  color: blue\n", "---\n"),
-], ids=["json-closer", "yaml-split"])
-def test_a_later_documents_secret_never_withholds_an_earlier_documents_data(tmp_path, small, first, split):
-    """The document ends at a margin closer or a --- line: a Secret after it is another
-    document's, and the data before it is sent in the same poll."""
-    second = f"kind: Secret\ndata:\n  a: {V}\n"
+def test_a_later_documents_secret_never_withholds_an_earlier_documents_data(tmp_path, small):
+    """The document ends at a --- line: a Secret after it is another document's, and the data
+    before it is sent in the same poll."""
     f = _reset(tmp_path, small)
-    out = small(f, [_w(f, first + split + second), lambda: None, _w(f, "after it\n")])
+    out = small(f, [_w(f, f"data:\n  color: blue\n---\nkind: Secret\ndata:\n  a: {V}\n"), lambda: None,
+                    _w(f, "after it\n")])
     assert "color" in out[0]["text"] and V not in _wire(out)
 
 
+def test_json_objects_with_no_split_between_them_are_one_document(tmp_path, small):
+    """The server splits documents only at ---, and redacts a ConfigMap's values when a Secret
+    shares its document: so does the follower (round 4: a closer at the margin taken for a
+    document's end let a Secret's data out)."""
+    text = '{\n  "data": {\n    "color": "blue"\n  }\n}\n' + f"kind: Secret\ndata:\n  a: {V}\n"
+    assert "blue" not in clean(text)
+    f = _reset(tmp_path, small)
+    out = small(f, [_w(f, text)])
+    assert "blue" not in _wire(out) and V not in _wire(out)
+
+
 def test_a_document_ending_at_the_polls_last_line_is_decided_then(tmp_path, small):
-    """Its closer at the margin ends it: the data goes in that poll, not the next."""
-    doc = '{\n  "data": {\n    "color": "blue"\n  }\n}\n'
+    """Its --- line ends it: the data goes in that poll, not the next."""
+    doc = "data:\n  color: blue\n---\n"
     f = _reset(tmp_path, small)
     out = small(f, [_w(f, doc), lambda: None, _w(f, "after it\n")])
     assert out[0]["text"] == doc
+
+
+MARGIN_DOCS = [
+    f"apiVersion: v1\ndata: {{\n  pw: {V}=\n}}\nkind: Secret\ntype: Opaque\n",
+    '{\n"apiVersion": "v1",\n"data": {\n  "pw": "' + V + '="\n},\n"kind": "Secret",\n"type": "Opaque"\n}\n',
+    '{"apiVersion": "v1", "data": {\n    "pw": "' + V + '="\n},\n"kind": "Secret"}\n',
+]
+
+
+@pytest.mark.parametrize("text", MARGIN_DOCS, ids=["yaml-flow", "json-at-margin", "json-brace-hdr-margin"])
+def test_a_closer_at_the_margin_never_ends_a_secrets_document(tmp_path, small, text):
+    """Round 4 S1-A: the data block's own brace at the margin "ended" the document, so the
+    kind: Secret after it was never seen and the value was sent."""
+    assert V not in clean(text)
+    leaks = []
+    for i in range(1, len(text)):
+        f = _reset(tmp_path, small)
+        if V in _wire(small(f, [_w(f, text[:i]), _w(f, text[i:])])):
+            leaks.append(i)
+    assert leaks == []
+
+
+@pytest.mark.parametrize("line", [
+    '{"apiVersion": "v1", "data":' + " " * 65536 + "x",
+    '"kind": "Secret"' + " " * 65536 + "x",
+], ids=["data header", "kind secret"])
+def test_a_long_blank_run_is_matched_in_linear_time(line):
+    """Round 4 S1-B: two [ \\t]* around an optional token backtracked: 16 s and 23 s on these."""
+    started = time.time()
+    L._DATA_HDR.fullmatch(line)
+    L._KIND_SECRET.fullmatch(line)
+    assert time.time() - started < 0.5
+
+
+def test_many_data_blocks_with_deeper_kind_lines_scan_in_linear_time():
+    """Round 4 S1-C: each data block walked every later deeper kind line to its document's
+    end; 512 KB took 22 s."""
+    def scan(k: int) -> float:
+        raw = [x + "\n" for x in ("  data:\n    kind: z\n" * k).split("\n")[:-1]]
+        st = {"secret_doc": False, "data_indent": None, "inkey": False, "withheld_last": False}
+        started = time.time()
+        L._scan(raw, st, final=False, replay=True)
+        return time.time() - started
+    small_t, big_t = scan(2000), scan(16000)
+    assert big_t < 0.5 and big_t < small_t * 16
+
+
+def test_an_encrypted_keys_headers_stay_inside_its_block(tmp_path, small):
+    """Round 4 S2-A: Proc-Type ended the key block, and a short last body line was sent."""
+    body = "".join("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2\n" for _ in range(10))
+    text = ("x\n-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123\n\n"
+            + body + "U2hvcnRUYWls\n-----END RSA PRIVATE KEY-----\ny it\n")
+    leaks = []
+    for i in range(1, len(text), 3):
+        f = _reset(tmp_path, small)
+        if "U2hvcnRUYWls" in _wire(small(f, [_w(f, text[:i]), _w(f, text[i:])])):
+            leaks.append(i)
+    assert leaks == []
+
+
+def test_a_follower_started_before_its_file_exists_marks_nothing_done(tmp_path, small, monkeypatch):
+    """Round 4 nit: the re-claim after letting go sent done for a file that never was, so its
+    output, once written, streamed nothing."""
+    monkeypatch.setenv("MS4CC_FLEET_INLINE", "1")
+    f = _reset(tmp_path, small)
+    f.unlink()
+    L._start(cfg("http://127.0.0.1:9"), SID, f, f.stem)
+    assert L._load(SID, f.stem)["done"] is False and small.sent == []
 
 
 def test_a_kind_line_after_the_data_decides_it_in_the_same_poll(tmp_path, small):
