@@ -953,7 +953,7 @@ def test_a_secret_in_the_same_poll_still_reaches_back_across_objects(tmp_path, s
     assert "blue" not in clean(text)
     f = _reset(tmp_path, small)
     out = small(f, [_w(f, text)])
-    assert V not in _wire(out) and "blue" not in _wire(out).replace("[REDACTED-SECRET]", "")
+    assert V not in _wire(out) and "blue" not in _wire(out)
 
 
 def test_a_document_ending_at_the_polls_last_line_is_decided_then(tmp_path, small):
@@ -1101,6 +1101,37 @@ def test_a_margin_brace_that_opened_no_object_decides_nothing(tmp_path, small):
     assert V not in clean(text)
     leaks = []
     for i in range(1, len(text)):
+        f = _reset(tmp_path, small)
+        if V in _wire(small(f, [_w(f, text[:i]), _w(f, text[i:])])):
+            leaks.append(i)
+    assert leaks == []
+
+
+
+
+def test_an_objects_close_decides_only_the_data_inside_it(tmp_path, small):
+    """A margin object's close decides the blocks inside it, not a block before it: a data
+    block, then a lone { ... }, then kind: Secret a poll later still withholds the data."""
+    text = f"apiVersion: v1\ndata:\n  pw: {V}\n{{\n  \"level\": \"info\"\n}}\nkind: Secret\n"
+    assert V not in clean(text)
+    leaks = []
+    for i in range(1, len(text)):
+        f = _reset(tmp_path, small)
+        if V in _wire(small(f, [_w(f, text[:i]), _w(f, text[i:])])):
+            leaks.append(i)
+    assert leaks == []
+
+
+def test_a_kind_on_a_shared_line_marks_the_document_a_secret(tmp_path, small):
+    """ "apiVersion": "v1", "kind": "Secret", on one line is a Secret to the server (its JSON
+    test): a burst whose read starts after that line, then the object's close, must not
+    release the data."""
+    obj = '{\n  "apiVersion": "v1", "kind": "Secret",\n  "data": {\n    "pw": "' + V + '"\n  }\n}\n'
+    log = "".join(f"t test_{k:05d} PASSED in 0.01s\n" for k in range(80))
+    text = "$ cmd\n" + obj + log
+    assert V not in clean(text)
+    leaks = []
+    for i in range(L.READ_MAX, len(text)):
         f = _reset(tmp_path, small)
         if V in _wire(small(f, [_w(f, text[:i]), _w(f, text[i:])])):
             leaks.append(i)

@@ -294,6 +294,13 @@ _DOC_SPLIT = re.compile(r"---[ \t]*")
 # line took 23 s).
 _KIND_SECRET = re.compile(r"[ \t]*\"?kind\"?[ \t]*:[ \t]*['\"]?Secret['\"]?[ \t]*(?:,[ \t]*)?", re.I)
 _KIND = re.compile(r"[ \t]*\"?kind\"?[ \t]*:")
+# The server's JSON test (fleet_redact_vendor._JSON_KIND_SECRET): "kind": "Secret" anywhere on a
+# line, as a partly minified object has it ("apiVersion": "v1", "kind": "Secret",).
+_JSON_KIND_SECRET = re.compile(r"\\?\"kind\\?\"[ \t]*:[ \t]*\\?\"Secret\\?\"")
+
+
+def _says_secret(line: str) -> bool:
+    return bool(_KIND_SECRET.fullmatch(line) or _JSON_KIND_SECRET.search(line))
 # The key at the line's start, or after other keys of the same JSON line ({"apiVersion": "v1",
 # "data": {), as a hand-written or partly minified document has it.
 _DATA_HDR = re.compile(r"(?:[ \t]*|[^\n]{0,4096}[{,][ \t]*)\"?(?:data|stringData)\"?[ \t]*:[ \t]*(?:\{[ \t]*)?")
@@ -327,14 +334,15 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
     """Which of `raw` (complete lines, each ending in a newline) may be sent. Returns the lines
     to send, with WITHHELD for each run held back as secret, how many lines were dealt with (the
     rest wait for a later poll), and the index just past the last line withheld (0 if none).
-    st's per-document state (secret_doc, data_indent, inkey) is carried across polls and
-    reflects the lines dealt with.
+    st's per-document state (secret_doc, data_indent, inkey, top_open) is carried across polls
+    and reflects the lines dealt with.
 
     - A private key, BEGIN to END, is never sent; nor, after a BEGIN with no END, the base64
       lines that follow it (of any length: a key's last line can be short).
     - The values under a Secret's `data:` or `stringData:` are never sent. A block is a
-      Secret's when its document shows `kind: Secret` before it, or anywhere in what has been
-      read of the document after it (kubectl prints keys sorted: data, immutable, kind). It is
+      Secret's when its document shows `kind: Secret` (on a line of its own, or anywhere on a
+      JSON line, as the server reads it) before it, or anywhere in what has been read of the
+      document after it (kubectl prints keys sorted: data, immutable, kind). It is
       known NOT to be one only when a `kind:` line at its own indent or above has arrived, or
       the JSON object it is in, standing alone at the margin, has closed, or its document has
       ended (a `---` line), or the output has. Until then it waits; past HOLD_MAX it is withheld, and so is the rest of the
@@ -361,12 +369,14 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
             top = bool(_OBJ_OPEN.fullmatch(bare[x]))
     top_before[n] = top
     doc_end, next_secret, kind_min = [n] * (n + 1), [n] * (n + 1), [far] * (n + 1)
+    margin = [n] * (n + 1)  # the next line at the margin
     for x in range(n - 1, -1, -1):
         line = bare[x]
+        margin[x] = x if line.strip() and _indent(line) == 0 else margin[x + 1]
         split = bool(_DOC_SPLIT.fullmatch(line))
         doc_end[x] = x if split else doc_end[x + 1]
-        next_secret[x] = x if _KIND_SECRET.fullmatch(line) else next_secret[x + 1]
-        own = 0 if obj_end[x] else (_indent(line) if _KIND.match(line) else far)
+        next_secret[x] = x if _says_secret(line) else next_secret[x + 1]
+        own = _indent(line) if _KIND.match(line) else far
         kind_min[x] = far if split else min(own, kind_min[x + 1])
 
     def withhold(end: int) -> None:
@@ -406,7 +416,7 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
             end = doc_end[i]
             if st["secret_doc"] or next_secret[i] < end:
                 secret = True
-            elif kind_after(j, h) or end < n or final:
+            elif kind_after(j, h) or (top_before[i] and margin[j] < n and obj_end[margin[j]]) or end < n or final:
                 secret = False
             elif size_from(i) > HOLD_MAX:
                 secret, st["secret_doc"] = True, True  # undecided too long: withheld, and the rest
@@ -432,7 +442,7 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
             withhold(i + 1)
             i += 1
             continue
-        if _KIND_SECRET.fullmatch(line):
+        if _says_secret(line):
             st["secret_doc"] = True
         if _DATA_HDR.fullmatch(line):
             st["data_indent"] = _indent(line)
