@@ -10,8 +10,12 @@ it, but coalesces writes into one `change` near the end. So:
    session's tasks directory (only SessionStart, CwdChanged and FileChanged hooks may).
 2. FileChanged `add` (or `change`, if no follower is running) reaches report.py, which starts
    one detached follower for that file.
-3. The follower reads the new complete lines every POLL_S, redacts and caps them like every
-   other preview (fleet/redact.py), and sends them as `tool.output` events. It stops when the
+3. The follower reads the new complete lines every POLL_S, redacts them as one text (so no cut
+   can split a secret from its key), then cuts and caps them like every other preview
+   (fleet/redact.py) and sends them as `tool.output` events. A line with no newline waits for it
+   until it reaches READ_MAX; then its head is sent and the rest of that line is skipped, since
+   the rest may begin with a value whose key was in the head. The same goes for the line a burst
+   read starts in, and for the rest of a last line flushed when a follower stopped. It stops when the
    file is deleted (a foreground command finished), when the task has been idle for IDLE_S and
    isn't among the running tasks Stop last reported, when the session ends, or after MAX_S.
    Its offset and sequence number are kept on disk, so a later `change` resumes, not repeats.
@@ -196,29 +200,54 @@ def on_file_changed(cfg: c.FleetConfig, inp: dict, session: str) -> None:
 # --- the follower -------------------------------------------------------------------------------
 
 def _chunks(text: str) -> list[str]:
-    """Pieces of at most CHUNK_CHARS, cut after a line break where there is one."""
+    """Pieces of at most CHUNK_CHARS, cut after a line break where there is one, else after a
+    space. Cut only text that is already redacted (_pieces)."""
     out, i = [], 0
     while i < len(text):
         j = i + CHUNK_CHARS
         if j < len(text):
             k = text.rfind("\n", i, j)
+            k = k if k > i else text.rfind(" ", i, j)
             j = k + 1 if k > i else j
         out.append(text[i:j])
         i = j
     return out
 
 
-def _load(session: str, task_id: str) -> tuple[int, int]:
+def _pieces(text: str, skipped: bool) -> list[tuple[str, bool]] | None:
+    """One poll's text as (event text, truncated) pairs. The whole text is redacted before it
+    is cut, so a secret across a cut is already gone; each piece then goes through preview()
+    for its cap. None when there's no scrubber: send nothing rather than unredacted output."""
+    from fleet.redact import clean, preview
+    try:
+        text = clean(text.encode("utf-8", "replace").decode("utf-8"))
+    except Exception:
+        return None
+    pieces = _chunks(text)
+    if len(pieces) > PER_TICK:  # older ones are skipped, marked on the first one sent
+        pieces, skipped = pieces[-PER_TICK:], True
+    out = []
+    for piece in pieces:
+        t, cut_short = preview(piece, CHUNK_MAX)
+        if t is None:
+            continue
+        out.append((t, skipped or cut_short))
+        skipped = False
+    return out
+
+
+def _load(session: str, task_id: str) -> tuple[int, int, bool]:
     try:
         st = json.loads(c._state_file(session, f"live.{task_id}.pos").read_text())
-        return int(st["offset"]), int(st["seq"])
+        return int(st["offset"]), int(st["seq"]), st.get("midline") is True
     except (OSError, ValueError, KeyError, TypeError):
-        return 0, 0
+        return 0, 0, False
 
 
-def _save(session: str, task_id: str, offset: int, seq: int) -> None:
+def _save(session: str, task_id: str, offset: int, seq: int, midline: bool) -> None:
     try:
-        c._state_file(session, f"live.{task_id}.pos").write_text(json.dumps({"offset": offset, "seq": seq}))
+        c._state_file(session, f"live.{task_id}.pos").write_text(
+            json.dumps({"offset": offset, "seq": seq, "midline": midline}))
     except OSError:
         pass
 
@@ -248,11 +277,11 @@ def _send(cfg: c.FleetConfig, events: list[dict]) -> None:
 
 
 def follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str) -> None:
-    from fleet.redact import preview
     c._ensure_state_dir()
-    offset, seq = _load(session, task_id)
+    offset, seq, midline = _load(session, task_id)  # midline: skipping the rest of a line already cut
     started = last_growth = time.time()
     partial = b""
+    owed = False  # output was skipped; the next event sent says so
 
     def event(text: str | None, truncated: bool, done: bool) -> dict:
         nonlocal seq
@@ -270,14 +299,14 @@ def follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str) -> None:
 
     def finish() -> None:
         events = []
-        if partial:  # a last line with no newline
-            text, cut_short = preview(partial.decode("utf-8", "replace"), CHUNK_MAX)
-            if text is not None:
-                events.append(event(text, cut_short, False))
+        if partial and not midline:  # a last line with no newline
+            for text, trunc in _pieces(partial.decode("utf-8", "replace"), owed) or []:
+                events.append(event(text, trunc, False))
         if events or seq:  # nothing streamed at all: tool.finished carries the output
             events.append(event(None, False, True))
         _send(cfg, events)
-        _save(session, task_id, offset, seq)
+        # A flushed partial line may go on later (a resumed follower): skip the rest of it too.
+        _save(session, task_id, offset, seq, midline or bool(partial))
 
     while True:
         time.sleep(POLL_S)
@@ -291,15 +320,15 @@ def follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str) -> None:
         except OSError:
             return finish()
         if size < offset:  # rewritten from the start
-            offset, partial = 0, b""
+            offset, partial, midline = 0, b"", False
         if size == offset:
             if now - last_growth > IDLE_S and not _running(session, task_id):
                 return finish()
             continue
         last_growth = now
-        skipped = False
-        if size - offset > READ_MAX:
-            offset, partial, skipped = size - READ_MAX, b"", True
+        if size - offset > READ_MAX:  # a burst: only its last READ_MAX bytes are read, and the
+            # line they start in is skipped (it may start inside a value whose key wasn't read)
+            offset, partial, owed, midline = size - READ_MAX, b"", True, True
         try:
             with path.open("rb") as f:
                 f.seek(offset)
@@ -308,25 +337,31 @@ def follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str) -> None:
             return finish()
         offset += len(data)
         data = partial + data
+        partial = b""
+        if midline:  # the rest of a line whose head was forced out, or that a burst cut into
+            nl = data.find(b"\n")
+            owed = owed or nl != 0  # skipped bytes: the next event sent says so
+            if nl < 0:
+                _save(session, task_id, offset, seq, True)
+                continue
+            data, midline = data[nl + 1:], False
         cut = data.rfind(b"\n")
-        if cut < 0 and len(data) < CHUNK_CHARS:
-            partial = data  # wait for the rest of the line
-            continue
         if cut >= 0:
             data, partial = data[: cut + 1], data[cut + 1:]
-        else:
-            partial = b""
-        pieces = _chunks(data.decode("utf-8", "replace"))
-        if len(pieces) > PER_TICK:
-            pieces, skipped = pieces[-PER_TICK:], True
-        events = []
-        for i, piece in enumerate(pieces):
-            text, cut_short = preview(piece, CHUNK_MAX)
-            if text is None:  # no scrubber: send nothing rather than unredacted output
-                continue
-            events.append(event(text, (skipped and i == 0) or cut_short, False))
+        elif len(data) < READ_MAX:
+            partial = data  # wait for the rest of the line
+            _save(session, task_id, offset - len(partial), seq, False)
+            continue
+        else:  # one line of READ_MAX or more: send its head, skip the rest of the line
+            midline = True
+        out = _pieces(data.decode("utf-8", "replace"), owed) if data else []
+        if out is None:  # no scrubber
+            out = []
+        events = [event(text, trunc, False) for text, trunc in out]
+        if events:
+            owed = False
         _send(cfg, events)
-        _save(session, task_id, offset - len(partial), seq)  # a resumed follower rereads the partial line
+        _save(session, task_id, offset - len(partial), seq, midline)  # a resumed follower rereads the partial line
 
 
 if __name__ == "__main__":

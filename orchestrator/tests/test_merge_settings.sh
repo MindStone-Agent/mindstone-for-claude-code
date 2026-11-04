@@ -223,7 +223,7 @@ if merge_real "$TMP/sl_user.json" > "$TMP/r1.json" 2> "$TMP/er1" && merge_real "
     "$(jq -r '.statusLine.command' "$TMP/r1.json" | grep -c -- "$ORCH/fleet/statusline.py --wrap-b64 ")" "1"
   assert "real fragment: every fleet hook is async" \
     "$(jq '[.hooks[][].hooks[] | select(.command|contains("/fleet/report.py")) | .async] | all' "$TMP/r1.json")" "true"
-  assert "real fragment: fleet reporter on 14 events" \
+  assert "real fragment: fleet reporter on 15 events" \
     "$(jq '[.hooks | to_entries[] | select(any(.value[].hooks[]; .command|contains("/fleet/report.py")))] | length' "$TMP/r1.json")" "15"
   assert "real fragment: the live-output watch hook is synchronous (its watchPaths are read)" \
     "$(jq '[.hooks.SessionStart[].hooks[] | select(.command|contains("/fleet/live.py --watch")) | (.async // false)] == [false]' "$TMP/r1.json")" "true"

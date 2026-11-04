@@ -12,7 +12,8 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
 ### Added
 - **Fleet live output** (`orchestrator/fleet/live.py`) ([synapse#31](https://github.com/MindStone-Agent/synapse/issues/31)):
   with activity on, the output of running Bash commands and Monitor tasks streams to the board as
-  `tool.output` events every 2 s, redacted and capped, from one detached follower per task.
+  `tool.output` events every 2 s, redacted before they are cut and capped, from one detached follower
+  per task. The rest of a line already cut is skipped, never sent without its start.
 - **Fleet activity layer** (`orchestrator/fleet/activity.py`, `fleet/redact.py`) ([synapse#31](https://github.com/MindStone-Agent/synapse/issues/31)):
   with `[fleet] activity = true`, every tool call is reported with a redacted input and output
   preview shaped per tool and capped (never the contents of files Read returns, or the user's prompts
