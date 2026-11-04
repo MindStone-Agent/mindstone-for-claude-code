@@ -223,8 +223,10 @@ if merge_real "$TMP/sl_user.json" > "$TMP/r1.json" 2> "$TMP/er1" && merge_real "
     "$(jq -r '.statusLine.command' "$TMP/r1.json" | grep -c -- "$ORCH/fleet/statusline.py --wrap-b64 ")" "1"
   assert "real fragment: every fleet hook is async" \
     "$(jq '[.hooks[][].hooks[] | select(.command|contains("/fleet/report.py")) | .async] | all' "$TMP/r1.json")" "true"
-  assert "real fragment: fleet reporter on 14 events" \
-    "$(jq '[.hooks | to_entries[] | select(any(.value[].hooks[]; .command|contains("/fleet/report.py")))] | length' "$TMP/r1.json")" "14"
+  assert "real fragment: fleet reporter on 15 events (StopFailure ends a turn too)" \
+    "$(jq '[.hooks | to_entries[] | select(any(.value[].hooks[]; .command|contains("/fleet/report.py")))] | length' "$TMP/r1.json")" "15"
+  assert "real fragment: StopFailure (an API error ended the turn) runs the reporter, async" \
+    "$(jq '[.hooks.StopFailure[]?.hooks[] | select(.command|contains("/fleet/report.py")) | .async] == [true]' "$TMP/r1.json")" "true"
 else bad "real fragment merge failed: $(cat "$TMP/er1" "$TMP/er2")"; fi
 if merge_real_off "$TMP/r1.json" > "$TMP/r3.json" 2> "$TMP/er3" && merge_real_off "$TMP/empty.json" > "$TMP/r4.json" 2>> "$TMP/er3"; then
   assert "real fragment, Fleet turned off: the user's statusLine comes back exactly" \

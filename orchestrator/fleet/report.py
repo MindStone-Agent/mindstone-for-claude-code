@@ -31,8 +31,12 @@ if __package__ in (None, ""):  # run as a script by the hook command
 from fleet.common import agent_session, emit, release_claim, emit_later, fleet_config, now_iso, prune_state, rate_ok, remember_mode, reset_rate, scrub_subject  # noqa: E402
 
 HARNESS = "claude-code"
-# Notification types that mean a person must act (synapse#31: permission, idle, elicitation).
-NEEDS_INPUT_KINDS = {"permission_prompt", "idle_prompt", "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"}
+# Notification types sent as needs_input (synapse#31): permission, elicitation, agent and
+# teammate input requests, and idle_prompt. Claude Code sends idle_prompt after about 60 s of
+# waiting for input; the server shows it as idle, not "needs you" (synapse#39). It is also the
+# only end-of-turn signal after an Esc interrupt while streaming, which skips Stop.
+NEEDS_INPUT_KINDS = {"permission_prompt", "idle_prompt", "elicitation_dialog", "elicitation_url_dialog",
+                     "agent_needs_input", "worker_permission_prompt"}
 TOOL_SAMPLE_S = 5.0
 
 
@@ -68,6 +72,14 @@ def build(inp: dict) -> tuple[str, dict, dict] | None:
         return "turn.started", {}, {}
     if ev == "Stop":
         return "turn.ended", {}, {}
+    if ev == "StopFailure":
+        # Fires instead of Stop when an API error ends the turn. In a subagent it fires instead of
+        # SubagentStop, with agent_id set, and no SubagentStop follows (2.1.317): that is the
+        # subagent's end, not the main turn's, so it maps like SubagentStop.
+        if _s(inp.get("agent_id"), 128) is None:  # the same test _tail and _event apply
+            return "turn.ended", {}, {}
+        agent_type = _s(inp.get("agent_type"), 64)
+        return ("subagent.stopped", {"agent_type": agent_type}, {}) if agent_type else None
     if ev in ("PostToolUse", "PostToolUseFailure"):  # a failed tool is still activity
         return "tool", {"tool_name": _s(inp.get("tool_name"), 128)}, {}
     if ev in ("SubagentStart", "SubagentStop"):
@@ -150,10 +162,10 @@ def _tail(inp: dict, session: str) -> tuple[Path, str | None, bool] | None:
     tp = inp.get("transcript_path")
     agent_id = _s(inp.get("agent_id"), 128)
     # PreToolUse too, so "Let me run X" shows before X, not after it finishes.
-    if ev in ("PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "SubagentStop") and agent_id:
+    if ev in ("PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "SubagentStop", "StopFailure") and agent_id:
         path = a.subagent_transcript(tp, session, agent_id)
         return (path, agent_id, False) if path else None
-    if ev in ("PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop") and isinstance(tp, str) and tp:
+    if ev in ("PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "StopFailure") and isinstance(tp, str) and tp:
         return Path(tp), None, True
     return None
 
