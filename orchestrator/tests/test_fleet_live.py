@@ -910,7 +910,7 @@ def test_a_claimed_session_resumed_streams_again(tmp_path, synapse):
 
 
 OWNER_REF = (f"apiVersion: v1\ndata:\n  a: {V}\nmetadata:\n  name: x\n  ownerReferences:\n"
-             "  - kind: Deployment\n    name: web\nkind: Secret\n")
+             "  - apiVersion: apps/v1\n    kind: Deployment\n    name: web\nkind: Secret\n")  # as kubectl prints it
 
 
 def test_a_nested_kind_never_decides_a_data_block(tmp_path, small):
