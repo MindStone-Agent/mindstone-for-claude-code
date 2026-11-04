@@ -134,6 +134,7 @@ def _activity(cfg, inp: dict, session: str, mapped) -> list[dict] | None:
         if payload and payload.get("task_id"):
             from fleet import live
             live.remember_task(session, payload["task_id"], payload["tool_use_id"])
+            live.on_task_started(cfg, inp, session, payload["task_id"])
         return [_event(cfg, "tool.finished", session, payload, agent_id)] if payload else []
     if ev == "SubagentStart" and mapped is not None:
         kind, payload, _ = mapped

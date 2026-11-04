@@ -227,6 +227,8 @@ if merge_real "$TMP/sl_user.json" > "$TMP/r1.json" 2> "$TMP/er1" && merge_real "
     "$(jq '[.hooks | to_entries[] | select(any(.value[].hooks[]; .command|contains("/fleet/report.py")))] | length' "$TMP/r1.json")" "15"
   assert "real fragment: the live-output watch hook is synchronous (its watchPaths are read)" \
     "$(jq '[.hooks.SessionStart[].hooks[] | select(.command|contains("/fleet/live.py --watch")) | (.async // false)] == [false]' "$TMP/r1.json")" "true"
+  assert "real fragment: the watch hook also runs, synchronously, on CwdChanged (a cd rebuilds the watch list)" \
+    "$(jq '[.hooks.CwdChanged[].hooks[] | select(.command|contains("/fleet/live.py --watch")) | (.async // false)] == [false]' "$TMP/r1.json")" "true"
   assert "real fragment: FileChanged has no matcher (for FileChanged a matcher is paths to watch)" \
     "$(jq '[.hooks.FileChanged[] | has("matcher")] | any' "$TMP/r1.json")" "false"
 else bad "real fragment merge failed: $(cat "$TMP/er1" "$TMP/er2")"; fi
