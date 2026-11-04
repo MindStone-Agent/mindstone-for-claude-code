@@ -30,11 +30,12 @@ if __package__ in (None, ""):  # run as a script by the hook command
 from fleet.common import emit, emit_later, fleet_config, now_iso, prune_state, rate_ok, remember_mode, reset_rate, scrub_subject  # noqa: E402
 
 HARNESS = "claude-code"
-# Notification types that mean a person must act (synapse#31: permission, idle, elicitation).
-# Not idle_prompt: Claude Code sends it after about 60 s of waiting for input, which for an
-# always-on agent is ordinary idle, not "needs you" (Clint's first look at the live board,
-# 2026-11-03). Turn end already marks the session idle.
-NEEDS_INPUT_KINDS = {"permission_prompt", "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"}
+# Notification types sent as needs_input (synapse#31): permission, elicitation, agent and
+# teammate input requests, and idle_prompt. Claude Code sends idle_prompt after about 60 s of
+# waiting for input; the server shows it as idle, not "needs you" (synapse#39). It is also the
+# only end-of-turn signal after an Esc interrupt while streaming, which skips Stop.
+NEEDS_INPUT_KINDS = {"permission_prompt", "idle_prompt", "elicitation_dialog", "elicitation_url_dialog",
+                     "agent_needs_input", "worker_permission_prompt"}
 TOOL_SAMPLE_S = 5.0
 
 
@@ -68,7 +69,7 @@ def build(inp: dict) -> tuple[str, dict, dict] | None:
         return "session.ended", {"reason": _s(inp.get("reason"), 32)}, {}
     if ev == "UserPromptSubmit":
         return "turn.started", {}, {}
-    if ev == "Stop":
+    if ev in ("Stop", "StopFailure"):  # StopFailure fires instead of Stop when an API error ends the turn
         return "turn.ended", {}, {}
     if ev in ("PostToolUse", "PostToolUseFailure"):  # a failed tool is still activity
         return "tool", {"tool_name": _s(inp.get("tool_name"), 128)}, {}

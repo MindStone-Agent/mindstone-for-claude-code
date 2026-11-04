@@ -10,9 +10,10 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
 ## [Unreleased]
 
 ### Fixed
-- **Fleet: an idle session is no longer "needs you"** (synapse#31): the reporter no longer sends Claude Code's
-  `idle_prompt` notification (sent after about a minute of waiting for input) as needs-input; only
-  permission prompts and elicitations are. Re-run bootstrap to drop it from the Notification matcher.
+- **Fleet: a turn ended by an API error ends on the board** (synapse#31): Claude Code fires
+  `StopFailure` instead of `Stop` then (rate limit, overload); the reporter now sends `turn.ended`
+  for it, so the session goes idle at once instead of a minute later. A teammate's permission
+  request (`worker_permission_prompt`) is now sent as needs-input. Re-run bootstrap to add both hooks.
 
 ### Added
 - **Fleet activity layer** (`orchestrator/fleet/activity.py`, `fleet/redact.py`) ([synapse#31](https://github.com/MindStone-Agent/synapse/issues/31)):

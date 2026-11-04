@@ -156,6 +156,9 @@ def test_session_started_shape_and_auth(tmp_path, synapse):
 @pytest.mark.parametrize("inp,typ,payload", [
     (base("UserPromptSubmit", prompt=f"my key is {SECRET}"), "turn.started", {}),
     (base("Stop", stop_hook_active=False, last_assistant_message=SECRET, background_tasks=[]), "turn.ended", {}),
+    # An API error ends the turn with StopFailure instead of Stop (Claude Code 2.1.317).
+    (base("StopFailure", error="rate_limit", error_details=f"429 {SECRET}", last_assistant_message=SECRET),
+     "turn.ended", {}),
     (base("PostToolUse", tool_name="Bash", tool_input={"command": f"echo {SECRET}"},
           tool_response={"stdout": SECRET}, tool_use_id="toolu_1", duration_ms=9), "tool", {"tool_name": "Bash"}),
     (base("SubagentStart", agent_id="a1", agent_type="Explore"), "subagent.started", {"agent_type": "Explore"}),
@@ -164,8 +167,11 @@ def test_session_started_shape_and_auth(tmp_path, synapse):
     (base("SessionEnd", reason="prompt_input_exit"), "session.ended", {"reason": "prompt_input_exit"}),
     (base("PreCompact", trigger="auto", custom_instructions=SECRET), "compact", {"phase": "pre"}),
     (base("PostCompact", trigger="auto", compact_summary=SECRET), "compact", {"phase": "post"}),
+    (base("Notification", notification_type="idle_prompt", message=f"waiting {SECRET}"), "needs_input", {"kind": "idle_prompt"}),
     (base("Notification", notification_type="permission_prompt", message=f"Claude needs your permission {SECRET}"),
      "needs_input", {"kind": "permission_prompt"}),
+    (base("Notification", notification_type="worker_permission_prompt", message=f"worker needs permission for {SECRET}"),
+     "needs_input", {"kind": "worker_permission_prompt"}),
 ])
 def test_allow_list(tmp_path, synapse, inp, typ, payload):
     env = make_env(tmp_path, synapse.url)
@@ -214,7 +220,6 @@ def test_task_subject_is_scrubbed_and_cut(tmp_path, synapse):
 
 @pytest.mark.parametrize("inp", [
     base("Notification", notification_type="auth_success", message="ok"),
-    base("Notification", notification_type="idle_prompt", message="Claude is waiting for your input"),  # plain idle
     base("PermissionRequest", tool_name="Bash", tool_input={"command": SECRET}),
     base("SomethingNew", anything=SECRET),
     {"hook_event_name": "UserPromptSubmit", "prompt": "no session id"},
