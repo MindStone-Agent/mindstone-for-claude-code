@@ -537,10 +537,14 @@ def test_pieces_cap_by_bytes_as_sent_and_lose_nothing():
 
 
 def test_a_burst_starting_at_a_line_start_skips_nothing(tmp_path, small):
+    """Round 1: the burst skip took the first line even when the read began exactly on one."""
     f = _reset(tmp_path, small)
-    lines = "".join(f"row {n:05d}\n" for n in range(1000))  # 10 bytes a line, READ_MAX 2048
-    out = small(f, [_w(f, lines[: len(lines) - 2040] + lines[len(lines) - 2040:])])
-    assert _wire(out).startswith("row ") and _wire(out).endswith("row 00999\n")
+    lines = [f"row  {n:010d}\n" for n in range(1000)]  # 16 bytes each; READ_MAX 2048 = 128 lines
+    assert len(lines[0]) == 16 and L.READ_MAX % 16 == 0
+    out = small(f, [_w(f, "".join(lines))])
+    assert _wire(out) == "".join(lines[-L.READ_MAX // 16:])
+    assert out[0]["truncated"] is True  # the lines before the read were skipped
+
 
 
 # --- wiring: CwdChanged and resumed sessions ------------------------------------------------------
