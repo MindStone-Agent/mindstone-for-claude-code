@@ -83,7 +83,7 @@ def synapse():
     s.server.shutdown()
 
 
-def make_env(tmp_path: Path, url: str, enabled: bool = True, inline: bool = True) -> dict:
+def make_env(tmp_path: Path, url: str, enabled: bool = True, inline: bool = True, agent: str | None = "plumb") -> dict:
     home = tmp_path / "synapse-home"
     home.mkdir(exist_ok=True)
     (home / "plumb.token").write_text(TOKEN + "\n")
@@ -94,6 +94,8 @@ def make_env(tmp_path: Path, url: str, enabled: bool = True, inline: bool = True
     env.update(MS4CC_SYNAPSE_TOML=str(toml), MS4CC_SYNAPSE_HOME=str(home))
     if inline:
         env["MS4CC_FLEET_INLINE"] = "1"
+    if agent is not None:  # the agent's own session (launched marked); None: any other session
+        env["MS4CC_FLEET_AGENT"] = agent
     return env
 
 
@@ -983,3 +985,102 @@ def test_a_nul_in_the_wrapped_command_still_shows_a_bar(tmp_path, synapse):
     env = make_env(tmp_path, synapse.url, enabled=False)
     r = hook(env, STATUS_IN, STATUSLINE, ["--wrap-b64", base64.b64encode(b"echo a\x00b").decode()])
     assert (r.stdout.decode(), r.returncode) == ("Opus 5.5 · ctx 42% · $1.23", 0)
+
+
+# --- agent sessions only (Clint, 2026-11-04) ---------------------------------------------------
+# Every Claude Code session on a machine shares settings.json and so the fleet hooks; only the
+# agent's own sessions may report. Default deny, decided before any network call.
+
+CLAIM = ORCH / "fleet" / "claim.py"
+OTHER_SID = "99999999-8888-7777-6666-555555555555"
+
+
+def _fragment_report_events() -> list[str]:
+    frag = json.loads((ORCH / "settings.fragment.json").read_text())
+    return sorted(ev for ev, groups in frag["hooks"].items()
+                  if any("/fleet/report.py" in h.get("command", "") for g in groups for h in g.get("hooks", [])))
+
+
+def _activity_env(tmp_path: Path, url: str, agent: str | None) -> dict:
+    env = make_env(tmp_path, url, agent=agent)
+    toml = Path(env["MS4CC_SYNAPSE_TOML"])
+    toml.write_text(toml.read_text() + "activity = true\n")
+    return env
+
+
+def _every_hook(env: dict, sid: str = SID) -> None:
+    for ev in _fragment_report_events():
+        hook(env, base(ev, session_id=sid, tool_name="Bash", tool_input={"command": "ls"}, tool_use_id="toolu_A",
+                       tool_response={"stdout": "x"}, notification_type="permission_prompt",
+                       agent_id="a1", agent_type="Explore", task_subject="t", reason="other"))
+    hook(env, dict(STATUS_IN, session_id=sid), STATUSLINE)
+
+
+def test_another_session_on_the_machine_sends_nothing_at_any_hook(tmp_path, synapse):
+    """Not marked, not claimed: every fleet hook and the status line send nothing and keep no
+    state."""
+    assert len(_fragment_report_events()) >= 14
+    env = _activity_env(tmp_path, synapse.url, agent=None)
+    _every_hook(env)
+    time.sleep(0.3)
+    assert synapse.requests == []
+    assert not (Path(env["MS4CC_SYNAPSE_HOME"]) / "fleet").exists()
+
+
+def test_the_agents_own_session_sends(tmp_path, synapse):
+    env = _activity_env(tmp_path, synapse.url, agent="plumb")
+    hook(env, base("UserPromptSubmit", prompt="x"))
+    (ev,) = synapse.wait(1)
+    assert ev["type"] == "turn.started"
+
+
+def test_a_launch_mark_naming_another_handle_is_refused(tmp_path, synapse):
+    env = _activity_env(tmp_path, synapse.url, agent="cairn")
+    _claim_file(env).parent.mkdir(parents=True)
+    _claim_file(env).write_text(SID + "\n")  # even a claimed id: the launch mark wins
+    _every_hook(env)
+    time.sleep(0.3)
+    assert synapse.requests == []
+    env["MS4CC_FLEET_AGENT"] = ""
+    _every_hook(env)
+    time.sleep(0.3)
+    assert synapse.requests == []
+
+
+def _claim_file(env: dict) -> Path:
+    return Path(env["MS4CC_SYNAPSE_HOME"]) / "fleet-sessions" / "plumb"
+
+
+def _claim(env: dict, *args: str, sid: str | None = SID) -> subprocess.CompletedProcess:
+    e = dict(env)
+    e.pop("CLAUDE_CODE_SESSION_ID", None)
+    if sid is not None:
+        e["CLAUDE_CODE_SESSION_ID"] = sid
+    return subprocess.run([sys.executable, "-B", str(CLAIM), *args], env=e, capture_output=True, text=True, timeout=20)
+
+
+def test_a_running_session_claims_itself_and_only_itself(tmp_path, synapse):
+    env = make_env(tmp_path, synapse.url, agent=None)
+    assert _claim(env).returncode == 0
+    assert _claim_file(env).read_text().split() == [SID]
+    assert oct(_claim_file(env).stat().st_mode & 0o777) == "0o600"
+    assert oct(_claim_file(env).parent.stat().st_mode & 0o777) == "0o700"
+    hook(env, base("UserPromptSubmit", prompt="x"))
+    assert [e["session_id"] for e in synapse.wait(1)] == [SID]
+    hook(env, base("UserPromptSubmit", prompt="x", session_id=OTHER_SID))  # /clear: a new id
+    time.sleep(0.3)
+    assert len(synapse.events()) == 1
+    assert _claim(env, "--list").stdout.split() == [SID]
+    assert _claim(env, "--release").returncode == 0
+    hook(env, base("UserPromptSubmit", prompt="x"))
+    time.sleep(0.3)
+    assert len(synapse.events()) == 1 and _claim_file(env).read_text() == ""
+
+
+def test_claim_needs_a_session_id_and_fleet_on(tmp_path, synapse):
+    env = make_env(tmp_path, synapse.url, agent=None)
+    assert _claim(env, sid=None).returncode == 1
+    assert _claim(env, sid="../../etc/x").returncode == 1
+    assert not _claim_file(env).exists()
+    off = make_env(tmp_path / "off", synapse.url, enabled=False, agent=None) if (tmp_path / "off").mkdir() is None else None
+    assert _claim(off).returncode == 1

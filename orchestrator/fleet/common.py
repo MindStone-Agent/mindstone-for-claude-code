@@ -140,6 +140,33 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+AGENT_ENV = "MS4CC_FLEET_AGENT"
+
+
+def claimed_sessions_file(handle: str) -> Path:
+    """The session ids claimed as the agent's (fleet/claim.py), one per line."""
+    return HOME_SYNAPSE / "fleet-sessions" / handle
+
+
+def agent_session(cfg: FleetConfig, session: object) -> bool:
+    """Whether this Claude Code session is the agent's own. Only those report (Clint,
+    2026-11-04: "Agent sessions only"); every other session on the machine shares the same
+    settings.json and hooks, and sends nothing. Default deny, decided without the network:
+    - MS4CC_FLEET_AGENT set (by the agent's launch command): the session is the agent's if it
+      names this config's handle, and refused if it names another;
+    - otherwise only a session id claimed with fleet/claim.py, listed in
+      ~/.synapse/fleet-sessions/<handle>. A new id (/clear, a fork) isn't claimed by the old."""
+    marked = os.environ.get(AGENT_ENV)
+    if marked is not None:
+        return marked == cfg.handle
+    if not isinstance(session, str) or not session or safe_session(session) != session:
+        return False
+    try:
+        return session in claimed_sessions_file(cfg.handle).read_text(encoding="utf-8").split()
+    except OSError:
+        return False
+
+
 def safe_session(session: str) -> str:
     """A session id as a file-name component: no separators, no dots, at most 128 chars."""
     return "".join(c for c in session if c.isalnum() or c in "-_")[:128] or "none"

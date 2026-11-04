@@ -27,7 +27,7 @@ from pathlib import Path
 if __package__ in (None, ""):  # run as a script by the hook command
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fleet.common import emit, emit_later, fleet_config, now_iso, prune_state, rate_ok, remember_mode, reset_rate, scrub_subject  # noqa: E402
+from fleet.common import agent_session, emit, emit_later, fleet_config, now_iso, prune_state, rate_ok, remember_mode, reset_rate, scrub_subject  # noqa: E402
 
 HARNESS = "claude-code"
 # Notification types that mean a person must act (synapse#31: permission, idle, elicitation).
@@ -168,7 +168,7 @@ def main() -> int:
     if not isinstance(inp, dict):
         return 0
     session = _s(inp.get("session_id"), 128)
-    if not session:
+    if not session or not agent_session(cfg, session):  # another session on this machine: silent
         return 0
     remember_mode(session, inp.get("permission_mode"))  # the status line has no mode field
     mapped = build(inp)

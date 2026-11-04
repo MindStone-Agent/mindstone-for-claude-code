@@ -156,7 +156,7 @@ def report(inp: dict) -> None:
     from fleet import common as c
 
     cfg = c.fleet_config()
-    if cfg is None:
+    if cfg is None or not c.agent_session(cfg, inp.get("session_id")):  # not the agent's: silent
         return
     event = status_event(inp, cfg.machine, c.now_iso, c.read_mode)
     if event is None:
