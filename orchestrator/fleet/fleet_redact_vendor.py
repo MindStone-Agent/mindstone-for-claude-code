@@ -517,7 +517,8 @@ def _open_string_at(text: str) -> int | None:
 
 def _open_parity(text: str, structural: bool) -> int | None:
     """Where the first JSON string still open at the end of its line opens, or None. A quote
-    after an odd run of backslashes is escaped and opens nothing."""
+    after an odd run of backslashes is escaped and opens nothing, and so does a run of three
+    or more (_triple)."""
     if '"' not in text:
         return None
     start = 0
@@ -531,6 +532,10 @@ def _open_parity(text: str, structural: bool) -> int | None:
                 i += 2
                 continue
             if c == '"':
+                run = _triple(text, i, end)
+                if run:
+                    i += run
+                    continue
                 if opened >= 0:
                     opened = -1
                 elif not structural:
@@ -548,8 +553,19 @@ def _open_parity(text: str, structural: bool) -> int | None:
     return None
 
 
+def _triple(text: str, i: int, end: int) -> int:
+    """The length of the run of quotes at i if it is three or more, else 0. Valid JSON never
+    holds three adjacent unescaped quotes, inside a string or out, so such a run opens and
+    closes nothing: a Python or TOML \"\"\" line is not a cut JSON string (Cairn's review of
+    #41: they were 87 of the 246 false cuts in 3,000 real tool results)."""
+    j = i
+    while j < end and text[j] == '"':
+        j += 1
+    return j - i if j - i >= 3 else 0
+
+
 def _quotes(text: str, start: int) -> int:
-    """Unescaped quotes on the line that starts at start."""
+    """Unescaped quotes on the line that starts at start, runs of three or more not counted."""
     end = text.find("\n", start)
     end = len(text) if end < 0 else end
     n, i = 0, start
@@ -557,7 +573,12 @@ def _quotes(text: str, start: int) -> int:
         if text[i] == "\\":
             i += 2
             continue
-        n += text[i] == '"'
+        if text[i] == '"':
+            run = _triple(text, i, end)
+            if run:
+                i += run
+                continue
+            n += 1
         i += 1
     return n
 
