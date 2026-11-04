@@ -646,8 +646,8 @@ def test_an_earlier_objects_kind_never_releases_a_secrets_data(tmp_path, small, 
     # withheld, the ConfigMap's as well.
 
 
-def _big_secret(n: int) -> tuple[str, list[str]]:
-    vals = [f"c2VjcmV0dmFsdWU{k:05d}" for k in range(n)]
+def _big_secret(n: int, plain: bool = False) -> tuple[str, list[str]]:
+    vals = [f"plainvalue{k:05d}" if plain else f"c2VjcmV0dmFsdWU{k:05d}" for k in range(n)]
     return ("apiVersion: v1\ndata:\n" + "".join(f"  key{k:05d}.conf: {v}\n" for k, v in enumerate(vals))
             + "kind: Secret\nmetadata:\n  name: big\ntype: Opaque\n"), vals
 
@@ -787,7 +787,8 @@ def test_a_withheld_run_is_not_context_for_what_follows(tmp_path, small, monkeyp
     """A Secret withheld past HOLD_MAX in one poll, its kind in the next. Were the withheld raw
     values context, the kind would re-redact them and the whole next batch would be dropped."""
     monkeypatch.setattr(L, "CTX_MAX", 8192)  # the header and the values inside the window
-    text, vals = _big_secret(60)
+    text, vals = _big_secret(60, plain=True)  # values only the Secret rule redacts
+    assert all(v in clean("  a: " + v + "\n") for v in vals[:3])
     first, rest = text[: text.index("kind: Secret")], text[text.index("kind: Secret"):]
     f = _reset(tmp_path, small)
     out = small(f, [_w(f, first), _w(f, rest)])
