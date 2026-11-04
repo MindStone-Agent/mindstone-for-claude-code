@@ -12,7 +12,8 @@ things, in this order:
    is imported before the bar is out, so a Fleet module that can't load (no tomllib on Python
    3.10, say) can't blank the user's bar. A missing or broken MS4CC venv still can: the command
    runs on the venv's python.
-2. **Reports `status`** to Synapse, only when `[fleet] enabled = true`: at most once every
+2. **Reports `status`** to Synapse, only when `[fleet] enabled = true` and the session is the
+   agent's own (common.agent_session): at most once every
    10 s per session, from a detached grandchild. An update that falls inside the window is
    kept and sent when the window ends, so the last update of a turn isn't lost.
 
@@ -156,7 +157,7 @@ def report(inp: dict) -> None:
     from fleet import common as c
 
     cfg = c.fleet_config()
-    if cfg is None:
+    if cfg is None or not c.agent_session(cfg, inp.get("session_id")):  # not the agent's: silent
         return
     event = status_event(inp, cfg.machine, c.now_iso, c.read_mode)
     if event is None:

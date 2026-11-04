@@ -677,6 +677,7 @@ def test_emit_later_sends_the_events_before_building_more(monkeypatch):
     monkeypatch.setattr(C, "post", lambda cfg, batch: sent.append([e["type"] for e in batch]))
     monkeypatch.setattr(C, "detach", lambda fn: fn())
     monkeypatch.setenv("MS4CC_FLEET_INLINE", "1")
+    monkeypatch.setenv("MS4CC_FLEET_AGENT", "plumb")
 
     def boom():
         raise RuntimeError("tail failed")
@@ -1076,6 +1077,7 @@ def in_process_report(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "HOME_SYNAPSE", home)
     monkeypatch.setattr(C, "STATE_DIR", home / "fleet")
     monkeypatch.setenv("MS4CC_FLEET_INLINE", "1")
+    monkeypatch.setenv("MS4CC_FLEET_AGENT", "plumb")
     sent: list[dict] = []
     monkeypatch.setattr(C, "post", lambda cfg, events: sent.extend(events) or 202)
 
