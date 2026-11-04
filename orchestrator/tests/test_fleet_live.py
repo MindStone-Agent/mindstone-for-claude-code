@@ -465,6 +465,7 @@ def test_a_secret_data_block_waits_for_its_kind(tmp_path, small):
                     _w(f, "kind: Secret\nmetadata:\n  name: x\n")])
     assert "c2VjcmV0dmFsdWU=" not in _wire(out) and L.WITHHELD in _wire(out)
     assert out[0]["text"] == "apiVersion: v1\ndata:\n"  # the header goes; its values wait
+    assert "kind: Secret\nmetadata:\n  name: x\n" in _wire(out)  # the withheld run isn't context
 
 
 def test_a_key_block_waits_for_its_end_line(tmp_path, small):
@@ -753,3 +754,29 @@ def test_a_foreground_task_is_not_let_go_when_idle(tmp_path, small):
     idle = [lambda: None] * 5  # the fake clock jumps past IDLE_S
     out = small(f, [_w(f, "step 1 of 2\n")] + idle + [_w(f, "step 2 of 2: FAILED\n")])
     assert _wire(out) == "step 1 of 2\nstep 2 of 2: FAILED\n" and out[-1]["done"] is True
+
+
+def test_a_secret_whose_kind_comes_after_other_keys_withholds_its_data(tmp_path, small):
+    """Hand-written order: data, then metadata, then kind. The next key isn't kind, but the
+    document's kind (read in the same poll) is Secret."""
+    f = _reset(tmp_path, small)
+    out = small(f, [_w(f, f"apiVersion: v1\ndata:\n  a: {V}\nmetadata:\n  name: x\nkind: Secret\n")])
+    assert V not in _wire(out)
+
+
+def test_a_configmaps_data_at_the_end_of_the_output_is_sent(tmp_path, small):
+    """Undecided when the poll ends; the command's end decides it: not a Secret."""
+    f = _reset(tmp_path, small)
+    out = small(f, [_w(f, "kind: ConfigMap\ndata:\n  color: blue\n")])
+    assert _wire(out) == "kind: ConfigMap\ndata:\n  color: blue\n"
+
+
+def test_a_repeat_that_changes_the_context_sends_nothing_rather_than_a_misaligned_cut(tmp_path, small):
+    """The new line makes a value seen earlier a known secret, so the earlier line redacts
+    differently: what belongs to the new line can't be told apart, so nothing of it is sent."""
+    bare, keyed = "the value is horse-battery-77\n", "export API_TOKEN=horse-battery-77\n"
+    assert clean(bare) == bare and "horse-battery-77" not in clean(bare + keyed)  # the setup holds
+    f = _reset(tmp_path, small)
+    out = small(f, [_w(f, "the value is horse-battery-77\n"),
+                    _w(f, "export API_TOKEN=horse-battery-77\n"), _w(f, "next\n")])
+    assert _wire(out) == "the value is horse-battery-77\nnext\n" and out[1]["truncated"] is True
