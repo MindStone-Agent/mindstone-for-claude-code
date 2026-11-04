@@ -16,8 +16,7 @@ Claude Code writes every Bash command's output, foreground or background, to
    - Only complete lines are sent. A partial line waits for its end; when the command ends,
      its last line is whole and goes too.
    - A line scanner (_scan), whose state is kept across polls, withholds what spans lines: a
-     private key from BEGIN to END, key-like lines after a BEGIN with no END, a key's tail
-     before its END, and the values under a Secret's `data:` or `stringData:` (a block waits
+     private key from BEGIN to END, key-like lines after a BEGIN with no END, and the values under a Secret's `data:` or `stringData:` (a block waits
      until its document shows whether it is a Secret; past HOLD_MAX it is withheld). One
      WITHHELD line stands in for each run.
    - What the scanner lets through is redacted along with up to CTX_MAX of the output before
@@ -295,11 +294,11 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
     - A private key, BEGIN to END, is never sent; nor, after a BEGIN with no END, the key-like
       lines that follow it.
     - The values under a Secret's `data:` or `stringData:` are never sent. A block is a
-      Secret's when its document showed `kind: Secret` before it, or when the next key after
-      it is `kind: Secret` (kubectl prints keys sorted: data before kind). Until that is known
-      the block waits; past HOLD_MAX it is withheld.
-    - Key-like lines with nothing after them yet wait for the next line: an END makes them a
-      key's tail, withheld.
+      Secret's when its document shows `kind: Secret` before it or anywhere in what has been
+      read after it (kubectl prints keys sorted: data before kind). It waits until the next key
+      after the block has arrived (or the output ends); past HOLD_MAX it is withheld.
+    - Key-like lines with nothing after them yet wait for the next line, so that a key's tail
+      and its END line are redacted together.
 
     replay: lines skipped unread by a burst, run through only to bring the state up to date;
     nothing waits, and a block still open at the end stays open."""
@@ -342,11 +341,11 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
                 j += 1
             if j < n and _CLOSER.fullmatch(_bare(raw[j])) and _indent(_bare(raw[j])) == h:
                 j += 1
-            k = j  # the next key at h or above decides: kind Secret, or anything else
+            k = j  # once the next key at h or above has arrived, a kind: Secret would have too
             while k < n and (not _bare(raw[k]).strip() or _IMMUTABLE.fullmatch(_bare(raw[k]))):
                 k += 1
             secret_ahead = any(_KIND_SECRET.fullmatch(_bare(x)) for x in raw[i:_doc_end(raw, i)])
-            if st["secret_doc"] or secret_ahead or (k < n and _KIND_SECRET.fullmatch(_bare(raw[k]))):
+            if st["secret_doc"] or secret_ahead:
                 secret = True
             elif k < n or final:
                 secret = False
@@ -380,10 +379,6 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
             r = i
             while r < n and _KEYISH.fullmatch(_bare(raw[r])):
                 r += 1
-            if r < n and _PEM_END.search(_bare(raw[r])):  # a key's tail, its BEGIN not seen
-                withhold(r + 1)
-                i = r + 1
-                continue
             if r == n and not final:
                 if size_from(i) <= HOLD_MAX:
                     return _ended_with(out, st), i, wend[0]  # an END may follow

@@ -748,8 +748,9 @@ def test_session_end_sends_done_for_a_follower_already_stopped(tmp_path, small):
     assert out[-1]["truncated"] is True  # output after the stop can't be known
 
 
-def test_a_foreground_task_is_not_let_go_when_idle(tmp_path, small):
+def test_a_foreground_task_is_not_let_go_when_idle(tmp_path, small, monkeypatch):
     """Round-2 sev-3: a foreground command silent for a minute lost its last lines."""
+    monkeypatch.setattr(L, "IDLE_S", 3.0)  # the fake clock passes it in two polls
     f = _reset(tmp_path, small)
     idle = [lambda: None] * 5  # the fake clock jumps past IDLE_S
     out = small(f, [_w(f, "step 1 of 2\n")] + idle + [_w(f, "step 2 of 2: FAILED\n")])
@@ -780,3 +781,15 @@ def test_a_repeat_that_changes_the_context_sends_nothing_rather_than_a_misaligne
     out = small(f, [_w(f, "the value is horse-battery-77\n"),
                     _w(f, "export API_TOKEN=horse-battery-77\n"), _w(f, "next\n")])
     assert _wire(out) == "the value is horse-battery-77\nnext\n" and out[1]["truncated"] is True
+
+
+def test_a_withheld_run_is_not_context_for_what_follows(tmp_path, small, monkeypatch):
+    """A Secret withheld past HOLD_MAX in one poll, its kind in the next. Were the withheld raw
+    values context, the kind would re-redact them and the whole next batch would be dropped."""
+    monkeypatch.setattr(L, "CTX_MAX", 8192)  # the header and the values inside the window
+    text, vals = _big_secret(60)
+    first, rest = text[: text.index("kind: Secret")], text[text.index("kind: Secret"):]
+    f = _reset(tmp_path, small)
+    out = small(f, [_w(f, first), _w(f, rest)])
+    assert [v for v in vals if v in _wire(out)] == []
+    assert "kind: Secret\nmetadata:\n  name: big\ntype: Opaque\n" in _wire(out)
