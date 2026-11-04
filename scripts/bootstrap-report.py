@@ -71,6 +71,15 @@ STATUS_MARK = "partial-marking"      # body delivered, heading clipped
 STATUS_BODY = "partial-body"         # heading delivered, body cut
 STATUS_ABSENT = "absent"
 
+# Cairn's four-step cause attribution. A count without a cause leaves the reader to guess, and
+# a reader guesses the cause they already believed. Checked in this order, and the last step is
+# what makes a zero trustworthy: if a rule should have arrived and did not, that is a bug in the
+# probe, not a finding about the file.
+CAUSE_NOT_WRITTEN = "not-in-file"      # never written to disk
+CAUSE_ALLOWLIST = "allowlisted-out"    # file not offered to this run
+CAUSE_TRIM = "trimmed"                 # rule offset outside the kept head/tail
+CAUSE_UNKNOWN = "UNKNOWN"              # should be present; probe is wrong
+
 
 @dataclass
 class Section:
@@ -162,6 +171,43 @@ def classify(sec: Section, head_end: int, tail_start: int, text: str) -> None:
         sec.status = STATUS_BODY
 
 
+def attribute_cause(
+    sec: Section,
+    head_end: int,
+    tail_start: int,
+    file_offered: bool,
+    text: str,
+) -> tuple[str, str]:
+    """Cairn's four steps, in order. Returns (cause, explanation).
+
+    The control is the file on disk: we know what was written, so the gap between that and what
+    arrived is the cause. Step 4 exists so a zero can be trusted -- if the rule should have been
+    delivered and was not, the probe is wrong and we say so rather than inventing a cause.
+    """
+    # 1. not in the file on disk: never written
+    if sec.delivered == 0 and sec.lost == 0 and sec.size == 0:
+        return CAUSE_NOT_WRITTEN, "zero-length section"
+    if sec.status == STATUS_WHOLE:
+        return "", "arrived whole"
+
+    # 2. the file was not offered to this run at all
+    if not file_offered:
+        return CAUSE_ALLOWLIST, "file not in this session class's bootstrap set"
+
+    # 3. the rule's offset falls outside the kept head and tail
+    outside_head = sec.start >= head_end and sec.end <= tail_start
+    spans_seam = (sec.start < head_end < sec.end) or (sec.start < tail_start < sec.end)
+    if outside_head or spans_seam:
+        return CAUSE_TRIM, f"offset {sec.start}-{sec.end} vs kept head<{head_end} tail>{tail_start}"
+
+    # 4. it should have been there. The probe is wrong, and saying "trimmed" here would be a
+    #    fabricated cause for a real bug.
+    return CAUSE_UNKNOWN, (
+        f"section sits inside the kept window (offset {sec.start}-{sec.end}, "
+        f"head<{head_end}, tail>{tail_start}) but arrived as {sec.status}; probe bug"
+    )
+
+
 def build_report(
     text: str,
     limit: int,
@@ -170,6 +216,7 @@ def build_report(
     head_chars: int | None = None,
     tail_chars: int | None = None,
     file_name: str | None = None,
+    file_offered: bool = True,
 ) -> dict:
     # Absolute counts win when given: a harness that reports its own head and tail should be
     # measured, not approximated by a fraction that happens to work on two boxes.
@@ -201,6 +248,7 @@ def build_report(
         marker_len = len(marker_block) + 2
     injected = window + marker_len
 
+    s_causes: list[dict] = []
     secs = split_sections(text)
     for s in secs:
         classify(s, head_end, tail_start, text)
@@ -222,6 +270,20 @@ def build_report(
 
     rules = [s for s in secs if s.is_rule]
     rules_broken = [s for s in rules if s.status not in (STATUS_WHOLE, STATUS_STUB)]
+
+    # cause attribution for every rule that did not arrive whole
+    for s in rules_broken:
+        cause, why = attribute_cause(s, head_end, tail_start, file_offered, text)
+        s_causes.append(
+            {
+                "title": s.title,
+                "status": s.status,
+                "cause": cause,
+                "why": why,
+                "lost": s.lost,
+            }
+        )
+    unknown = [c for c in s_causes if c["cause"] == CAUSE_UNKNOWN]
 
     return {
         "file": {
@@ -262,7 +324,14 @@ def build_report(
             "arriving_stub": len([s for s in rules if s.status == STATUS_STUB]),
             "without_marking": len([s for s in rules if s.status in (STATUS_MARK, STATUS_BODY)]),
             "absent": len([s for s in rules if s.status == STATUS_ABSENT]),
-            "broken": [{"title": s.title, "status": s.status, "lost": s.lost} for s in rules_broken],
+            "broken": s_causes,
+            "causes": {
+                CAUSE_TRIM: len([c for c in s_causes if c["cause"] == CAUSE_TRIM]),
+                CAUSE_ALLOWLIST: len([c for c in s_causes if c["cause"] == CAUSE_ALLOWLIST]),
+                CAUSE_NOT_WRITTEN: len([c for c in s_causes if c["cause"] == CAUSE_NOT_WRITTEN]),
+                CAUSE_UNKNOWN: len(unknown),
+            },
+            "probe_failed": bool(unknown),
             "sums": (
                 len([s for s in rules if s.status == STATUS_WHOLE])
                 + len([s for s in rules if s.status == STATUS_STUB])
@@ -315,7 +384,11 @@ def print_report(rep: dict, rules_only: bool) -> None:
     r = rep["rules"]
     print(f"  rules: {r['total']} total · {r['arriving']} whole · {r['arriving_stub']} whole(newline only) · {r['without_marking']} without marking · {r['absent']} absent")
     for b in r["broken"]:
-        print(f"    ⚠️  {b['status']:<16} {b['title'][:58]}")
+        print(f"    ⚠️  {b['status']:<16} {b['title'][:52]}")
+        print(f"        cause: {b['cause']}  ({b['why']})")
+    if r.get("probe_failed"):
+        cause_txt = ", ".join(f"{k}={v}" for k, v in r["causes"].items() if v)
+        print(f"    ❌ UNKNOWN cause count > 0 ({cause_txt}) — the probe is wrong, not the file")
     if rules_only:
         return
     print()
@@ -341,6 +414,9 @@ def main() -> int:
                     help="absolute tail chars, overriding --tail-ratio")
     ap.add_argument("--json", action="store_true", help="emit JSON")
     ap.add_argument("--rules-only", action="store_true", help="skip the per-section listing")
+    ap.add_argument("--not-offered", action="store_true",
+                    help="this file was NOT offered to the run (cron/subagent allowlist). "
+                         "Changes the cause from 'trimmed' to 'allowlisted-out'.")
     ap.add_argument("--rules-pattern", default=None,
                     help="regex for rule-section titles (overrides the default word list)")
     args = ap.parse_args()
@@ -394,6 +470,7 @@ def main() -> int:
         head_chars=head_chars,
         tail_chars=tail_chars,
         file_name=path.name,
+        file_offered=not args.not_offered,
     )
     rep["file"]["path"] = str(path)
 
@@ -405,6 +482,8 @@ def main() -> int:
     # 1 is reserved for "these numbers cannot be trusted". A rule arriving badly is a real
     # finding, not a reason to distrust the arithmetic, so it gets its own code.
     if not rep["not_delivered"]["agree"]:
+        return 1
+    if rep["rules"].get("probe_failed"):
         return 1
     if rep["rules"]["absent"] or rep["rules"]["without_marking"]:
         return 3
