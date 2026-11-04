@@ -276,6 +276,8 @@ def test_activity_off_never_follows(tmp_path, synapse):
     ("Bash", {"stdout": "", "stderr": "", "backgroundTaskId": "b0r0svj79"}, "b0r0svj79"),
     ("Monitor", {"taskId": "bmb0vxgzz", "timeoutMs": 1800000, "persistent": False}, "bmb0vxgzz"),
     ("Bash", {"stdout": "x", "stderr": ""}, None),
+    ("Bash", {"stdout": "", "stderr": "", "backgroundTaskId": "../../etc/x"}, None),
+    ("Monitor", {"taskId": "a b"}, None),
 ])
 def test_tool_finished_names_the_task_and_maps_it(tmp_path, synapse, tool, resp, task):
     env = live_env(tmp_path, synapse.url)
@@ -530,6 +532,17 @@ def test_activity_turned_off_stops_the_follower_without_done(tmp_path, small, mo
         state["on"] = False
     out = small(f, [_w(f, "a\n"), off, _w(f, "b\n")])
     assert [p["text"] for p in out] == ["a\n"]
+
+
+def test_more_pieces_than_a_poll_sends_are_skipped_and_marked(tmp_path, small, monkeypatch):
+    """Not a burst: one poll's lines make more than PER_TICK events. The oldest are skipped."""
+    monkeypatch.setattr(L, "CHUNK_MAX", 256)
+    f = _reset(tmp_path, small)
+    lines = "".join(f"line {n:04d} " + "z " * 20 + "\n" for n in range(40))  # about 2 KB
+    out = small(f, [_w(f, lines)])
+    sent = [p for p in out if not p["done"]]
+    assert len(sent) == L.PER_TICK and sent[0]["truncated"] is True
+    assert _wire(out).endswith("line 0039 " + "z " * 20 + "\n")
 
 
 def test_pieces_cap_by_bytes_as_sent_and_lose_nothing():
