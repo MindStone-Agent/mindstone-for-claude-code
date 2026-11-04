@@ -16,6 +16,8 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
   server redaction (`fleet/fleet_redact_vendor.py`, synapse `api/fleet_redact.py` at sha256 a74bc722)
   now decodes each JSON string literal and redacts it as text of its own. The shared fixtures gain
   `secret_in_json` (356) and `safe_in_json` (92); both are tested here.
+  Each JSON-embedded case is also checked for its decoded form (`leak_plain`), and the "JSON with a
+  footer" cases go through the real Bash hook and send path.
 - **Fleet: only the agent's own sessions report** (synapse#31; Clint, 2026-11-04): every Claude Code
   session on a machine shares the fleet hooks, so the reporter, the status line and the activity
   layer now send nothing unless the session is marked as the agent's, by `MS4CC_FLEET_AGENT=<handle>`
