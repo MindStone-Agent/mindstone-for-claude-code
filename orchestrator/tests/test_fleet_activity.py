@@ -129,8 +129,8 @@ def test_subagent_calls_carry_its_agent_id(tmp_path, synapse):
     ("Write", {"file_path": "/a/c.py", "content": "x\ny\nz"}, "/a/c.py (3 lines)"),
     ("Edit", {"file_path": "/a/d.py", "old_string": "a\nb", "new_string": "c", "replace_all": True}, "/a/d.py (-2/+1 lines all)"),
     ("MultiEdit", {"file_path": "/a/e.py", "edits": [{}, {}]}, "/a/e.py (2 edits)"),
-    ("Glob", {"pattern": "**/*.py", "path": "src"}, "**/*.py path=src"),
-    ("Grep", {"pattern": "TODO", "glob": "*.ts"}, "TODO glob=*.ts"),
+    ("Glob", {"pattern": "**/*.py", "path": "src"}, "**/*.py\nsrc (path)"),
+    ("Grep", {"pattern": "TODO", "glob": "*.ts"}, "TODO\n*.ts (glob)"),
     ("WebFetch", {"url": "https://example.com/x", "prompt": PROMPT}, "https://example.com/x"),
     ("WebSearch", {"query": "python flock"}, "python flock"),
     ("Agent", {"subagent_type": "Explore", "description": "find tests", "prompt": "look in tests/"}, "Explore\nfind tests\n\nlook in tests/"),
@@ -347,7 +347,7 @@ POST_RESPONSES = {
     "SendMessage": ({"success": True, "message": "queued"}, {}),
     "mcp__x__y": ({"result": "ok", "nested": {"prompt": "p"}}, {}),
 }
-WANT_OUTPUT = {"Agent": "[completed]\nfound 3 tests", "Write": "create /p/a.py (2 lines, 4 bytes)\na\nb\n",
+WANT_OUTPUT = {"Agent": "[completed]\nfound 3 tests", "Write": "/p/a.py\ncreate, 2 lines, 4 bytes\na\nb\n",
                "Edit": "/p/b.py\n--- old\nx = 1\n+++ new\nx = 2",
                "MultiEdit": "/p/e.py\n--- old\na\n+++ new\nb\n--- old\nc\n+++ new\nd",
                "Read": "3 lines of 9", "AskUserQuestion": "answered:\nWhich?",
@@ -1026,8 +1026,37 @@ def _send_path_fields(x: str, tp: str) -> list[tuple[str, list[dict]]]:
         ("tool.finished AskUserQuestion questions", [base("PostToolUse", tool_name="AskUserQuestion", tool_use_id="t12",
                                                           tool_input={}, tool_response={"questions": [{"question": x}]})]),
         ("tool.finished error", [base("PostToolUseFailure", tool_name="Bash", tool_use_id="t13", tool_input={}, error=x)]),
-        ("message (a reply in the transcript)", [base("Stop", transcript_path=tp, last_assistant_message=x)]),
+        ("message (the final reply from the hook)", [base("Stop", transcript_path=tp, last_assistant_message=x)]),
         ("task.created subject", [base("TaskCreated", task_id="7", task_subject=x)]),
+        ("task.completed subject", [base("TaskCompleted", task_id="7", task_subject=x)]),
+        # the verify-only delta's list: every other sent free-text field
+        ("tool.started Read path", [base("PreToolUse", tool_name="Read", tool_use_id="u1", tool_input={"file_path": x})]),
+        ("tool.started Write path", [base("PreToolUse", tool_name="Write", tool_use_id="u2", tool_input={"file_path": x, "content": "c"})]),
+        ("tool.started Edit path", [base("PreToolUse", tool_name="Edit", tool_use_id="u3", tool_input={"file_path": x})]),
+        ("tool.started Grep pattern/path/glob/type", [base("PreToolUse", tool_name="Grep", tool_use_id="u4",
+                                                           tool_input={"pattern": x, "path": x, "glob": x, "type": x})]),
+        ("tool.started Glob pattern/path", [base("PreToolUse", tool_name="Glob", tool_use_id="u5", tool_input={"pattern": x, "path": x})]),
+        ("tool.started WebFetch url", [base("PreToolUse", tool_name="WebFetch", tool_use_id="u6", tool_input={"url": x})]),
+        ("tool.started WebSearch query", [base("PreToolUse", tool_name="WebSearch", tool_use_id="u7", tool_input={"query": x})]),
+        ("tool.started AskUserQuestion input", [base("PreToolUse", tool_name="AskUserQuestion", tool_use_id="u8",
+                                                     tool_input={"questions": [{"question": x}]})]),
+        ("tool.started Agent type", [base("PreToolUse", tool_name="Task", tool_use_id="u9", tool_input={"subagent_type": x})]),
+        ("tool.started generic input", [base("PreToolUse", tool_name="TodoWrite", tool_use_id="u10", tool_input={"todos": [x]})]),
+        ("tool.finished Bash stderr", [base("PostToolUse", tool_name="Bash", tool_use_id="v1", tool_input={},
+                                            tool_response={"stdout": "", "stderr": x})]),
+        ("tool.finished Write path", [base("PostToolUse", tool_name="Write", tool_use_id="v2", tool_input={"file_path": x},
+                                           tool_response={"type": "create", "filePath": x, "content": "c"})]),
+        ("tool.finished MultiEdit", [base("PostToolUse", tool_name="MultiEdit", tool_use_id="v3", tool_response={},
+                                          tool_input={"file_path": x, "edits": [{"old_string": x, "new_string": x}]})]),
+        ("tool.finished NotebookEdit", [base("PostToolUse", tool_name="NotebookEdit", tool_use_id="v4", tool_response={},
+                                             tool_input={"notebook_path": x, "new_source": x, "edit_mode": x})]),
+        ("tool.finished Glob/Grep filenames", [base("PostToolUse", tool_name="Glob", tool_use_id="v5", tool_input={},
+                                                    tool_response={"filenames": [x]})]),
+        ("tool.finished plain string", [base("PostToolUse", tool_name="mcp__x__y", tool_use_id="v6", tool_input={}, tool_response=x)]),
+        ("tool.finished Agent status and string result", [
+            base("PostToolUse", tool_name="Agent", tool_use_id="v7", tool_input={}, tool_response={"status": x, "content": []}),
+            base("PostToolUse", tool_name="Agent", tool_use_id="v8", tool_input={}, tool_response=x)]),
+        ("tool.finished Read type", [base("PostToolUse", tool_name="Read", tool_use_id="v9", tool_input={}, tool_response={"type": x})]),
     ]
 
 
@@ -1066,6 +1095,17 @@ def test_every_board_visible_field_is_redacted_on_the_send_path(case, tmp_path, 
     tp.write_text("")
     run(base("SessionStart", source="startup", transcript_path=str(tp)))
     leaks = []
+    # a reply tailed from the transcript itself, main and subagent
+    sub = tp.parent / SID / "subagents" / "agent-sa9.jsonl"
+    sub.parent.mkdir(parents=True, exist_ok=True)
+    for path, extra in ((tp, {}), (sub, {"agent_id": "sa9", "agent_type": "Explore"})):
+        sent.clear()
+        with path.open("a") as f:
+            f.write(json.dumps(assistant("m-" + path.stem, case["input"])) + "\n")
+        run(base("PostToolUse", tool_name="Read", tool_use_id="r-" + path.stem, tool_input={}, tool_response="",
+                 transcript_path=str(tp), **extra))
+        if case["leak"] in json.dumps(sent, ensure_ascii=False):
+            leaks.append("message (transcript tail) " + path.name)
     for field, inputs in _send_path_fields(case["input"], str(tp)):
         sent.clear()
         for inp in inputs:
