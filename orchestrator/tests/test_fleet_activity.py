@@ -733,8 +733,8 @@ def test_an_owed_reply_is_skipped_once_only(tmp_path, synapse):
 
 # --- shared fixtures with the server (synapse tests/fixtures/fleet_secrets.json) ---------------
 # Stored base64-encoded so the repo's privacy scan doesn't flag the fake secrets; byte-identical
-# to synapse's copy at synapse#40 (sha256 below). Refresh both together.
-FLEET_SECRETS_SHA256 = "ad049d690c637abf0b9054a13145210d36f6556f64eefad5095c846adca318f2"
+# to synapse's copy at synapse#43, acccbe5 (sha256 below). Refresh both together.
+FLEET_SECRETS_SHA256 = "895574ea2399d2f8e09ad93a1c5fb6e457702b16d22d0d459ce40b2ffa481a7f"
 
 
 def _shared_fixtures() -> dict:

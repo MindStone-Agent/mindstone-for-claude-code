@@ -551,9 +551,14 @@ def _head(fd: int, n: int) -> str:
 
 def _context(fd: int, at: int, since: int = 0) -> str:
     """Up to CTX_MAX bytes of the file before `at` (a line start) and from `since` on: context
-    for redaction, never sent itself."""
+    for redaction, never sent itself. It starts at a line's start: a piece of a line read from
+    its middle (a burst skipped its head) can hold half a JSON string, and the redactor cuts
+    its output at a string left open (synapse#41), which would drop the lines after it."""
     lo = max(0, at - CTX_MAX, min(since, at))
     try:
+        if lo > 0 and os.pread(fd, 1, lo - 1) != b"\n":
+            nl = os.pread(fd, at - lo, lo).find(b"\n")
+            lo = at if nl < 0 else lo + nl + 1
         return _sendable(_text(os.pread(fd, at - lo, lo)))
     except OSError:
         return ""
@@ -632,7 +637,8 @@ def _follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str, st: dict
         cut = b.rfind(b"\n")
         raw = [x + "\n" for x in _text(b[: cut + 1]).split("\n")[:-1]] if cut >= 0 else []
         _scan(raw, st, final=False, replay=True)
-        st["ctx_from"] = hi  # nothing before the read is context: it may be a withheld Secret
+        # The bytes skipped are context for what follows (never sent): a Secret's block the
+        # burst skipped lets the redactor propagate its values to an echo after it (review 7).
 
     def poll(size: int, final: bool) -> None:
         """Send what may go of the file from st["offset"] to `size`. final: the command ended,
