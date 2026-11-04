@@ -70,8 +70,16 @@ def build(inp: dict) -> tuple[str, dict, dict] | None:
         return "session.ended", {"reason": _s(inp.get("reason"), 32)}, {}
     if ev == "UserPromptSubmit":
         return "turn.started", {}, {}
-    if ev in ("Stop", "StopFailure"):  # StopFailure fires instead of Stop when an API error ends the turn
+    if ev == "Stop":
         return "turn.ended", {}, {}
+    if ev == "StopFailure":
+        # Fires instead of Stop when an API error ends the turn. In a subagent it fires instead of
+        # SubagentStop, with agent_id set, and no SubagentStop follows (2.1.317): that is the
+        # subagent's end, not the main turn's, so it maps like SubagentStop.
+        if inp.get("agent_id") is None:
+            return "turn.ended", {}, {}
+        agent_type = _s(inp.get("agent_type"), 64)
+        return ("subagent.stopped", {"agent_type": agent_type}, {}) if agent_type else None
     if ev in ("PostToolUse", "PostToolUseFailure"):  # a failed tool is still activity
         return "tool", {"tool_name": _s(inp.get("tool_name"), 128)}, {}
     if ev in ("SubagentStart", "SubagentStop"):
@@ -154,10 +162,10 @@ def _tail(inp: dict, session: str) -> tuple[Path, str | None, bool] | None:
     tp = inp.get("transcript_path")
     agent_id = _s(inp.get("agent_id"), 128)
     # PreToolUse too, so "Let me run X" shows before X, not after it finishes.
-    if ev in ("PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "SubagentStop") and agent_id:
+    if ev in ("PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "SubagentStop", "StopFailure") and agent_id:
         path = a.subagent_transcript(tp, session, agent_id)
         return (path, agent_id, False) if path else None
-    if ev in ("PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop") and isinstance(tp, str) and tp:
+    if ev in ("PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "StopFailure") and isinstance(tp, str) and tp:
         return Path(tp), None, True
     return None
 

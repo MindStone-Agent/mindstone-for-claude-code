@@ -304,6 +304,21 @@ def test_replies_are_redacted(tmp_path, synapse):
     assert "zz9" not in msg["payload"]["text"] and msg["payload"]["text"].startswith("set MY_SECRET_TOKEN=")
 
 
+def test_a_turn_ended_by_an_api_error_flushes_its_replies(tmp_path, synapse):
+    """StopFailure replaces Stop: the replies before the error go out at that turn end, and
+    its error text and last_assistant_message are never read."""
+    env = act_env(tmp_path, synapse.url)
+    tp = transcript(tmp_path / "proj" / f"{SID}.jsonl", [])
+    hook(env, base("SessionStart", source="startup", transcript_path=str(tp)))
+    transcript(tp, [assistant("m1", "wrote this before the error")])
+    hook(env, base("StopFailure", transcript_path=str(tp), error="rate_limit",
+                   error_details="429 canary-err-9f3", last_assistant_message="canary-last-9f3"))
+    evs = synapse.wait(3)
+    assert [e["payload"]["text"] for e in evs if e["type"] == "message"] == ["wrote this before the error"]
+    assert any(e["type"] == "turn.ended" for e in evs)
+    assert not any("canary" in r["raw"] for r in synapse.requests)
+
+
 def test_session_start_on_resume_keeps_the_offset(tmp_path, synapse):
     env = act_env(tmp_path, synapse.url)
     tp = transcript(tmp_path / "proj" / f"{SID}.jsonl", [])
