@@ -133,9 +133,11 @@ def input_text(tool_name: str, ti: object) -> str | None:
     if tool_name == "WebSearch":
         return _str(ti.get("query"))
     if tool_name in AGENT_TOOLS:  # what the subagent was asked to do
-        head = " ".join(p for p in (_str(ti.get("subagent_type")), _str(ti.get("description"))) if p)
+        # each field on its own line: a field glued after another hides its first line from the
+        # line-anchored redaction rules (Cairn's #145 review, S2-1)
+        parts = [p for p in (_str(ti.get("subagent_type")), _str(ti.get("description"))) if p]
         prompt = _str(ti.get("prompt"))
-        return (head + ("\n\n" + prompt if prompt else "")).strip() or None
+        return ("\n".join(parts) + ("\n\n" + prompt if prompt else "")).strip() or None
     return _dump(ti, _ANSWERS if tool_name == "AskUserQuestion" else _NO_DROP)
 
 
@@ -190,10 +192,10 @@ def output_text(tool_name: str, resp: object, ti: object = None) -> str | None:
         texts = [b.get("text") for b in r.get("content") or [] if isinstance(b, dict) and b.get("type") == "text"]
         status = _str(r.get("status")) or ""
         body = "\n\n".join(t for t in texts if isinstance(t, str) and t.strip())
-        return (f"[{status}] " if status else "") + body or None
+        return (f"[{status}]\n" if status else "") + body or None  # status on its own line (S2-1)
     if tool_name == "AskUserQuestion":  # the questions, never the user's answers
         qs = [q.get("question") for q in r.get("questions") or [] if isinstance(q, dict) and _str(q.get("question"))]
-        return "answered: " + " / ".join(qs) if qs else "answered"
+        return "answered:\n" + "\n".join(qs) if qs else "answered"  # one question per line (S2-1)
     if isinstance(resp, str):
         return resp or None
     if "stdout" in r or "stderr" in r:
