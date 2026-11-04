@@ -10,6 +10,17 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
 ## [Unreleased]
 
 ### Fixed
+- **Fleet activity: a `"""` line no longer cuts the preview** (synapse#42): the cut at an open JSON
+  string fired on Python and TOML triple quotes, which have an odd count of quotes on their line. A
+  run of three or more unescaped quotes now opens and closes nothing (valid JSON never holds one).
+  The vendored server redaction is synapse `api/fleet_redact.py` at sha256 9fa75a7a.
+- **Fleet activity: a JSON value cut before its closing quote is hidden** (synapse#41): output capped
+  inside a JSON string reads to the rules as escaped text, so a secret just before the cut went out
+  whole. The vendored server redaction (synapse `api/fleet_redact.py` at sha256 837e26a2) now runs the
+  rules on the whole text, then replaces everything from the opening quote of the first JSON string
+  still open at the end of its line with `[REDACTED-CUT]`. It only shortens what the rules already
+  produced, so nothing they hid can show. A stray quote in plain text opens a string too, and the
+  rest of that preview is lost. Each shared secret fixture is tested cut just before its closing quote.
 - **Fleet activity: secrets inside JSON string values are redacted** (synapse#40): JSON escaping
   turns a value's newlines into `\n`, so line-anchored rules missed 15 of the 89 shared fixtures when
   they sat inside a JSON value (Bash output that is JSON, NDJSON, JSON with a footer). The vendored

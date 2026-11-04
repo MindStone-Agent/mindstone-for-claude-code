@@ -780,7 +780,7 @@ def test_scrubbing_many_distinct_secrets_stays_bounded():
     assert "xyzSECRET" not in text
 
 
-SERVER_REDACT_SHA256 = "a74bc722b407ab68ca775f9355a31b28aba0ab820e93866371acae04a557cfe4"  # synapse#40
+SERVER_REDACT_SHA256 = "9fa75a7ac1b3bf6a74212945e82c398e5006eeb44ae92bfde298ccbe93eca0dd"  # synapse#42
 
 
 def test_the_vendored_server_redaction_is_verbatim():
@@ -796,6 +796,30 @@ def test_the_vendored_server_redaction_is_verbatim():
     original = text.replace(ours, "from api.vendor.scrubber import _propagatable, scrub_collect\n")
     assert hashlib.sha256(original.encode()).hexdigest() == SERVER_REDACT_SHA256
 
+
+
+@pytest.mark.parametrize("case", _shared_fixtures()["secret"], ids=lambda c: c["name"])
+def test_a_json_value_cut_before_its_closing_quote_is_hidden(case):
+    """synapse#41: output capped inside a JSON string (cut just before the value's closing
+    quote) reads to the rules as escaped text; the server cuts it from the open quote on."""
+    doc = json.dumps({"stdout": case["input"], "code": 0})
+    cut = doc[: doc.index('", "code"')]
+    text, _ = preview(cut, A.OUTPUT_MAX)
+    leaks = case["leak"] if isinstance(case["leak"], list) else [case["leak"]]
+    for leak in leaks:
+        assert json.dumps(leak)[1:-1] not in text and leak not in text
+    assert "[REDACTED-CUT]" in text
+
+
+def test_a_python_docstring_does_not_cut_the_preview():
+    """synapse#42: a run of three quotes is never JSON, so Python or TOML source with a \"\"\"
+    line (cat, a diff) keeps its preview past it; a cut JSON value later is still cut."""
+    src = 'def f():\n    """Docstring.\n\n    More.\n    """\n    return 1\n'
+    text, _ = preview(src, A.OUTPUT_MAX)
+    assert text == src
+    cut = src + '{"k": "Xk9pLm4Rt8QwZz'
+    text, _ = preview(cut, A.OUTPUT_MAX)
+    assert text.startswith(src) and text.endswith("[REDACTED-CUT]") and "Xk9p" not in text
 
 # --- activity review round 2 ------------------------------------------------------------------
 
