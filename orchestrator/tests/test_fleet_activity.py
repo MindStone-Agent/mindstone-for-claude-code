@@ -304,18 +304,42 @@ def test_replies_are_redacted(tmp_path, synapse):
     assert "zz9" not in msg["payload"]["text"] and msg["payload"]["text"].startswith("set MY_SECRET_TOKEN=")
 
 
+def api_error_line(uuid: str, text: str) -> dict:
+    """The line Claude Code writes to the transcript when an API error ends a turn (2.1.317)."""
+    return {"type": "assistant", "uuid": uuid, "isApiErrorMessage": True, "error": "rate_limit",
+            "message": {"model": "<synthetic>", "role": "assistant", "content": [{"type": "text", "text": text}]}}
+
+
 def test_a_turn_ended_by_an_api_error_flushes_its_replies(tmp_path, synapse):
-    """StopFailure replaces Stop: the replies before the error go out at that turn end, and
-    its error text and last_assistant_message are never read."""
+    """StopFailure replaces Stop: the replies before the error go out at that turn end, with the
+    error line Claude Code writes to the transcript. The hook input's error, error_details and
+    last_assistant_message are never read."""
     env = act_env(tmp_path, synapse.url)
     tp = transcript(tmp_path / "proj" / f"{SID}.jsonl", [])
     hook(env, base("SessionStart", source="startup", transcript_path=str(tp)))
-    transcript(tp, [assistant("m1", "wrote this before the error")])
+    transcript(tp, [assistant("m1", "wrote this before the error"), api_error_line("e1", "API Error: Rate limit reached")])
     hook(env, base("StopFailure", transcript_path=str(tp), error="rate_limit",
                    error_details="429 canary-err-9f3", last_assistant_message="canary-last-9f3"))
-    evs = synapse.wait(3)
-    assert [e["payload"]["text"] for e in evs if e["type"] == "message"] == ["wrote this before the error"]
+    evs = synapse.wait(4)
+    assert [e["payload"]["text"] for e in evs if e["type"] == "message"] == [
+        "wrote this before the error", "API Error: Rate limit reached"]
     assert any(e["type"] == "turn.ended" for e in evs)
+    assert not any("canary" in r["raw"] for r in synapse.requests)
+
+
+def test_a_subagents_api_error_flushes_its_replies_and_stops_only_it(tmp_path, synapse):
+    """In a subagent StopFailure fires instead of SubagentStop: its transcript is tailed and the
+    subagent stops; the main turn does not end."""
+    env = act_env(tmp_path, synapse.url)
+    main = tmp_path / "proj" / f"{SID}.jsonl"
+    sub = main.parent / SID / "subagents" / "agent-sa1.jsonl"
+    transcript(sub, [assistant("s0", "sub said this"), api_error_line("e2", "API Error: Rate limit reached")])
+    hook(env, base("StopFailure", agent_id="sa1", agent_type="Explore", transcript_path=str(main),
+                   error="rate_limit", last_assistant_message="canary-last-9f3"))
+    evs = synapse.wait(3)
+    assert [(e["agent_id"], e["payload"]["text"]) for e in evs if e["type"] == "message"] == [
+        ("sa1", "sub said this"), ("sa1", "API Error: Rate limit reached")]
+    assert [e["type"] for e in evs if e["type"] != "message"] == ["subagent.stopped"]
     assert not any("canary" in r["raw"] for r in synapse.requests)
 
 

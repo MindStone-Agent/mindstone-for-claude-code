@@ -76,7 +76,7 @@ def build(inp: dict) -> tuple[str, dict, dict] | None:
         # Fires instead of Stop when an API error ends the turn. In a subagent it fires instead of
         # SubagentStop, with agent_id set, and no SubagentStop follows (2.1.317): that is the
         # subagent's end, not the main turn's, so it maps like SubagentStop.
-        if inp.get("agent_id") is None:
+        if _s(inp.get("agent_id"), 128) is None:  # the same test _tail and _event apply
             return "turn.ended", {}, {}
         agent_type = _s(inp.get("agent_type"), 64)
         return ("subagent.stopped", {"agent_type": agent_type}, {}) if agent_type else None

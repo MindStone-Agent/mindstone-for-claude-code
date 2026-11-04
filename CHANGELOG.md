@@ -14,7 +14,8 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
   `StopFailure` instead of `Stop` then (rate limit, overload); the reporter now sends `turn.ended`
   for it, so the session goes idle at once instead of a minute later. In a subagent, `StopFailure`
   fires instead of `SubagentStop` and is sent as that subagent's `subagent.stopped`, not as the main
-  turn's end. With the activity layer on, replies written before the error go out at that turn end.
+  turn's end. With the activity layer on, replies written before the error, and the error line Claude Code
+  writes to the transcript, go out at that turn end.
   A teammate's permission request (`worker_permission_prompt`) is now sent as needs-input. Re-run
   bootstrap to add both hooks.
 - **Fleet activity: a `"""` line no longer cuts the preview** (synapse#42): the cut at an open JSON
