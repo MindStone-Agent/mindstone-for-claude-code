@@ -20,9 +20,10 @@ Claude Code writes every Bash command's output, foreground or background, to
    - A line scanner (_scan), whose state is kept across polls, withholds what spans lines: a
      private key from BEGIN to END (any line of key characters inside it, of any length, and
      an encrypted key's headers), and the values under a Secret's `data:` or `stringData:`. A
-     block is decided only by a `kind:` line after it, its document's end (a `---` line, as the
-     server splits them) or the command's end; until then it waits, and past HOLD_MAX it is
-     withheld. One WITHHELD line stands in for each run.
+     block is decided only by a `kind:` line after it, the close of a JSON object standing
+     alone at the margin (a lone `{` ... a lone `}`), its document's end (a `---` line, as the
+     server splits them) or the command's end; until then it waits, and so does the output
+     after it, and past HOLD_MAX it is withheld. One WITHHELD line stands in for each run.
    - What the scanner lets through is redacted along with up to CTX_MAX of the output before
      it (not past a withheld run). Only the part after the context's own redaction is sent;
      if the new lines change how the context redacts, nothing is sent and the gap is marked.
@@ -232,7 +233,7 @@ def _start(cfg: c.FleetConfig, session: str, path: Path, task_id: str) -> None:
             if again is not None:
                 try:
                     st = _load(session, task_id)
-                    if not st["done"] and st["stopped"]:  # not a file that never was
+                    if not st["done"] and (st["stopped"] or st["seq"]):  # not a file that never was
                         _done(cfg, session, task_id, st)
                 finally:
                     os.close(again)
@@ -297,6 +298,10 @@ _KIND = re.compile(r"[ \t]*\"?kind\"?[ \t]*:")
 # "data": {), as a hand-written or partly minified document has it.
 _DATA_HDR = re.compile(r"(?:[ \t]*|[^\n]{0,4096}[{,][ \t]*)\"?(?:data|stringData)\"?[ \t]*:[ \t]*(?:\{[ \t]*)?")
 _CLOSER = re.compile(r"[ \t]*[}\]],?[ \t]*")
+# A JSON object printed at the margin: a lone { opens it, a lone } after only indented lines
+# closes it, and every key of a Kubernetes object (its kind) is inside.
+_OBJ_OPEN = re.compile(r"\{[ \t]*")
+_OBJ_CLOSE = re.compile(r"\}[ \t]*")
 # An encrypted key's headers and the blank line after them are inside its block (round 4).
 _PEM_HDR = re.compile(r"(?:Proc-Type|DEK-Info|Comment)[ \t]*:[^\n]*|[ \t]*")
 _B64_LINE = re.compile(r"[ \t]*[A-Za-z0-9+/=]+[ \t]*")  # inside a key block: key material, any length
@@ -331,7 +336,8 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
       Secret's when its document shows `kind: Secret` before it, or anywhere in what has been
       read of the document after it (kubectl prints keys sorted: data, immutable, kind). It is
       known NOT to be one only when a `kind:` line at its own indent or above has arrived, or
-      its document has ended (a `---` line), or the output has. Until then it waits; past HOLD_MAX it is withheld, and so is the rest of the
+      the JSON object it is in, standing alone at the margin, has closed, or its document has
+      ended (a `---` line), or the output has. Until then it waits; past HOLD_MAX it is withheld, and so is the rest of the
       document's data.
     - Key-like lines with nothing after them yet wait for the next line, so that a key's tail
       and its END line are redacted together.
@@ -347,13 +353,20 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
     # line's document ends, whether a kind: Secret comes before that, and the shallowest
     # kind line's indent from the line to its document's end.
     far = 1 << 30
+    top, top_before, obj_end = bool(st.get("top_open")), [False] * (n + 1), [False] * n
+    for x in range(n):
+        top_before[x] = top
+        if bare[x].strip() and _indent(bare[x]) == 0:
+            obj_end[x] = top and bool(_OBJ_CLOSE.fullmatch(bare[x]))
+            top = bool(_OBJ_OPEN.fullmatch(bare[x]))
+    top_before[n] = top
     doc_end, next_secret, kind_min = [n] * (n + 1), [n] * (n + 1), [far] * (n + 1)
     for x in range(n - 1, -1, -1):
         line = bare[x]
         split = bool(_DOC_SPLIT.fullmatch(line))
         doc_end[x] = x if split else doc_end[x + 1]
         next_secret[x] = x if _KIND_SECRET.fullmatch(line) else next_secret[x + 1]
-        own = _indent(line) if _KIND.match(line) else far
+        own = 0 if obj_end[x] else (_indent(line) if _KIND.match(line) else far)
         kind_min[x] = far if split else min(own, kind_min[x + 1])
 
     def withhold(end: int) -> None:
@@ -399,7 +412,7 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
                 secret, st["secret_doc"] = True, True  # undecided too long: withheld, and the rest
                 j = n
             else:
-                return _ended_with(out, st), i, wend[0]  # wait: the document hasn't said yet
+                return _ret(out, st, top_before, i), i, wend[0]  # wait: the document hasn't said yet
             if secret:
                 if j > i:
                     withhold(j)
@@ -432,16 +445,21 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
                 r += 1
             if r == n and not final:
                 if size_from(i) <= HOLD_MAX:
-                    return _ended_with(out, st), i, wend[0]  # an END may follow
+                    return _ret(out, st, top_before, i), i, wend[0]  # an END may follow
                 st["inkey"] = True  # too long to wait for: withheld, and key lines after it
                 withhold(n)
-                return _ended_with(out, st), n, wend[0]
+                return _ret(out, st, top_before, n), n, wend[0]
             out.extend(raw[i:r])
             i = r
             continue
         out.append(raw[i])
         i += 1
-    return _ended_with(out, st), n, wend[0]
+    return _ret(out, st, top_before, n), n, wend[0]
+
+
+def _ret(out: list[str], st: dict, top_before: list[bool], used: int) -> list[str]:
+    st["top_open"] = top_before[used]
+    return _ended_with(out, st)
 
 
 def _ended_with(out: list[str], st: dict) -> list[str]:
@@ -491,7 +509,7 @@ def _pieces(text: str) -> list[str]:
 
 def _load(session: str, task_id: str) -> dict:
     st = {"offset": 0, "seq": 0, "midline": False, "done": False, "owed": False, "held": False,
-          "stopped": False, "inkey": False, "secret_doc": False, "data_indent": None, "withheld_last": False, "ctx_from": 0,
+          "stopped": False, "inkey": False, "secret_doc": False, "data_indent": None, "top_open": False, "withheld_last": False, "ctx_from": 0,
           "ino": None, "head": None}
     try:
         got = json.loads(c._state_file(session, f"live.{task_id}.pos").read_text())
@@ -608,7 +626,7 @@ def _done(cfg: c.FleetConfig, session: str, task_id: str, st: dict) -> None:
 def _follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str, st: dict, fd: int) -> None:
     ino = os.fstat(fd).st_ino
     if st["ino"] not in (None, ino):  # not the file the saved offset was in
-        st.update(offset=0, midline=False, owed=True, head=None, secret_doc=False, data_indent=None, inkey=False, ctx_from=0)
+        st.update(offset=0, midline=False, owed=True, head=None, secret_doc=False, data_indent=None, inkey=False, ctx_from=0, top_open=False)
     st["ino"], st["stopped"] = ino, False  # this follower reads on from the saved offset
     started = time.time()
     last_size, last_growth = -1, started
@@ -637,7 +655,7 @@ def _follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str, st: dict
         withheld until a line at the margin (where the read starts is unknown)."""
         if hi - lo > REPLAY_MAX:
             lo = hi - REPLAY_MAX
-            st.update(secret_doc=True, data_indent=0, inkey=False, midline=True)
+            st.update(secret_doc=True, data_indent=0, inkey=False, midline=True, top_open=False)
         b = os.pread(fd, hi - lo, lo)
         if st["midline"]:
             nl = b.find(b"\n")
@@ -709,7 +727,7 @@ def _follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str, st: dict
         h = st["head"]
         seen = h if isinstance(h, list) and len(h) == 2 and type(h[0]) is int and isinstance(h[1], str) else None
         if size < st["offset"] or (seen and (size < seen[0] or _head(fd, seen[0]) != seen[1])):
-            st.update(offset=0, midline=False, owed=True, secret_doc=False, data_indent=None, inkey=False, ctx_from=0)
+            st.update(offset=0, midline=False, owed=True, secret_doc=False, data_indent=None, inkey=False, ctx_from=0, top_open=False)
             seen = None
         n_head = min(size, 64)
         if n_head and (seen is None or n_head > seen[0]):

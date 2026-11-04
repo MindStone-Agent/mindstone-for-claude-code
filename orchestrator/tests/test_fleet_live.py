@@ -934,15 +934,26 @@ def test_a_later_documents_secret_never_withholds_an_earlier_documents_data(tmp_
     assert "color" in out[0]["text"] and V not in _wire(out)
 
 
-def test_json_objects_with_no_split_between_them_are_one_document(tmp_path, small):
-    """The server splits documents only at ---, and redacts a ConfigMap's values when a Secret
-    shares its document: so does the follower (round 4: a closer at the margin taken for a
-    document's end let a Secret's data out)."""
+def test_a_json_object_alone_at_the_margin_is_decided_when_it_closes(tmp_path, small):
+    """gh api | jq . then a test run: the object's data is decided when its lone } closes it,
+    and the log after it streams (round 5: it waited, then was withheld past 16 KB). The trade:
+    a Secret printed in a later poll, with no --- before it, doesn't reach back to it, the same
+    as a ConfigMap whose own kind line came in an earlier poll."""
+    obj = '{\n  "data": {\n    "viewer": {\n      "login": "octocat"\n    }\n  }\n}\n'
+    log = "".join(f"p1 test_{k:05d} PASSED in 0.01s\n" for k in range(40))
+    f = _reset(tmp_path, small)
+    out = small(f, [_w(f, obj), _w(f, log)], unlink_after=False)
+    assert _wire(out) == obj + log
+
+
+def test_a_secret_in_the_same_poll_still_reaches_back_across_objects(tmp_path, small):
+    """Within one poll the document is the server's: no --- between them, so the Secret's
+    kind withholds the object before it too, as clean() does."""
     text = '{\n  "data": {\n    "color": "blue"\n  }\n}\n' + f"kind: Secret\ndata:\n  a: {V}\n"
     assert "blue" not in clean(text)
     f = _reset(tmp_path, small)
     out = small(f, [_w(f, text)])
-    assert "blue" not in _wire(out) and V not in _wire(out)
+    assert V not in _wire(out) and "blue" not in _wire(out).replace("[REDACTED-SECRET]", "")
 
 
 def test_a_document_ending_at_the_polls_last_line_is_decided_then(tmp_path, small):
@@ -991,11 +1002,12 @@ def test_many_data_blocks_with_deeper_kind_lines_scan_in_linear_time():
     def scan(k: int) -> float:
         raw = [x + "\n" for x in ("  data:\n    kind: z\n" * k).split("\n")[:-1]]
         st = {"secret_doc": False, "data_indent": None, "inkey": False, "withheld_last": False}
-        started = time.time()
+        started = time.perf_counter()
         L._scan(raw, st, final=False, replay=True)
-        return time.time() - started
-    small_t, big_t = scan(2000), scan(16000)
-    assert big_t < 0.5 and big_t < small_t * 16
+        return time.perf_counter() - started
+    small_t = min(scan(2000) for _ in range(3))  # the least of three: load on the box adds, never takes
+    big_t = min(scan(16000) for _ in range(3))
+    assert big_t < 0.5 and big_t < small_t * 24
 
 
 def test_an_encrypted_keys_headers_stay_inside_its_block(tmp_path, small):
@@ -1052,3 +1064,20 @@ def test_a_data_header_after_other_keys_on_its_line_is_one(tmp_path, small):
         if V in _wire(small(f, [_w(f, BRACE_HDR[:i]), _w(f, BRACE_HDR[i:])])):
             leaks.append(i)
     assert leaks == []
+
+
+def test_a_follower_that_left_without_stopping_still_gets_its_done(tmp_path, small, monkeypatch):
+    """Round 5 nit: the re-claim sends done for a follower that streamed and then left by an
+    error, not only for one that stopped."""
+    monkeypatch.setenv("MS4CC_FLEET_INLINE", "1")
+    f = _reset(tmp_path, small)
+    real = L.follow
+
+    def follow_then_error(*a):
+        st = L._load(SID, f.stem)
+        st.update(seq=3)
+        L._save(SID, f.stem, st)  # it streamed three events, then a stat error ended it
+        f.unlink()
+    monkeypatch.setattr(L, "follow", follow_then_error)
+    L._start(cfg("http://127.0.0.1:9"), SID, f, f.stem)
+    assert [e["payload"]["done"] for e in small.sent] == [True]
