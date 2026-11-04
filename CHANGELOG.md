@@ -10,6 +10,12 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
 ## [Unreleased]
 
 ### Fixed
+- **Fleet activity: secrets inside JSON string values are redacted** (synapse#40): JSON escaping
+  turns a value's newlines into `\n`, so line-anchored rules missed 15 of the 89 shared fixtures when
+  they sat inside a JSON value (Bash output that is JSON, NDJSON, JSON with a footer). The vendored
+  server redaction (`fleet/fleet_redact_vendor.py`, synapse `api/fleet_redact.py` at sha256 a74bc722)
+  now decodes each JSON string literal and redacts it as text of its own. The shared fixtures gain
+  `secret_in_json` (356) and `safe_in_json` (92); both are tested here.
 - **Fleet: only the agent's own sessions report** (synapse#31; Clint, 2026-11-04): every Claude Code
   session on a machine shares the fleet hooks, so the reporter, the status line and the activity
   layer now send nothing unless the session is marked as the agent's, by `MS4CC_FLEET_AGENT=<handle>`
