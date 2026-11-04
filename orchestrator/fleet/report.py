@@ -185,7 +185,7 @@ def main() -> int:
         if inp["hook_event_name"] == "Stop":
             live.remember_running(session, inp.get("background_tasks"))
         else:
-            live.mark_ended(session)
+            live.end_session(cfg, session)
     mapped = build(inp)
     if mapped is not None and mapped[0] == "session.started":
         prune_state()

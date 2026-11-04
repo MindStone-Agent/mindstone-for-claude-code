@@ -11,25 +11,31 @@ Claude Code writes every Bash command's output, foreground or background, to
 2. FileChanged `add` or `change` reaches report.py, which starts one detached follower for that
    file. A background Bash or Monitor call starts its follower at PostToolUse as well, since
    Claude Code reports a file only once its writes pause.
-3. The follower reads the file every POLL_S and sends its new complete lines as `tool.output`
-   events. Redaction is never given a fragment:
-   - Only complete lines are sent. A partial line is never sent, not even when the follower
-     stops; a line that grows past READ_MAX is skipped, as a burst.
-   - Each batch of lines is redacted together with up to CTX_MAX of the output before it, read
-     back from the file, and only the batch's own lines are sent.
-   - Lines are held back while a secret that spans lines may still be open: a private-key
-     BEGIN with no END yet, a trailing run of lines that look like key material, a Secret's
-     `data:` block before its `kind:`. They go out once closed, or when the command ends;
-     held past HOLD_MAX they are skipped, with any key lines that follow.
-   - After a burst the follower reads only the last READ_MAX bytes, and skips the line that
-     read starts in when it starts mid-line.
+3. The follower reads the file every POLL_S, through a descriptor it keeps open, and sends its
+   new complete lines as `tool.output` events. Redaction is never handed a fragment:
+   - Only complete lines are sent. A partial line waits for its end; when the command ends,
+     its last line is whole and goes too.
+   - A line scanner (_scan), whose state is kept across polls, withholds what spans lines: a
+     private key from BEGIN to END, key-like lines after a BEGIN with no END, a key's tail
+     before its END, and the values under a Secret's `data:` or `stringData:` (a block waits
+     until its document shows whether it is a Secret; past HOLD_MAX it is withheld). One
+     WITHHELD line stands in for each run.
+   - What the scanner lets through is redacted along with up to CTX_MAX of the output before
+     it (not past a withheld run). Only the part after the context's own redaction is sent;
+     if the new lines change how the context redacts, nothing is sent and the gap is marked.
+   - After a burst only the last READ_MAX bytes are read, and the line that read starts in is
+     skipped; the bytes skipped are run through the scanner first, so it knows whether the
+     read starts inside a key block or a Secret.
    Every skip marks the next event `truncated`.
-4. It stops when the file is deleted (a foreground command finished) or the session ends, and
-   only then sends `done`. It also stops, without `done`, when the task has been idle for
-   IDLE_S and isn't among the running tasks Stop last reported, when activity is turned off,
-   or after MAX_S; a later `change` resumes from its saved offset.
+4. It stops and sends `done` when the file is deleted (the command ended; it reads to the end
+   first) or the session ends. It stops without `done` when a background task has been idle
+   for IDLE_S and Claude Code doesn't list it as running, when activity is turned off, or after
+   MAX_S; a later `change` resumes from the saved offset. A foreground task is never let go
+   when idle: its file goes when it ends. When a stopped task's file goes, or the session
+   ends, with no follower running, its `done` is sent then, marked truncated, since what was
+   written after the stop can't be known.
 
-A foreground command that finishes before the first poll sends nothing: tool.finished
+A command whose file is gone before its follower opens it streams nothing: tool.finished
 already carries its output.
 
 `tool.output` payload (Cairn's contract on #31, 2026-11-03 20:32Z): task_id, tool_use_id (when
@@ -60,7 +66,8 @@ CHUNK_MAX = 4096           # one event's text, as sent (JSON-escaped UTF-8)
 PER_TICK = 4               # events sent per poll at most; older ones are skipped, marked truncated
 READ_MAX = 64 * 1024       # bytes read per poll at most; anything before them is skipped
 CTX_MAX = 16 * 1024        # earlier output redacted along with new lines (the server's PEM reach)
-HOLD_MAX = 16 * 1024       # held lines are skipped past this
+HOLD_MAX = 16 * 1024       # lines waiting on a decision are withheld past this
+REPLAY_MAX = 4 * 1024 * 1024  # bytes a burst skips that are replayed through the scanner
 TASK_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
@@ -146,6 +153,34 @@ def _running(session: str, task_id: str) -> bool:
         return False
 
 
+def _background(session: str, task_id: str) -> bool:
+    """A background Bash or Monitor call's task (remember_task saw its id)."""
+    return c._state_file(session, f"task.{task_id}").exists()
+
+
+def end_session(cfg: c.FleetConfig, session: str) -> None:
+    """SessionEnd: followers still running see the mark and finish; a task whose follower has
+    already stopped gets its done here."""
+    mark_ended(session)
+    try:
+        pos = list(c.STATE_DIR.glob(f"{c.safe_session(session)}.live.*.pos"))
+    except OSError:
+        return
+    for p in pos[:200]:
+        task_id = p.name[len(c.safe_session(session)) + len(".live."):-len(".pos")]
+        if not TASK_ID.fullmatch(task_id):
+            continue
+        fd = _claim(session, task_id)
+        if fd is None:  # its follower is running
+            continue
+        try:
+            st = _load(session, task_id)
+            if not st["done"]:
+                _done(cfg, session, task_id, st)
+        finally:
+            os.close(fd)
+
+
 def _ended(session: str) -> bool:
     return c._state_file(session, "ended").exists()
 
@@ -225,71 +260,174 @@ def on_task_started(cfg: c.FleetConfig, inp: dict, session: str, task_id: str) -
         _start(cfg, session, d / f"{task_id}.output", task_id)
 
 
-# --- redaction with context and hold-back -------------------------------------------------------
+# --- what may go: a line scanner, then redaction with context ---------------------------------
+# Secrets that span lines are handled here, line by line, with state carried across polls, not
+# left to redaction of a window: a window's edge can cut a key block or a Secret from what
+# makes it one (live output review rounds 1 and 2).
 
 _PEM_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----")
 _PEM_END = re.compile(r"-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----")
-_KEYISH_LINE = re.compile(r"[ \t]*[A-Za-z0-9+/=]{20,}[ \t]*")  # could be key material
-_DATA_HDR = re.compile(r"(?m)^([ \t]*)\"?(?:data|stringData)\"?[ \t]*:[ \t]*\{?[ \t]*$")
-_KIND = re.compile(r"(?m)^([ \t]*)\"?kind\"?[ \t]*:")
-_DOC_SPLIT = re.compile(r"(?m)^---[ \t]*$")
+_KEYISH = re.compile(r"[ \t]*[A-Za-z0-9+/=]{20,}[ \t]*")  # could be key material
+_DOC_SPLIT = re.compile(r"---[ \t]*")
+# The server's own Secret test (fleet_redact_vendor._KIND_SECRET), one line at a time.
+_KIND_SECRET = re.compile(r"[ \t]*\"?kind\"?[ \t]*:[ \t]*['\"]?Secret['\"]?[ \t]*,?[ \t]*", re.I)
+_KIND = re.compile(r"[ \t]*\"?kind\"?[ \t]*:")
+_IMMUTABLE = re.compile(r"[ \t]*\"?immutable\"?[ \t]*:")
+_DATA_HDR = re.compile(r"[ \t]*\"?(?:data|stringData)\"?[ \t]*:[ \t]*\{?[ \t]*")
+_CLOSER = re.compile(r"[ \t]*[}\]],?[ \t]*")
+WITHHELD = "[REDACTED-SECRET-LINES]"  # stands in for a run of lines not sent
 
 
-def _hold_at(ctx: str, text: str) -> int:
-    """Where in `text` (complete lines) sending must stop for now: the start of a secret that
-    spans lines and may not be closed yet. len(text) when nothing is open."""
-    hold = len(text)
-    m = None
-    for m in _PEM_BEGIN.finditer(text):
-        pass
-    if m and not _PEM_END.search(text, m.end()):  # a key block with no END yet
-        hold = min(hold, text.rfind("\n", 0, m.start()) + 1)
-    lines = text.split("\n")[:-1]  # text ends with a newline
-    i = len(lines)
-    while i and _KEYISH_LINE.fullmatch(lines[i - 1]):  # an END may follow these
-        i -= 1
-    if i < len(lines):
-        hold = min(hold, sum(len(x) + 1 for x in lines[:i]))
-    doc = ctx + text  # a Secret's data before its kind (kubectl prints keys sorted)
-    split = hdr = None
-    for split in _DOC_SPLIT.finditer(doc):
-        pass
-    start = split.end() if split else 0
-    for hdr in _DATA_HDR.finditer(doc, start):
-        pass
-    if hdr is not None:
-        indent = len(hdr.group(1).expandtabs())
-        if not any(len(k.group(1).expandtabs()) <= indent for k in _KIND.finditer(doc, start)):
-            hold = min(hold, max(0, hdr.start() - len(ctx)))  # a line start; 0 if in ctx
-    return hold
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
 
 
-def _key_lines(lines: str) -> int:
-    """How many characters of `lines` are leading lines of key material or a key's END line."""
-    n = 0
-    for line in lines.splitlines(keepends=True):
-        bare = line.rstrip("\r\n")
-        if not (_KEYISH_LINE.fullmatch(bare) or _PEM_END.search(bare)):
-            break
-        n += len(line)
-    return n
+def _bare(raw: str) -> str:
+    return raw.rstrip("\n").rstrip("\r")
 
 
-def _redact_lines(ctx: str, text: str) -> str | None:
-    """text (complete lines) redacted along with the output before it; only text's own lines
-    are returned. Where redaction joined lines across the boundary, the result may repeat a
-    redacted line of the context: never an unredacted one. None when there's no scrubber."""
+def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[list[str], int, int]:
+    """Which of `raw` (complete lines, each ending in a newline) may be sent. Returns the lines
+    to send, with WITHHELD for each run held back as secret, how many lines were dealt with (the
+    rest wait for a later poll), and the index just past the last line withheld (0 if none). st's per-document state (secret_doc, data_indent, inkey)
+    is carried across polls and reflects the lines dealt with.
+
+    - A private key, BEGIN to END, is never sent; nor, after a BEGIN with no END, the key-like
+      lines that follow it.
+    - The values under a Secret's `data:` or `stringData:` are never sent. A block is a
+      Secret's when its document showed `kind: Secret` before it, or when the next key after
+      it is `kind: Secret` (kubectl prints keys sorted: data before kind). Until that is known
+      the block waits; past HOLD_MAX it is withheld.
+    - Key-like lines with nothing after them yet wait for the next line: an END makes them a
+      key's tail, withheld.
+
+    replay: lines skipped unread by a burst, run through only to bring the state up to date;
+    nothing waits, and a block still open at the end stays open."""
+    out: list[str] = []
+    final = final or replay
+    wend = [0]
+
+    def withhold(end: int) -> None:
+        wend[0] = end
+        if out and out[-1] == WITHHELD + "\n" or not out and st["withheld_last"]:
+            return
+        out.append(WITHHELD + "\n")
+
+    def size_from(k: int) -> int:
+        return sum(len(x.encode("utf-8", "surrogateescape")) for x in raw[k:])
+
+    i, n = 0, len(raw)
+    while i < n:
+        line = _bare(raw[i])
+        if _DOC_SPLIT.fullmatch(line):
+            st.update(secret_doc=False, data_indent=None, inkey=False)
+            out.append(raw[i])
+            i += 1
+            continue
+        if st["inkey"]:
+            if _PEM_END.search(line):
+                st["inkey"] = False
+                withhold(i + 1)
+                i += 1
+                continue
+            if _KEYISH.fullmatch(line):
+                withhold(i + 1)
+                i += 1
+                continue
+            st["inkey"] = False
+        if st["data_indent"] is not None:
+            h = st["data_indent"]
+            j = i  # the block: deeper lines and blanks, then a closing brace at h
+            while j < n and (not _bare(raw[j]).strip() or _indent(_bare(raw[j])) > h):
+                j += 1
+            if j < n and _CLOSER.fullmatch(_bare(raw[j])) and _indent(_bare(raw[j])) == h:
+                j += 1
+            k = j  # the next key at h or above decides: kind Secret, or anything else
+            while k < n and (not _bare(raw[k]).strip() or _IMMUTABLE.fullmatch(_bare(raw[k]))):
+                k += 1
+            secret_ahead = any(_KIND_SECRET.fullmatch(_bare(x)) for x in raw[i:_doc_end(raw, i)])
+            if st["secret_doc"] or secret_ahead or (k < n and _KIND_SECRET.fullmatch(_bare(raw[k]))):
+                secret = True
+            elif k < n or final:
+                secret = False
+            elif size_from(i) > HOLD_MAX:
+                secret, st["secret_doc"] = True, True  # undecided too long: withheld, and the rest
+                j = n
+            else:
+                return _ended_with(out, st), i, wend[0]  # wait: the block or the key after it hasn't arrived
+            if secret:
+                if j > i:
+                    withhold(j)
+            else:
+                out.extend(raw[i:j])
+            i = j
+            if j < n or (final and not replay):
+                st["data_indent"] = None
+            continue
+        if _PEM_BEGIN.search(line):
+            st["inkey"] = not _PEM_END.search(line)
+            withhold(i + 1)
+            i += 1
+            continue
+        if _KIND_SECRET.fullmatch(line):
+            st["secret_doc"] = True
+        if _DATA_HDR.fullmatch(line):
+            st["data_indent"] = _indent(line)
+            out.append(raw[i])
+            i += 1
+            continue
+        if _KEYISH.fullmatch(line):
+            r = i
+            while r < n and _KEYISH.fullmatch(_bare(raw[r])):
+                r += 1
+            if r < n and _PEM_END.search(_bare(raw[r])):  # a key's tail, its BEGIN not seen
+                withhold(r + 1)
+                i = r + 1
+                continue
+            if r == n and not final:
+                if size_from(i) <= HOLD_MAX:
+                    return _ended_with(out, st), i, wend[0]  # an END may follow
+                st["inkey"] = True  # too long to wait for: withheld, and key lines after it
+                withhold(n)
+                return _ended_with(out, st), n, wend[0]
+            out.extend(raw[i:r])
+            i = r
+            continue
+        out.append(raw[i])
+        i += 1
+    return _ended_with(out, st), n, wend[0]
+
+
+def _ended_with(out: list[str], st: dict) -> list[str]:
+    """Remember whether the last thing sent was the withheld marker, so the next poll's
+    withheld run doesn't repeat it."""
+    if out:
+        st["withheld_last"] = out[-1] == WITHHELD + "\n"
+    return out
+
+
+def _doc_end(raw: list[str], i: int) -> int:
+    for k in range(i, len(raw)):
+        if _DOC_SPLIT.fullmatch(_bare(raw[k])):
+            return k
+    return len(raw)
+
+
+def _redact(ctx: str, text: str) -> str | None:
+    """text redacted with the output before it as context, so a secret seen in the context
+    (its key, its first appearance) is redacted in text too. Only what follows the context's
+    own redaction is returned, and only when the joint redaction begins with exactly it; when
+    the new lines change how the context redacts (a key block or a Secret across the join),
+    the result is None and nothing is sent. Also None when there's no scrubber."""
     from fleet.redact import clean
-    norm = text.replace("\r\n", "\n").replace("\r", "\n")
-    k = norm.count("\n")
     try:
-        out = clean(ctx + norm)
+        head = clean(ctx)
+        out = clean(ctx + text)
     except Exception:
         return None
-    parts = out.split("\n")
-    if out.endswith("\n"):
-        parts = parts[:-1]
-    return "\n".join(parts[-k:]) + "\n" if k else ""
+    if not out.startswith(head):
+        return None
+    return out[len(head):]
 
 
 def _pieces(text: str) -> list[str]:
@@ -314,11 +452,14 @@ def _pieces(text: str) -> list[str]:
 
 def _load(session: str, task_id: str) -> dict:
     st = {"offset": 0, "seq": 0, "midline": False, "done": False, "owed": False, "held": False,
-          "inkey": False, "ino": None, "head": None}
+          "stopped": False, "inkey": False, "secret_doc": False, "data_indent": None, "withheld_last": False, "ctx_from": 0,
+          "ino": None, "head": None}
     try:
         got = json.loads(c._state_file(session, f"live.{task_id}.pos").read_text())
         if isinstance(got, dict):
             for k, v in got.items():
+                if k == "data_indent" and not (v is None or type(v) is int):
+                    continue
                 if k in st and (v is None or type(v) is type(st[k]) or st[k] is None):
                     st[k] = v
     except (OSError, ValueError, TypeError):
@@ -383,17 +524,14 @@ def _sendable(t: str) -> str:
     return t.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
-def _context(fd: int, at: int) -> str:
-    """Up to CTX_MAX bytes of the file before `at` (a line start), from a line start."""
-    lo = max(0, at - CTX_MAX)
+def _context(fd: int, at: int, since: int = 0) -> str:
+    """Up to CTX_MAX bytes of the file before `at` (a line start) and from `since` on: context
+    for redaction, never sent itself."""
+    lo = max(0, at - CTX_MAX, min(since, at))
     try:
-        b = os.pread(fd, at - lo, lo)
+        return _sendable(_text(os.pread(fd, at - lo, lo)))
     except OSError:
         return ""
-    if lo > 0:
-        nl = b.find(b"\n")
-        b = b[nl + 1:] if nl >= 0 else b""
-    return _sendable(_text(b)).replace("\r\n", "\n").replace("\r", "\n")
 
 
 def follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str) -> None:
@@ -414,9 +552,11 @@ def follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str) -> None:
 
 
 def _done(cfg: c.FleetConfig, session: str, task_id: str, st: dict) -> None:
-    """The final event, once per task; it says so if output was skipped or held unsent."""
+    """The final event, once per task. truncated: output was skipped, held unsent, or written
+    after a follower stopped without done and before none resumed (it can't be known)."""
     if st["seq"]:  # nothing streamed at all: tool.finished carries the output
-        _send(cfg, [_event(cfg, session, task_id, st["seq"], None, st["owed"] or st["held"], True)])
+        lost = st["owed"] or st["held"] or st["stopped"]
+        _send(cfg, [_event(cfg, session, task_id, st["seq"], None, lost, True)])
         st["seq"] += 1
     st.update(done=True, held=False)
     _save(session, task_id, st)
@@ -425,18 +565,18 @@ def _done(cfg: c.FleetConfig, session: str, task_id: str, st: dict) -> None:
 def _follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str, st: dict, fd: int) -> None:
     ino = os.fstat(fd).st_ino
     if st["ino"] not in (None, ino):  # not the file the saved offset was in
-        st.update(offset=0, midline=False, owed=True, head=None)
-    st["ino"] = ino
+        st.update(offset=0, midline=False, owed=True, head=None, secret_doc=False, data_indent=None, inkey=False, ctx_from=0)
+    st["ino"], st["stopped"] = ino, False  # this follower reads on from the saved offset
     started = time.time()
     last_size, last_growth = -1, started
 
     def emit(text: str, context: str) -> None:
         """Redact text with its context and send it; advances seq, clears owed when sent."""
-        red = _redact_lines(context, text)
-        if red is None:  # no scrubber: nothing is sent, and the gap is marked
+        red = _redact(context, text)
+        if red is None:  # no scrubber, or the join changed the context: nothing is sent, marked
             st["owed"] = True
             return
-        pieces = _pieces(red)
+        pieces = _pieces(_sendable(red))
         if len(pieces) > PER_TICK:
             pieces, st["owed"] = pieces[-PER_TICK:], True
         events = []
@@ -447,18 +587,39 @@ def _follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str, st: dict
         if not _send(cfg, events):
             st["owed"] = True
 
+    def replay(lo: int, hi: int) -> None:
+        """Bring the scanner's state through bytes a burst skips unread: whether a key block or
+        a Secret's data is open where the read starts. Past REPLAY_MAX only the end is replayed,
+        from a fresh state that takes the document for a Secret."""
+        if hi - lo > REPLAY_MAX:
+            lo = hi - REPLAY_MAX
+            st.update(secret_doc=True, data_indent=None, inkey=False, midline=True)
+        b = os.pread(fd, hi - lo, lo)
+        if st["midline"]:
+            nl = b.find(b"\n")
+            b = b[nl + 1:] if nl >= 0 else b""
+        # The line the read starts in is skipped, not sent, but it may be the one that decides
+        # (a Secret's kind): replay it whole.
+        rest = os.pread(fd, READ_MAX, hi)
+        nl = rest.find(b"\n")
+        b += rest[: nl + 1] if nl >= 0 else b""
+        cut = b.rfind(b"\n")
+        raw = [x + "\n" for x in _text(b[: cut + 1]).split("\n")[:-1]] if cut >= 0 else []
+        _scan(raw, st, final=False, replay=True)
+        st["ctx_from"] = hi  # nothing before the read is context: it may be a withheld Secret
+
     def poll(size: int, final: bool) -> None:
         """Send what may go of the file from st["offset"] to `size`. final: the command ended,
-        so its last line is whole and nothing is held."""
+        so its last line is whole and nothing waits."""
         if size - st["offset"] > READ_MAX:  # a burst: read only its last READ_MAX bytes
+            replay(st["offset"], size - READ_MAX)
             st["offset"], st["owed"] = size - READ_MAX, True
             st["midline"] = os.pread(fd, 1, st["offset"] - 1) != b"\n"  # skip a line read mid-way
         data = os.pread(fd, size - st["offset"], st["offset"])
         if st["midline"]:  # the rest of a line already cut: never sent without its start
             nl = data.find(b"\n")
             skip = len(data) if nl < 0 else nl + 1
-            st["offset"] += skip
-            st["owed"] = st["owed"] or nl != 0  # nl == 0: only the newline went
+            st["offset"] += skip  # owed already: a burst or a resumed skip set it
             st["midline"] = nl < 0
             data = data[skip:]
         if final and data and not data.endswith(b"\n"):
@@ -467,30 +628,18 @@ def _follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str, st: dict
         if cut < 0:  # wait for the line's end; a line past READ_MAX is skipped as a burst
             st["held"] = False
             return
-        lines = _text(data[: cut + 1])
-        if st["inkey"]:  # after a key block held too long: its lines go unsent, to its end
-            n = _key_lines(lines)
-            if n:
-                st["offset"] += len(lines[:n].encode("utf-8", "surrogateescape"))
-                st["owed"], lines = True, lines[n:]
-            st["inkey"] = not lines
-            if not lines:
-                st["held"] = False
-                return
-        ctx = _context(fd, st["offset"])
-        norm = lines.replace("\r\n", "\n").replace("\r", "\n")
-        stop = len(norm) if final else _hold_at(ctx, norm)
-        go = _norm_prefix(lines, stop)
-        held = lines[len(go):]
-        st["held"] = bool(held)
+        raw = [x + "\n" for x in _text(data[: cut + 1]).split("\n")[:-1]]
+        ctx = _context(fd, st["offset"], st["ctx_from"])
+        go, used, wend = _scan(raw, st, final)
+        st["held"] = used < len(raw)
         if go:
-            emit(_sendable(go), ctx)
-            st["offset"] += len(go.encode("utf-8", "surrogateescape"))
-        if len(held.encode("utf-8", "surrogateescape")) > HOLD_MAX:
-            # Held too long to send safely: what opened it may leave the context window. Skip
-            # it, and any key lines still to come.
-            st["offset"] += len(held.encode("utf-8", "surrogateescape"))
-            st.update(owed=True, held=False, inkey=True)
+            emit(_sendable("".join(go)), ctx)
+
+        def nbytes(k: int) -> int:
+            return sum(len(x.encode("utf-8", "surrogateescape")) for x in raw[:k])
+        if wend:  # withheld lines are never context: a later kind: Secret would re-redact them
+            st["ctx_from"] = st["offset"] + nbytes(wend)
+        st["offset"] += nbytes(used)
 
     while True:
         time.sleep(POLL_S)
@@ -509,33 +658,22 @@ def _follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str, st: dict
             poll(size, final=False)
             return _done(cfg, session, task_id, st)
         if now - started > MAX_S or not _activity_on():
+            st["stopped"] = True
             return _save(session, task_id, st)
         head = hashlib.sha256(os.pread(fd, 64, 0)).hexdigest() if size >= 64 else None
         if size < st["offset"] or (st["head"] and head != st["head"]):  # rewritten in place
-            st.update(offset=0, midline=False, owed=True)
+            st.update(offset=0, midline=False, owed=True, secret_doc=False, data_indent=None, inkey=False, ctx_from=0)
         st["head"] = head
         if size == last_size:
-            if now - last_growth > IDLE_S and not _running(session, task_id):
+            # Only a background task Claude Code no longer lists as running is let go when
+            # idle: a foreground task's file goes when it ends, so it is followed until then.
+            if now - last_growth > IDLE_S and _background(session, task_id) and not _running(session, task_id):
+                st["stopped"] = True
                 return _save(session, task_id, st)
             continue
         last_size, last_growth = size, now
         poll(size, final=False)
         _save(session, task_id, st)
-
-
-def _norm_prefix(lines: str, stop: int) -> str:
-    """The prefix of `lines` (raw, maybe with CR) that is `stop` characters of its normalised
-    form; `stop` is always at a line start there."""
-    if stop <= 0:
-        return ""
-    seen = i = 0
-    while i < len(lines) and seen < stop:
-        if lines.startswith("\r\n", i):
-            i += 2
-        else:
-            i += 1
-        seen += 1
-    return lines[:i]
 
 
 if __name__ == "__main__":

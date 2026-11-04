@@ -75,14 +75,10 @@ def test_lines_stream_in_order_then_done_when_the_file_goes(tmp_path, synapse, f
     assert all(p["task_id"] == "b1" for p in out)
 
 
-def test_a_command_gone_before_the_first_poll_sends_nothing(tmp_path, synapse, fast, monkeypatch):
+def test_a_command_gone_before_its_follower_opens_the_file_sends_nothing(tmp_path, synapse, fast):
     """A short foreground command: tool.finished already carries its output."""
-    monkeypatch.setattr(L, "POLL_S", 0.3)
     f = tmp_path / "b1.output"
-    f.write_text("quick\n")
-    t = start(synapse.url, f)
-    f.unlink()
-    t.join(5)
+    L.follow(cfg(synapse.url), SID, f, "b1")  # the file is already gone
     assert outputs(synapse) == []
 
 
@@ -152,6 +148,8 @@ def test_session_end_stops_the_follower(tmp_path, synapse, fast):
 
 
 def test_a_restarted_follower_resumes_where_the_last_stopped(tmp_path, synapse, fast):
+    """A background task Claude Code no longer lists as running is let go when idle."""
+    L.remember_task(SID, "b1", "toolu_R")
     f = tmp_path / "b1.output"
     f.write_text("one\npart")
     start(synapse.url, f).join(5)  # idle, not running: stops, without done; "part" is kept
@@ -163,7 +161,8 @@ def test_a_restarted_follower_resumes_where_the_last_stopped(tmp_path, synapse, 
     assert [p["text"] for p in out] == ["one\n", "partial two\nthree\n", ""]
     assert [p["seq"] for p in out] == [0, 1, 2]
     assert [p["done"] for p in out] == [False, False, True]
-    assert [p["truncated"] for p in out] == [False, False, False]
+    # done after a stop it can't see past: output may have come and gone in between
+    assert [p["truncated"] for p in out] == [False, False, True]
 
 def test_a_restarted_follower_redacts_a_line_it_saw_only_the_start_of(tmp_path, synapse, fast):
     f = tmp_path / "b1.output"
@@ -464,8 +463,8 @@ def test_a_secret_data_block_waits_for_its_kind(tmp_path, small):
     f = _reset(tmp_path, small)
     out = small(f, [_w(f, "apiVersion: v1\ndata:\n  app: c2VjcmV0dmFsdWU=\n"), lambda: None,
                     _w(f, "kind: Secret\nmetadata:\n  name: x\n")])
-    assert "c2VjcmV0dmFsdWU=" not in _wire(out)
-    assert out[0]["text"] == "apiVersion: v1\n"  # sent before the hold began
+    assert "c2VjcmV0dmFsdWU=" not in _wire(out) and L.WITHHELD in _wire(out)
+    assert out[0]["text"] == "apiVersion: v1\ndata:\n"  # the header goes; its values wait
 
 
 def test_a_key_block_waits_for_its_end_line(tmp_path, small):
@@ -488,7 +487,7 @@ def test_held_lines_past_hold_max_are_skipped_with_the_key_lines_after_them(tmp_
     out = small(f, [_w(f, "x\n-----BEGIN PRIVATE KEY-----\n")] + [_w(f, line * 4) for _ in range(7)]
                 + [_w(f, "after\n")])
     assert "QUJDREVGR0hJSktM" not in _wire(out)
-    assert _wire(out) == "x\nafter\n" and out[1]["truncated"] is True
+    assert _wire(out) == f"x\n{L.WITHHELD}\nafter\n"  # one marker for the whole run
 
 def test_done_is_sent_once_per_task(tmp_path, small):
     """Round-1 S2-3: an idle stop isn't the end; only the file going (or the session) is."""
@@ -611,3 +610,146 @@ def test_a_background_call_starts_its_follower_at_once(tmp_path, synapse):
                    transcript_path=transcript_path(tmp_path)))
     out = [e["payload"] for e in synapse.wait(2) if e["type"] == "tool.output"]
     assert [(p["text"], p.get("tool_use_id")) for p in out] == [("from the background\n", "toolu_B")]
+
+
+# --- round 2: Secrets across objects, Secrets longer than the context, the join -----------------
+
+V = "c2VjcmV0dmFsdWU="
+POD_THEN_SECRET_YAML = ("apiVersion: v1\nkind: Pod\nmetadata:\n  name: web\napiVersion: v1\ndata:\n"
+                        f"  app.conf: {V}\nkind: Secret\nmetadata:\n  name: db\ntype: Opaque\n")
+POD_THEN_SECRET_JSON = ('{\n  "apiVersion": "v1",\n  "kind": "Pod",\n  "metadata": {\n    "name": "web"\n  }\n}\n'
+                        '{\n  "apiVersion": "v1",\n  "data": {\n    "app.conf": "' + V + '"\n  },\n'
+                        '  "kind": "Secret",\n  "metadata": {\n    "name": "db"\n  },\n  "type": "Opaque"\n}\n')
+LIST_YAML = ("apiVersion: v1\nitems:\n- apiVersion: v1\n  data:\n    color: blue\n  kind: ConfigMap\n"
+             "  metadata:\n    name: cm\n- apiVersion: v1\n  data:\n" f"    app.conf: {V}\n"
+             "  kind: Secret\n  metadata:\n    name: db\n  type: Opaque\nkind: List\n")
+LIST_JSON = ('{\n    "apiVersion": "v1",\n    "items": [\n        {\n            "apiVersion": "v1",\n'
+             '            "data": {\n                "color": "blue"\n            },\n'
+             '            "kind": "ConfigMap"\n        },\n        {\n            "apiVersion": "v1",\n'
+             '            "data": {\n                "app.conf": "' + V + '"\n            },\n'
+             '            "kind": "Secret",\n            "type": "Opaque"\n        }\n    ],\n    "kind": "List"\n}\n')
+
+
+@pytest.mark.parametrize("text", [POD_THEN_SECRET_YAML, POD_THEN_SECRET_JSON, LIST_YAML, LIST_JSON],
+                         ids=["pod-secret-yaml", "pod-secret-json", "list-yaml", "list-json"])
+def test_an_earlier_objects_kind_never_releases_a_secrets_data(tmp_path, small, text):
+    """Round-2 S1-A: a Pod's or ConfigMap's kind before a Secret's data released it."""
+    assert V not in clean(text)
+    leaks = []
+    for i in range(1, len(text)):
+        f = _reset(tmp_path, small)
+        if V in _wire(small(f, [_w(f, text[:i]), _w(f, text[i:])])):
+            leaks.append(i)
+    assert leaks == []
+    # A List is one document to the server too: with a Secret in it, every data block in it is
+    # withheld, the ConfigMap's as well.
+
+
+def _big_secret(n: int) -> tuple[str, list[str]]:
+    vals = [f"c2VjcmV0dmFsdWU{k:05d}" for k in range(n)]
+    return ("apiVersion: v1\ndata:\n" + "".join(f"  key{k:05d}.conf: {v}\n" for k, v in enumerate(vals))
+            + "kind: Secret\nmetadata:\n  name: big\ntype: Opaque\n"), vals
+
+
+def test_a_secret_longer_than_the_context_in_one_burst_sends_no_value(tmp_path, small):
+    """Round-2 S1-B: the data: header leaves the context window (and the burst skips it)."""
+    text, vals = _big_secret(300)  # about 12 KB; READ_MAX, CTX_MAX and HOLD_MAX are 1-2 KB here
+    f = _reset(tmp_path, small)
+    out = small(f, [_w(f, text)])
+    assert [v for v in vals if v in _wire(out)] == [] and "kind: Secret" in _wire(out)
+
+
+def test_a_secret_held_past_hold_max_sends_no_value_after_it(tmp_path, small):
+    """Round-2 S1-B: 17 KB of data held then skipped, and the next poll's values went out."""
+    text, vals = _big_secret(60)
+    cut = text.index("kind: Secret")
+    f = _reset(tmp_path, small)
+    first, rest = text[: text.index("  key00045")], text[text.index("  key00045"):]
+    out = small(f, [_w(f, first), _w(f, rest)])
+    assert [v for v in vals if v in _wire(out)] == [] and cut
+
+
+def test_a_key_after_a_long_secret_never_sends_the_secrets_values(tmp_path, small):
+    """Round-2 S1-C: a key block collapsing to one line made the join reach back into values."""
+    text, vals = _big_secret(60)
+    key = ("-----BEGIN RSA PRIVATE KEY-----\n" + "MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7Mhgw\n" * 25
+           + "-----END RSA PRIVATE KEY-----\n")
+    f = _reset(tmp_path, small)
+    out = small(f, [_w(f, text), _w(f, key)])
+    assert [v for v in vals if v in _wire(out)] == [] and "MIIEowIBAAKCAQEA" not in _wire(out)
+
+
+def test_a_documents_end_resets_the_secret_state(tmp_path, small):
+    f = _reset(tmp_path, small)
+    text = (f"kind: Secret\ndata:\n  a: {V}\n---\nkind: ConfigMap\ndata:\n  color: blue\nmetadata:\n  name: cm\n")
+    out = small(f, [_w(f, text)])
+    assert V not in _wire(out) and "color: blue" in _wire(out)
+
+
+def test_a_key_block_ends_at_its_end_line(tmp_path, small):
+    f = _reset(tmp_path, small)
+    k = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZn\n"
+    plain = "thisisanordinarylongwordwithoutspaces"  # key-like in shape, not to the redactor
+    assert L._KEYISH.fullmatch(plain) and plain in clean(plain + "\n")
+    out = small(f, [_w(f, "-----BEGIN PRIVATE KEY-----\n" + k * 3 + "-----END PRIVATE KEY-----\n"
+                       + plain + "\nafter\n")])
+    assert k.strip() not in _wire(out)
+    assert plain + "\nafter\n" in _wire(out)  # after the END: sent
+
+
+def test_a_file_rewritten_longer_restarts_from_its_start(tmp_path, small):
+    """Round-2 M11: rewritten in place to more than the old offset (the size check can't see it)."""
+    f = _reset(tmp_path, small)
+    first = "hello world " * 6 + "\n"
+    second = "z " * 30 + "\n" + "starts here and is longer than the first content was\n"
+    out = small(f, [_w(f, first), _w(f, second, "w")])
+    assert len(second.encode()) > len(first.encode()) and second[:64] != first[:64]
+    assert _wire(out) == first + second and out[1]["truncated"] is True
+
+
+def test_a_file_truncated_below_the_offset_restarts_from_its_start(tmp_path, small):
+    f = _reset(tmp_path, small)
+    out = small(f, [_w(f, "a b c\n" * 5), _w(f, "x y\n", "w")])
+    assert _wire(out) == "a b c\n" * 5 + "x y\n" and out[1]["truncated"] is True
+
+
+def test_a_replaced_file_is_read_from_its_start_by_the_next_follower(tmp_path, small):
+    """Round-2 M12: a new file (another inode) at the path when a follower resumes."""
+    L.remember_task(SID, "s1", "toolu_S")  # a background task: let go when idle
+    f = _reset(tmp_path, small)
+    small(f, [_w(f, "one two three four\n")], unlink_after=False)
+    f.unlink()
+    f.write_text("new file first line\n")
+    out = small(f, [])
+    assert _wire(out) == "one two three four\nnew file first line\n" and out[1]["truncated"] is True
+
+
+def test_session_end_sends_what_arrived_then_done_marked_for_what_waits(tmp_path, small):
+    """Round-2 M20, M21: the last poll before the session's done, and the mark for held lines."""
+    f = _reset(tmp_path, small)
+
+    def lines_then_end():
+        _w(f, "last line\nQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZn\n")()
+        L.mark_ended(SID)
+    out = small(f, [lines_then_end])
+    assert [p["text"] for p in out] == ["last line\n", ""]
+    assert out[-1]["done"] is True and out[-1]["truncated"] is True  # a key-like line waited
+
+
+def test_session_end_sends_done_for_a_follower_already_stopped(tmp_path, small):
+    """Round-2 sev-3: SessionEnd only marked the session; a stopped follower's task got no done."""
+    L.remember_task(SID, "s1", "toolu_S")
+    f = _reset(tmp_path, small)
+    small(f, [_w(f, "a\n")], unlink_after=False)  # idle stop
+    L.end_session(cfg("http://127.0.0.1:9"), SID)
+    out = [e["payload"] for e in small.sent]
+    assert [(p["text"], p["done"]) for p in out] == [("a\n", False), ("", True)]
+    assert out[-1]["truncated"] is True  # output after the stop can't be known
+
+
+def test_a_foreground_task_is_not_let_go_when_idle(tmp_path, small):
+    """Round-2 sev-3: a foreground command silent for a minute lost its last lines."""
+    f = _reset(tmp_path, small)
+    idle = [lambda: None] * 5  # the fake clock jumps past IDLE_S
+    out = small(f, [_w(f, "step 1 of 2\n")] + idle + [_w(f, "step 2 of 2: FAILED\n")])
+    assert _wire(out) == "step 1 of 2\nstep 2 of 2: FAILED\n" and out[-1]["done"] is True
