@@ -94,8 +94,8 @@ def watch_main() -> int:
         inp = json.load(sys.stdin)
     except (ValueError, OSError):
         return 0
-    if not isinstance(inp, dict):
-        return 0
+    if not isinstance(inp, dict) or not c.agent_session(cfg, inp.get("session_id")):
+        return 0  # another session on this machine: no watch, so no FileChanged events either
     event = inp.get("hook_event_name")
     if event not in ("SessionStart", "CwdChanged"):
         return 0

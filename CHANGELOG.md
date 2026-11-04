@@ -9,6 +9,13 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
 
 ## [Unreleased]
 
+### Fixed
+- **Fleet: only the agent's own sessions report** (synapse#31; Clint, 2026-11-04): every Claude Code
+  session on a machine shares the fleet hooks, so the reporter, the status line and the activity
+  layer now send nothing unless the session is marked as the agent's, by `MS4CC_FLEET_AGENT=<handle>`
+  at launch or by claiming a running session with `orchestrator/fleet/claim.py`. Default deny, with no
+  network call for any other session.
+
 ### Added
 - **Fleet live output** (`orchestrator/fleet/live.py`) ([synapse#31](https://github.com/MindStone-Agent/synapse/issues/31)):
   with activity on, the output of running Bash commands and Monitor tasks streams to the board as
