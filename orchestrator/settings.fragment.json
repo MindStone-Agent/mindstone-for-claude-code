@@ -203,7 +203,7 @@
       }
     ]
   },
-  "_comment_fleet": "Fleet Phase 0 (synapse#31): fleet/report.py rides every event above as an async command hook and posts nothing unless [fleet] enabled = true in config/synapse.toml. statusLine is fleet/statusline.py, installed only while Fleet is on (bootstrap passes --argjson fleet); if settings.json already has a statusLine, the merge WRAPS it (passes its command base64-encoded via --wrap-b64, its output shown unchanged) and never replaces it, and with Fleet off it puts the wrapped one back. PreToolUse is used only by the activity layer ([fleet] activity = true); with it off the hook exits at once.",
+  "_comment_fleet": "Fleet Phase 0 (synapse#31): fleet/report.py rides every event above as an async command hook and posts nothing unless [fleet] enabled = true in config/synapse.toml, and nothing for a session that isn't the agent's own (launched with MS4CC_FLEET_AGENT=<handle>, or claimed with fleet/claim.py). statusLine is fleet/statusline.py, installed only while Fleet is on (bootstrap passes --argjson fleet); if settings.json already has a statusLine, the merge WRAPS it (passes its command base64-encoded via --wrap-b64, its output shown unchanged) and never replaces it, and with Fleet off it puts the wrapped one back. PreToolUse is used only by the activity layer ([fleet] activity = true); with it off the hook exits at once.",
   "statusLine": {
     "type": "command",
     "command": "$ORCHESTRATOR_DIR/.venv/bin/python $ORCHESTRATOR_DIR/fleet/statusline.py",
