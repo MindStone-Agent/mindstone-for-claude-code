@@ -22,7 +22,8 @@ Every pull request to `main` adds its entry under **Unreleased**; a PR without o
   `tool.output` events every 2 s from one detached follower per task. Only complete lines are sent.
   A line scanner withholds private keys and Kubernetes Secret values across polls; the rest is
   redacted with the output before it as context; anything that can't be sent whole is skipped and
-  marked.
+  marked. The directory watch is answered for every session; the events it raises go to `report.py`,
+  which sends nothing for a session that isn't the agent's.
 - **Fleet activity layer** (`orchestrator/fleet/activity.py`, `fleet/redact.py`) ([synapse#31](https://github.com/MindStone-Agent/synapse/issues/31)):
   with `[fleet] activity = true`, every tool call is reported with a redacted input and output
   preview shaped per tool and capped (never the contents of files Read returns, or the user's prompts

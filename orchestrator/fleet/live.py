@@ -8,6 +8,8 @@ Claude Code writes every Bash command's output, foreground or background, to
 1. `live.py --watch` runs as a synchronous SessionStart and CwdChanged hook and returns
    `watchPaths` for the session's tasks directory. Only SessionStart, CwdChanged and FileChanged
    hooks may, and a working-directory change rebuilds the watch list from CwdChanged's answer.
+   Every session gets it (one claimed while running can't be told apart at its start); the
+   gate is report.py, which sends nothing for a session that isn't the agent's.
 2. FileChanged `add` or `change` reaches report.py, which starts one detached follower for that
    file. A background Bash or Monitor call starts its follower at PostToolUse as well, since
    Claude Code reports a file only once its writes pause.
@@ -16,15 +18,18 @@ Claude Code writes every Bash command's output, foreground or background, to
    - Only complete lines are sent. A partial line waits for its end; when the command ends,
      its last line is whole and goes too.
    - A line scanner (_scan), whose state is kept across polls, withholds what spans lines: a
-     private key from BEGIN to END, key-like lines after a BEGIN with no END, and the values under a Secret's `data:` or `stringData:` (a block waits
-     until its document shows whether it is a Secret; past HOLD_MAX it is withheld). One
-     WITHHELD line stands in for each run.
+     private key from BEGIN to END (any line of key characters inside it, of any length), and
+     the values under a Secret's `data:` or `stringData:`. A block is decided only by a `kind:`
+     line after it, its document's end (`---`, or a closer at the margin) or the command's end;
+     until then it waits, and past HOLD_MAX it is withheld. One WITHHELD line stands in for
+     each run.
    - What the scanner lets through is redacted along with up to CTX_MAX of the output before
      it (not past a withheld run). Only the part after the context's own redaction is sent;
      if the new lines change how the context redacts, nothing is sent and the gap is marked.
    - After a burst only the last READ_MAX bytes are read, and the line that read starts in is
      skipped; the bytes skipped are run through the scanner first, so it knows whether the
-     read starts inside a key block or a Secret.
+     read starts inside a key block or a Secret. Past REPLAY_MAX only the last REPLAY_MAX are,
+     and indented lines are withheld until one at the margin.
    Every skip marks the next event `truncated`.
 4. It stops and sends `done` when the file is deleted (the command ended; it reads to the end
    first) or the session ends. It stops without `done` when a background task has been idle
@@ -32,7 +37,8 @@ Claude Code writes every Bash command's output, foreground or background, to
    MAX_S; a later `change` resumes from the saved offset. A foreground task is never let go
    when idle: its file goes when it ends. When a stopped task's file goes, or the session
    ends, with no follower running, its `done` is sent then, marked truncated, since what was
-   written after the stop can't be known.
+   written after the stop can't be known; a file that goes while its follower is stopping
+   gets its `done` from that follower, once it has let go of the task.
 
 A command whose file is gone before its follower opens it streams nothing: tool.finished
 already carries its output.
@@ -94,8 +100,11 @@ def watch_main() -> int:
         inp = json.load(sys.stdin)
     except (ValueError, OSError):
         return 0
-    if not isinstance(inp, dict) or not c.agent_session(cfg, inp.get("session_id")):
-        return 0  # another session on this machine: no watch, so no FileChanged events either
+    if not isinstance(inp, dict):
+        return 0
+    # Every session gets the watch, marked or not: a session claimed while running (claim.py)
+    # can't be told apart at SessionStart, and FileChanged reaches report.py, which sends
+    # nothing for a session that isn't the agent's (no network call). Live output review 3.
     event = inp.get("hook_event_name")
     if event not in ("SessionStart", "CwdChanged"):
         return 0
@@ -216,6 +225,17 @@ def _start(cfg: c.FleetConfig, session: str, path: Path, task_id: str) -> None:
             follow(cfg, session, path, task_id)
         finally:
             os.close(fd)
+        # The file may have gone after this follower stopped (idle, MAX_S) but before it let
+        # go of the lock, when an unlink's done saw the lock held: send that done now.
+        if not path.exists():
+            again = _claim(session, task_id)
+            if again is not None:
+                try:
+                    st = _load(session, task_id)
+                    if not st["done"]:
+                        _done(cfg, session, task_id, st)
+                finally:
+                    os.close(again)
     if os.environ.get("MS4CC_FLEET_INLINE") == "1":
         return run()
     c.detach(run)
@@ -271,9 +291,9 @@ _DOC_SPLIT = re.compile(r"---[ \t]*")
 # The server's own Secret test (fleet_redact_vendor._KIND_SECRET), one line at a time.
 _KIND_SECRET = re.compile(r"[ \t]*\"?kind\"?[ \t]*:[ \t]*['\"]?Secret['\"]?[ \t]*,?[ \t]*", re.I)
 _KIND = re.compile(r"[ \t]*\"?kind\"?[ \t]*:")
-_IMMUTABLE = re.compile(r"[ \t]*\"?immutable\"?[ \t]*:")
 _DATA_HDR = re.compile(r"[ \t]*\"?(?:data|stringData)\"?[ \t]*:[ \t]*\{?[ \t]*")
 _CLOSER = re.compile(r"[ \t]*[}\]],?[ \t]*")
+_B64_LINE = re.compile(r"[ \t]*[A-Za-z0-9+/=]+[ \t]*")  # inside a key block: key material, any length
 WITHHELD = "[REDACTED-SECRET-LINES]"  # stands in for a run of lines not sent
 
 
@@ -285,18 +305,27 @@ def _bare(raw: str) -> str:
     return raw.rstrip("\n").rstrip("\r")
 
 
+def _ends_doc(line: str) -> bool:
+    """A `---` line, or a JSON document's closing brace at the margin."""
+    return bool(_DOC_SPLIT.fullmatch(line) or (_CLOSER.fullmatch(line) and _indent(line) == 0))
+
+
 def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[list[str], int, int]:
     """Which of `raw` (complete lines, each ending in a newline) may be sent. Returns the lines
     to send, with WITHHELD for each run held back as secret, how many lines were dealt with (the
-    rest wait for a later poll), and the index just past the last line withheld (0 if none). st's per-document state (secret_doc, data_indent, inkey)
-    is carried across polls and reflects the lines dealt with.
+    rest wait for a later poll), and the index just past the last line withheld (0 if none).
+    st's per-document state (secret_doc, data_indent, inkey) is carried across polls and
+    reflects the lines dealt with.
 
-    - A private key, BEGIN to END, is never sent; nor, after a BEGIN with no END, the key-like
-      lines that follow it.
+    - A private key, BEGIN to END, is never sent; nor, after a BEGIN with no END, the base64
+      lines that follow it (of any length: a key's last line can be short).
     - The values under a Secret's `data:` or `stringData:` are never sent. A block is a
-      Secret's when its document shows `kind: Secret` before it or anywhere in what has been
-      read after it (kubectl prints keys sorted: data before kind). It waits until the next key
-      after the block has arrived (or the output ends); past HOLD_MAX it is withheld.
+      Secret's when its document shows `kind: Secret` before it, or anywhere in what has been
+      read of the document after it (kubectl prints keys sorted: data, immutable, kind). It is
+      known NOT to be one only when a `kind:` line at its own indent or above has arrived, or
+      its document has ended (a `---` line, a JSON closing brace at the margin), or the output
+      has. Until then it waits; past HOLD_MAX it is withheld, and so is the rest of the
+      document's data.
     - Key-like lines with nothing after them yet wait for the next line, so that a key's tail
       and its END line are redacted together.
 
@@ -305,6 +334,16 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
     out: list[str] = []
     final = final or replay
     wend = [0]
+    n = len(raw)
+    bare = [_bare(x) for x in raw]
+    # One reverse pass instead of a scan per block (a long List was quadratic): where each
+    # line's document ends, whether a kind: Secret comes before that, and the next kind line.
+    doc_end, next_secret, next_kind = [n] * (n + 1), [n] * (n + 1), [n] * (n + 1)
+    for x in range(n - 1, -1, -1):
+        line = bare[x]
+        doc_end[x] = x if _DOC_SPLIT.fullmatch(line) else (x + 1 if _ends_doc(line) else doc_end[x + 1])
+        next_secret[x] = x if _KIND_SECRET.fullmatch(line) else next_secret[x + 1]
+        next_kind[x] = x if _KIND.match(line) else next_kind[x + 1]
 
     def withhold(end: int) -> None:
         wend[0] = end
@@ -315,21 +354,24 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
     def size_from(k: int) -> int:
         return sum(len(x.encode("utf-8", "surrogateescape")) for x in raw[k:])
 
-    i, n = 0, len(raw)
+    def kind_after(j: int, h: int, end: int) -> bool:
+        k = next_kind[j]
+        while k < end:
+            if _indent(bare[k]) <= h:
+                return True
+            k = next_kind[k + 1]
+        return False
+
+    i = 0
     while i < n:
-        line = _bare(raw[i])
-        if _DOC_SPLIT.fullmatch(line):
-            st.update(secret_doc=False, data_indent=None, inkey=False)
-            out.append(raw[i])
-            i += 1
-            continue
+        line = bare[i]
         if st["inkey"]:
             if _PEM_END.search(line):
                 st["inkey"] = False
                 withhold(i + 1)
                 i += 1
                 continue
-            if _KEYISH.fullmatch(line):
+            if _B64_LINE.fullmatch(line):
                 withhold(i + 1)
                 i += 1
                 continue
@@ -337,23 +379,20 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
         if st["data_indent"] is not None:
             h = st["data_indent"]
             j = i  # the block: deeper lines and blanks, then a closing brace at h
-            while j < n and (not _bare(raw[j]).strip() or _indent(_bare(raw[j])) > h):
+            while j < n and (not bare[j].strip() or _indent(bare[j]) > h):
                 j += 1
-            if j < n and _CLOSER.fullmatch(_bare(raw[j])) and _indent(_bare(raw[j])) == h:
+            if j < n and _CLOSER.fullmatch(bare[j]) and _indent(bare[j]) == h:
                 j += 1
-            k = j  # once the next key at h or above has arrived, a kind: Secret would have too
-            while k < n and (not _bare(raw[k]).strip() or _IMMUTABLE.fullmatch(_bare(raw[k]))):
-                k += 1
-            secret_ahead = any(_KIND_SECRET.fullmatch(_bare(x)) for x in raw[i:_doc_end(raw, i)])
-            if st["secret_doc"] or secret_ahead:
+            end = doc_end[i]
+            if st["secret_doc"] or next_secret[i] < end:
                 secret = True
-            elif k < n or final:
+            elif kind_after(j, h, end) or end < n or (end == n and n and _ends_doc(bare[n - 1])) or final:
                 secret = False
             elif size_from(i) > HOLD_MAX:
                 secret, st["secret_doc"] = True, True  # undecided too long: withheld, and the rest
                 j = n
             else:
-                return _ended_with(out, st), i, wend[0]  # wait: the block or the key after it hasn't arrived
+                return _ended_with(out, st), i, wend[0]  # wait: the document hasn't said yet
             if secret:
                 if j > i:
                     withhold(j)
@@ -362,6 +401,11 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
             i = j
             if j < n or (final and not replay):
                 st["data_indent"] = None
+            continue
+        if _ends_doc(line):
+            st.update(secret_doc=False, data_indent=None, inkey=False)
+            out.append(raw[i])
+            i += 1
             continue
         if _PEM_BEGIN.search(line):
             st["inkey"] = not _PEM_END.search(line)
@@ -377,7 +421,7 @@ def _scan(raw: list[str], st: dict, final: bool, replay: bool = False) -> tuple[
             continue
         if _KEYISH.fullmatch(line):
             r = i
-            while r < n and _KEYISH.fullmatch(_bare(raw[r])):
+            while r < n and _KEYISH.fullmatch(bare[r]):
                 r += 1
             if r == n and not final:
                 if size_from(i) <= HOLD_MAX:
@@ -399,13 +443,6 @@ def _ended_with(out: list[str], st: dict) -> list[str]:
     if out:
         st["withheld_last"] = out[-1] == WITHHELD + "\n"
     return out
-
-
-def _doc_end(raw: list[str], i: int) -> int:
-    for k in range(i, len(raw)):
-        if _DOC_SPLIT.fullmatch(_bare(raw[k])):
-            return k
-    return len(raw)
 
 
 def _redact(ctx: str, text: str) -> str | None:
@@ -519,6 +556,10 @@ def _sendable(t: str) -> str:
     return t.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
+def _head(fd: int, n: int) -> str:
+    return hashlib.sha256(os.pread(fd, n, 0)).hexdigest()
+
+
 def _context(fd: int, at: int, since: int = 0) -> str:
     """Up to CTX_MAX bytes of the file before `at` (a line start) and from `since` on: context
     for redaction, never sent itself."""
@@ -585,10 +626,11 @@ def _follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str, st: dict
     def replay(lo: int, hi: int) -> None:
         """Bring the scanner's state through bytes a burst skips unread: whether a key block or
         a Secret's data is open where the read starts. Past REPLAY_MAX only the end is replayed,
-        from a fresh state that takes the document for a Secret."""
+        from a state that takes the document for a Secret and every indented line for its data,
+        withheld until a line at the margin (where the read starts is unknown)."""
         if hi - lo > REPLAY_MAX:
             lo = hi - REPLAY_MAX
-            st.update(secret_doc=True, data_indent=None, inkey=False, midline=True)
+            st.update(secret_doc=True, data_indent=0, inkey=False, midline=True)
         b = os.pread(fd, hi - lo, lo)
         if st["midline"]:
             nl = b.find(b"\n")
@@ -655,10 +697,16 @@ def _follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str, st: dict
         if now - started > MAX_S or not _activity_on():
             st["stopped"] = True
             return _save(session, task_id, st)
-        head = hashlib.sha256(os.pread(fd, 64, 0)).hexdigest() if size >= 64 else None
-        if size < st["offset"] or (st["head"] and head != st["head"]):  # rewritten in place
+        # Rewritten in place: shorter than what was read, or its first bytes changed. Compared on
+        # the length first hashed, so a file still under 64 bytes is checked too.
+        h = st["head"]
+        seen = h if isinstance(h, list) and len(h) == 2 and type(h[0]) is int and isinstance(h[1], str) else None
+        if size < st["offset"] or (seen and (size < seen[0] or _head(fd, seen[0]) != seen[1])):
             st.update(offset=0, midline=False, owed=True, secret_doc=False, data_indent=None, inkey=False, ctx_from=0)
-        st["head"] = head
+            seen = None
+        n_head = min(size, 64)
+        if n_head and (seen is None or n_head > seen[0]):
+            st["head"] = [n_head, _head(fd, n_head)]
         if size == last_size:
             # Only a background task Claude Code no longer lists as running is let go when
             # idle: a foreground task's file goes when it ends, so it is followed until then.

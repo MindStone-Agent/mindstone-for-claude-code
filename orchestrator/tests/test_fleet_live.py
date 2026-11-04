@@ -485,10 +485,12 @@ def test_held_lines_past_hold_max_are_skipped_with_the_key_lines_after_them(tmp_
     assert len(line) < 60  # the server's own key-line rule takes 60 to 76; these need the BEGIN
     # 6 batches pass HOLD_MAX (skipped); the 7th is held anew, then closed by "after": it would
     # go out with no BEGIN left in the context unless key lines after a skip stay unsent.
+    # The run ends at a line that can't be key material: a bare word like "after" could be
+    # (round-3 S2-2: any line of [A-Za-z0-9+/=] inside a key block), so it would stay withheld.
     out = small(f, [_w(f, "x\n-----BEGIN PRIVATE KEY-----\n")] + [_w(f, line * 4) for _ in range(7)]
-                + [_w(f, "after\n")])
+                + [_w(f, "after it\n")])
     assert "QUJDREVGR0hJSktM" not in _wire(out)
-    assert _wire(out) == f"x\n{L.WITHHELD}\nafter\n"  # one marker for the whole run
+    assert _wire(out) == f"x\n{L.WITHHELD}\nafter it\n"  # one marker for the whole run
 
 def test_done_is_sent_once_per_task(tmp_path, small):
     """Round-1 S2-3: an idle stop isn't the end; only the file going (or the session) is."""
@@ -794,3 +796,114 @@ def test_a_withheld_run_is_not_context_for_what_follows(tmp_path, small, monkeyp
     out = small(f, [_w(f, first), _w(f, rest)])
     assert [v for v in vals if v in _wire(out)] == []
     assert "kind: Secret\nmetadata:\n  name: big\ntype: Opaque\n" in _wire(out)
+
+
+# --- round 3: a data block is decided only by its kind, its document's end, or the command's end -
+
+IMMUTABLE_YAML = f"apiVersion: v1\ndata:\n  a: {V}\nimmutable: true\nkind: Secret\nmetadata:\n  name: x\n"
+IMMUTABLE_JSON = ('{\n    "apiVersion": "v1",\n    "data": {\n        "a": "' + V + '"\n    },\n'
+                  '    "immutable": true,\n    "kind": "Secret",\n    "metadata": {\n        "name": "x"\n'
+                  '    },\n    "type": "Opaque"\n}\n')
+HAND_ORDER = f"apiVersion: v1\ndata:\n  a: {V}\nmetadata:\n  name: x\n  labels:\n    app: db\nkind: Secret\n"
+NESTED_JSON = ('{\n    "apiVersion": "v1",\n    "spec": {\n        "data": {\n            "a": "' + V + '"\n'
+               '        }\n    },\n    "kind": "Secret"\n}\n')
+
+
+@pytest.mark.parametrize("text", [IMMUTABLE_YAML, IMMUTABLE_JSON, HAND_ORDER, NESTED_JSON],
+                         ids=["immutable-yaml", "immutable-json", "data-metadata-kind", "json-closer-below-data"])
+def test_a_secrets_data_waits_for_its_kind_whatever_comes_between(tmp_path, small, text):
+    """Round-3 S1-1, S2-1: `immutable: true` (kubectl sorts it between data and kind), other
+    keys, or a JSON closer at a lower indent than the data released it as not a Secret."""
+    assert V in clean("data:\n  a: " + V + "\n") and V not in clean(text)  # the kind decides
+    leaks = []
+    for i in range(1, len(text)):
+        f = _reset(tmp_path, small)
+        if V in _wire(small(f, [_w(f, text[:i]), _w(f, text[i:])])):
+            leaks.append(i)
+    assert leaks == []
+
+
+def test_a_short_last_key_line_is_withheld(tmp_path, small):
+    """Round-3 S2-2: inside a key block, a key line of any length is key material."""
+    k = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZn\n"
+    text = "x\n-----BEGIN PRIVATE KEY-----\n" + k * 3 + "QUJDzz==\n-----END PRIVATE KEY-----\ny\n"
+    leaks = []
+    for i in range(1, len(text)):
+        f = _reset(tmp_path, small)
+        w = _wire(small(f, [_w(f, text[:i]), _w(f, text[i:])]))
+        if "QUJDzz" in w or "QUJDREVG" in w:
+            leaks.append(i)
+    assert leaks == []
+
+
+def test_a_burst_past_replay_max_withholds_indented_lines_until_the_margin(tmp_path, small, monkeypatch):
+    """Round-3 S3-3: past REPLAY_MAX the scanner starts with no state: where the read starts
+    may be inside a Secret's data, so indented lines wait for a line at the margin."""
+    monkeypatch.setattr(L, "REPLAY_MAX", 512)
+    vals = [f"plainvalue{k:05d}" for k in range(200)]
+    text = ("kind: Secret\ndata:\n" + "".join(f"  key{k:05d}: {v}\n" for k, v in enumerate(vals))
+            + "type: Opaque\nafter\n")
+    assert len(text.encode()) > L.READ_MAX + 512 * 4
+    f = _reset(tmp_path, small)
+    out = small(f, [_w(f, text)])
+    assert [v for v in vals if v in _wire(out)] == []
+    assert _wire(out).endswith("type: Opaque\nafter\n") and out[0]["truncated"] is True
+
+
+def test_a_file_rewritten_in_place_under_64_bytes_restarts_from_its_start(tmp_path, small):
+    """Round-3 S3-4: the head check hashed nothing until the file reached 64 bytes."""
+    f = _reset(tmp_path, small)
+    out = small(f, [_w(f, "ab cd\n"), _w(f, "zz yy xx\n", "w")])
+    assert _wire(out) == "ab cd\nzz yy xx\n" and out[1]["truncated"] is True
+
+
+def test_a_file_gone_as_its_follower_stops_still_gets_its_done(tmp_path, small, monkeypatch):
+    """Round-3 S3-5: the file went after the follower stopped and before it let go of its lock;
+    the unlink saw the lock held and sent nothing. The follower's exit sends it."""
+    import types
+    L.remember_task(SID, "s1", "toolu_S")  # a background task: let go when idle
+    f = _reset(tmp_path, small)
+    d = Drive(f, [_w(f, "a\n")], unlink_after=False)
+    monkeypatch.setattr(L, "time", types.SimpleNamespace(time=d.time, sleep=d.sleep))
+    real = L.follow
+    unlink_saw = []
+
+    def follow_then_gone(*a):
+        real(*a)  # stopped (idle), lock still held
+        f.unlink()
+        L.on_file_changed(cfg("http://127.0.0.1:9"), {"event": "unlink", "file_path": str(f)}, SID)
+        unlink_saw.append([e["payload"]["done"] for e in small.sent])
+    monkeypatch.setattr(L, "follow", follow_then_gone)
+    monkeypatch.setattr(L, "_task_path", lambda inp, p: Path(p))
+    monkeypatch.setenv("MS4CC_FLEET_INLINE", "1")
+    L._start(cfg("http://127.0.0.1:9"), SID, f, "s1")
+    assert unlink_saw == [[False]]  # the unlink's own done was refused: the lock was held
+    out = [e["payload"] for e in small.sent]
+    assert [(p["text"], p["done"]) for p in out] == [("a\n", False), ("", True)]
+
+
+def test_a_claimed_session_resumed_streams_again(tmp_path, synapse):
+    """Round-3 S3-1: a session claimed while running (no launch mark) ends, releasing its claim
+    and marking it ended; resumed, its SessionStart must clear the mark before it is claimed
+    again, or every follower stops at its first poll."""
+    env = live_env(tmp_path, synapse.url)
+    env.pop("MS4CC_FLEET_AGENT")
+    claim = ORCH / "fleet" / "claim.py"
+    run_claim = lambda *a: subprocess.run([sys.executable, "-B", str(claim), *a], env=dict(env, CLAUDE_CODE_SESSION_ID=SID),
+                                          capture_output=True, timeout=20)
+    assert run_claim().returncode == 0
+    hook(env, base("SessionEnd", reason="other", transcript_path=transcript_path(tmp_path)))
+    state = Path(env["MS4CC_SYNAPSE_HOME"]) / "fleet"
+    assert (state / f"{SID}.ended").exists()
+    start_inp = {"hook_event_name": "SessionStart", "session_id": SID, "transcript_path": transcript_path(tmp_path),
+                 "cwd": "/Users/x/proj", "source": "resume"}
+    w = subprocess.run([sys.executable, "-B", str(LIVE), "--watch"], input=json.dumps(start_inp).encode(),
+                       env=env, capture_output=True, timeout=20)
+    assert json.loads(w.stdout)["hookSpecificOutput"]["watchPaths"] == [str(expected_tasks(tmp_path))]
+    assert not (state / f"{SID}.ended").exists()
+    assert run_claim().returncode == 0  # claimed again
+    d = expected_tasks(tmp_path)
+    (d / "b9.output").write_text("after the resume\n")
+    hook(env, file_changed(tmp_path, "add", d / "b9.output"))
+    out = [e["payload"] for e in synapse.wait(1) if e["type"] == "tool.output"]
+    assert [p["text"] for p in out] == ["after the resume\n"]

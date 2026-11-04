@@ -1010,6 +1010,8 @@ def _activity_env(tmp_path: Path, url: str, agent: str | None) -> dict:
     env = make_env(tmp_path, url, agent=agent)
     toml = Path(env["MS4CC_SYNAPSE_TOML"])
     toml.write_text(toml.read_text() + "activity = true\n")
+    env["CLAUDE_CODE_TMPDIR"] = str(tmp_path / "tmp")  # live output's watch makes its tasks dir
+    (tmp_path / "tmp").mkdir(exist_ok=True)
     return env
 
 
@@ -1019,9 +1021,18 @@ def _every_hook(env: dict, sid: str = SID) -> None:
                        tool_response={"stdout": "x"}, notification_type="permission_prompt",
                        agent_id="a1", agent_type="Explore", task_subject="t", reason="other"))
     hook(env, dict(STATUS_IN, session_id=sid), STATUSLINE)
-    for ev in ("SessionStart", "CwdChanged"):  # live output's watch: no watchPaths, no FileChanged
+    # Live output's watch is returned to every session (one claimed while running can't be told
+    # apart at SessionStart: live output review 3). What it watches reaches report.py's
+    # FileChanged, which sends nothing for another session: that is the gate.
+    tasks = Path(env["CLAUDE_CODE_TMPDIR"]).resolve() / f"claude-{os.getuid()}" / "x" / sid / "tasks"
+    for ev in ("SessionStart", "CwdChanged"):
         w = hook(env, base(ev, session_id=sid, source="startup"), ORCH / "fleet" / "live.py", ["--watch"])
-        assert w.stdout == b"", (ev, w.stdout)
+        assert json.loads(w.stdout)["hookSpecificOutput"]["watchPaths"] == [str(tasks)], (ev, w.stdout)
+    (tasks / "b1.output").write_text("output of another session's command\n")
+    for kind in ("add", "change", "unlink"):
+        fc = base("FileChanged", session_id=sid, file_path=str(tasks / "b1.output"))
+        fc["event"] = kind
+        hook(env, fc)
 
 
 def test_another_session_on_the_machine_sends_nothing_at_any_hook(tmp_path, synapse):
