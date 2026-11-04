@@ -480,7 +480,10 @@ def test_held_lines_past_hold_max_are_skipped_with_the_key_lines_after_them(tmp_
     key lines after them, until a line that isn't key material."""
     f = _reset(tmp_path, small)
     line = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZn\n"
-    out = small(f, [_w(f, "x\n-----BEGIN PRIVATE KEY-----\n")] + [_w(f, line * 4) for _ in range(12)]
+    assert len(line) < 60  # the server's own key-line rule takes 60 to 76; these need the BEGIN
+    # 6 batches pass HOLD_MAX (skipped); the 7th is held anew, then closed by "after": it would
+    # go out with no BEGIN left in the context unless key lines after a skip stay unsent.
+    out = small(f, [_w(f, "x\n-----BEGIN PRIVATE KEY-----\n")] + [_w(f, line * 4) for _ in range(7)]
                 + [_w(f, "after\n")])
     assert "QUJDREVGR0hJSktM" not in _wire(out)
     assert _wire(out) == "x\nafter\n" and out[1]["truncated"] is True
@@ -534,6 +537,17 @@ def test_pieces_cap_by_bytes_as_sent_and_lose_nothing():
         pieces = L._pieces(text)
         assert all(size(p) <= L.CHUNK_MAX for p in pieces)
         assert "".join(pieces) == text
+
+
+def test_a_burst_inside_a_line_longer_than_the_context_skips_that_line(tmp_path, small):
+    """The context can't help when the line began more than CTX_MAX before the read: its value
+    would go out as a bare tail, which redaction can't recognise."""
+    v = "Hunter2-Correct.Horse!" * 200
+    assert "Correct.Horse" in clean(v[2500:] + "\n")  # a bare tail isn't redacted
+    f = _reset(tmp_path, small)
+    out = small(f, [_w(f, "a\n" * 50 + "export API_TOKEN=" + v + "\nlast\n")])
+    assert "Correct.Horse" not in _wire(out) and _wire(out) == "last\n"
+    assert out[0]["truncated"] is True
 
 
 def test_a_burst_starting_at_a_line_start_skips_nothing(tmp_path, small):

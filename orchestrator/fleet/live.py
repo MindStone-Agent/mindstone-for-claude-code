@@ -14,7 +14,7 @@ Claude Code writes every Bash command's output, foreground or background, to
 3. The follower reads the file every POLL_S and sends its new complete lines as `tool.output`
    events. Redaction is never given a fragment:
    - Only complete lines are sent. A partial line is never sent, not even when the follower
-     stops; a line of READ_MAX or more is skipped whole.
+     stops; a line that grows past READ_MAX is skipped, as a burst.
    - Each batch of lines is redacted together with up to CTX_MAX of the output before it, read
      back from the file, and only the batch's own lines are sent.
    - Lines are held back while a secret that spans lines may still be open: a private-key
@@ -464,10 +464,7 @@ def _follow(cfg: c.FleetConfig, session: str, path: Path, task_id: str, st: dict
         if final and data and not data.endswith(b"\n"):
             data += b"\n"
         cut = data.rfind(b"\n")
-        if cut < 0:
-            if len(data) >= READ_MAX:  # one line of READ_MAX or more: skipped whole
-                st["offset"] += len(data)
-                st.update(midline=True, owed=True)
+        if cut < 0:  # wait for the line's end; a line past READ_MAX is skipped as a burst
             st["held"] = False
             return
         lines = _text(data[: cut + 1])
