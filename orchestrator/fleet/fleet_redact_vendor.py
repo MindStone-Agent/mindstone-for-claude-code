@@ -490,6 +490,7 @@ def redact_preview(text: str) -> str:
     (Plumb, round 3). JSON string values are redacted as text of their own
     first (_json_strings)."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    original = text
     found: set[str] = set()
     token = _SINK.set(found)
     try:
@@ -498,9 +499,97 @@ def redact_preview(text: str) -> str:
         # Secret, a key block) is a known secret where it repeats bare too
         # (echo $TOKEN, a second .env line), the same propagation the
         # scrubber gives its own finds (Hearth's blocker, round 5).
-        return _remnants(_propagate(text, found))
+        return _cut_open_string(_remnants(_propagate(text, found)), original)
     finally:
         _SINK.reset(token)
+
+
+CUT = "[REDACTED-CUT]"
+
+
+def _open_string_at(text: str) -> int | None:
+    """The earlier of two readings: by quote parity, and by structure (a quote opens a string
+    only at a line's start or after one of {[,: ). A stray quote earlier on the line (5" of
+    output: {"k": "...) evens the parity, and structure still sees the open value."""
+    a, b = _open_parity(text, False), _open_parity(text, True)
+    return b if a is None else a if b is None else min(a, b)
+
+
+def _open_parity(text: str, structural: bool) -> int | None:
+    """Where the first JSON string still open at the end of its line opens, or None. A quote
+    after an odd run of backslashes is escaped and opens nothing."""
+    if '"' not in text:
+        return None
+    start = 0
+    while start < len(text):
+        end = text.find("\n", start)
+        end = len(text) if end < 0 else end
+        opened, i = -1, start
+        while i < end:
+            c = text[i]
+            if c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                if opened >= 0:
+                    opened = -1
+                elif not structural:
+                    opened = i
+                else:
+                    j = i - 1
+                    while j >= start and text[j] in " \t":
+                        j -= 1
+                    if j < start or text[j] in "{[,:":
+                        opened = i
+            i += 1
+        if opened >= 0:
+            return opened
+        start = end + 1
+    return None
+
+
+def _quotes(text: str, start: int) -> int:
+    """Unescaped quotes on the line that starts at start."""
+    end = text.find("\n", start)
+    end = len(text) if end < 0 else end
+    n, i = 0, start
+    while i < end:
+        if text[i] == "\\":
+            i += 2
+            continue
+        n += text[i] == '"'
+        i += 1
+    return n
+
+
+def _cut_open_string(text: str, original: str | None = None) -> str:
+    """text (the rules' output), from the opening quote of the first JSON string still open
+    at the end of its line to the end, as one CUT marker. A tool that caps its output
+    (web_fetch's maxChars) can end the text inside a JSON string, and an unterminated literal
+    reads to the rules as escaped text: cut just before its closing quote, 16 of the 89 shared
+    secrets went out whole (MindStone #290 round 5). This runs on the redacted text, so it only
+    removes what the rules let through, never anything they hid. A stray quote in prose (5"
+    long) opens a string too: what follows it on the board is lost, which a preview can afford.
+
+    A rule can eat the escapes before a value (password=\\\" became password=[REDACTED]"),
+    leaving a raw quote that closes the string in the output though it was open in original,
+    or, with two such values on the line, reopens it past what it should have cut. So
+    original's open string is found too and its line mapped into text (counted from either end,
+    the earlier: a rule can fold lines). The cut starts at that line's start if text has no open
+    string by then, or has one on that line but a different count of quotes there than
+    original's (a rule changed them)."""
+    at = _open_string_at(text)
+    o = _open_string_at(original) if original is not None else None
+    if o is not None:
+        line = original.count("\n", 0, o)
+        k = max(0, min(line, text.count("\n") - (original.count("\n") - line)))
+        line_start = 0
+        for _ in range(k):
+            line_start = text.find("\n", line_start) + 1
+        al = None if at is None else text.count("\n", 0, at)
+        if al is None or al > k or (al == k and _quotes(text, line_start) != _quotes(original, original.rfind("\n", 0, o) + 1)):
+            at = line_start
+    return text if at is None else text[:at] + CUT
 
 
 def _redact_core(text: str) -> str:
