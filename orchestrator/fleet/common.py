@@ -335,7 +335,7 @@ SUBJECT_SCAN_MAX = 512  # only 120 chars are sent; scanning more only costs time
 
 
 def scrub_subject(v: object, scrubber_dir: Path | None = None) -> str | None:
-    """A task subject: cut to 512 chars, the framework scrubber, the stricter subject rules,
+    """A task subject: cut to 512 chars, the preview redaction (fleet/redact.py), the stricter subject rules,
     then cut to 120 chars. Scrubbed before the final cut, so a secret straddling it can't
     survive as a fragment. If the scrubber can't load, the subject is omitted, never sent
     unscrubbed."""
@@ -347,9 +347,13 @@ def scrub_subject(v: object, scrubber_dir: Path | None = None) -> str | None:
         if not v.strip():
             return None
     try:
-        sys.path.insert(0, str(scrubber_dir or ORCHESTRATOR_DIR / "hooks"))
-        from scrubber import scrub  # type: ignore
-        v = scrub(v)
+        if not ((scrubber_dir or ORCHESTRATOR_DIR / "hooks") / "scrubber.py").is_file():
+            return None
+        # the same redaction as every other board-visible field (the server's, vendored, plus
+        # the reporter's), before the subject is flattened onto one line: the framework
+        # scrubber alone let 9 of the shared fixtures through (Cairn's #145 review, S2-2)
+        from fleet.redact import clean
+        v = clean(v)
     except Exception:
         return None
     v = " ".join(_strict_subject(v).split())

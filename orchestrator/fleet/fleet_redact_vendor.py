@@ -408,7 +408,10 @@ def _json_secret_data(doc: str) -> str:
                         _note(a.group(2))
                         return a.group(1) + _R + a.group(3)
 
-                    out.append(_JSON_ANY_PAIR[q].sub(any_pair, doc[i:eol]))
+                    # both quoting styles: a later data object on this line
+                    # in the other style is skipped by the loop (final pass)
+                    seg = _JSON_ANY_PAIR['\\"'].sub(any_pair, doc[i:eol])
+                    out.append(_JSON_ANY_PAIR['"'].sub(any_pair, seg))
                     i = eol
                 break
             out.append(doc[i:p.start(2)])

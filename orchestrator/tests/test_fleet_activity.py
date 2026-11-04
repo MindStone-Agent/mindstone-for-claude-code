@@ -129,12 +129,12 @@ def test_subagent_calls_carry_its_agent_id(tmp_path, synapse):
     ("Write", {"file_path": "/a/c.py", "content": "x\ny\nz"}, "/a/c.py (3 lines)"),
     ("Edit", {"file_path": "/a/d.py", "old_string": "a\nb", "new_string": "c", "replace_all": True}, "/a/d.py (-2/+1 lines all)"),
     ("MultiEdit", {"file_path": "/a/e.py", "edits": [{}, {}]}, "/a/e.py (2 edits)"),
-    ("Glob", {"pattern": "**/*.py", "path": "src"}, "**/*.py path=src"),
-    ("Grep", {"pattern": "TODO", "glob": "*.ts"}, "TODO glob=*.ts"),
+    ("Glob", {"pattern": "**/*.py", "path": "src"}, "**/*.py\nsrc (path)"),
+    ("Grep", {"pattern": "TODO", "glob": "*.ts"}, "TODO\n*.ts (glob)"),
     ("WebFetch", {"url": "https://example.com/x", "prompt": PROMPT}, "https://example.com/x"),
     ("WebSearch", {"query": "python flock"}, "python flock"),
-    ("Agent", {"subagent_type": "Explore", "description": "find tests", "prompt": "look in tests/"}, "Explore find tests\n\nlook in tests/"),
-    ("Agent", {"subagent_type": "Explore", "description": "find tests"}, "Explore find tests"),
+    ("Agent", {"subagent_type": "Explore", "description": "find tests", "prompt": "look in tests/"}, "Explore\nfind tests\n\nlook in tests/"),
+    ("Agent", {"subagent_type": "Explore", "description": "find tests"}, "Explore\nfind tests"),
     ("mcp__x__y", {"a": 1}, '{"a": 1}'),
 ])
 def test_input_preview_per_tool(name, ti, want):
@@ -217,7 +217,7 @@ def test_subagent_started_names_its_agent_call(tmp_path, synapse):
     tool_started, started = synapse.wait(2)
     assert started["type"] == "subagent.started" and started["agent_id"] == "a1"
     assert started["payload"] == {"agent_type": "general-purpose", "parent_tool_use_id": "toolu_AG1", "description": "check files"}
-    assert tool_started["payload"]["input_preview"] == "general-purpose check files\n\n" + PROMPT
+    assert tool_started["payload"]["input_preview"] == "general-purpose\ncheck files\n\n" + PROMPT
 
 
 def test_pairing_happens_only_when_one_call_of_the_type_is_pending(tmp_path, synapse):
@@ -347,10 +347,10 @@ POST_RESPONSES = {
     "SendMessage": ({"success": True, "message": "queued"}, {}),
     "mcp__x__y": ({"result": "ok", "nested": {"prompt": "p"}}, {}),
 }
-WANT_OUTPUT = {"Agent": "[completed] found 3 tests", "Write": "create /p/a.py (2 lines, 4 bytes)\na\nb\n",
+WANT_OUTPUT = {"Agent": "[completed]\nfound 3 tests", "Write": "/p/a.py\ncreate, 2 lines, 4 bytes\na\nb\n",
                "Edit": "/p/b.py\n--- old\nx = 1\n+++ new\nx = 2",
                "MultiEdit": "/p/e.py\n--- old\na\n+++ new\nb\n--- old\nc\n+++ new\nd",
-               "Read": "3 lines of 9", "AskUserQuestion": "answered: Which?",
+               "Read": "3 lines of 9", "AskUserQuestion": "answered:\nWhich?",
                "SendMessage": '{"success": true, "message": "queued"}', "mcp__x__y": '{"result": "ok", "nested": {"prompt": "p"}}'}
 
 
@@ -764,7 +764,7 @@ def test_scrubbing_many_distinct_secrets_stays_bounded():
     assert "xyzSECRET" not in text
 
 
-SERVER_REDACT_SHA256 = "38ea1785e0a35dc690fa883a595b09838133d4979bfc22d8eb1a5bb39a18ea50"  # synapse 7640e79
+SERVER_REDACT_SHA256 = "52a00190abd249172a59ea3ff1144e1880878fc88520b82212191fd9ebfe932d"  # synapse 4117afb
 
 
 def test_the_vendored_server_redaction_is_verbatim():
@@ -995,3 +995,136 @@ def test_a_glued_tail_longer_than_256_characters_goes_whole():
     raw = "git clone https://deploy:Zq8vX2mN4pL7@git.example.com/a/b/" + "x" * 225 + "?MY_CREDENTIAL=SuperSecretValue123 done"
     out, _ = preview(raw, A.OUTPUT_MAX)
     assert "SuperSecretValue123" not in out and "Zq8vX2mN4pL7" not in out
+
+
+# --- the send path, field by field (Cairn's #145 review, S2-2) -------------------------------
+
+def _send_path_fields(x: str, tp: str) -> list[tuple[str, list[dict]]]:
+    """(field, hook inputs) pairs that put x into each board-visible field."""
+    return [
+        ("tool.started Bash command", [base("PreToolUse", tool_name="Bash", tool_use_id="t1", tool_input={"command": x})]),
+        ("tool.started Agent prompt", [base("PreToolUse", tool_name="Agent", tool_use_id="t2",
+                                            tool_input={"subagent_type": "Explore", "description": "d", "prompt": x})]),
+        ("tool.started Agent description + subagent.started description", [
+            base("PreToolUse", tool_name="Agent", tool_use_id="t3", tool_input={"subagent_type": "Plan", "description": x}),
+            base("SubagentStart", agent_id="sa1", agent_type="Plan")]),
+        ("tool.started MCP input", [base("PreToolUse", tool_name="mcp__x__y", tool_use_id="t4", tool_input={"q": x})]),
+        ("tool.finished Bash stdout", [base("PostToolUse", tool_name="Bash", tool_use_id="t5", tool_input={},
+                                            tool_response={"stdout": x, "stderr": ""})]),
+        ("tool.finished Agent report", [base("PostToolUse", tool_name="Agent", tool_use_id="t6", tool_input={},
+                                             tool_response={"status": "completed", "content": [{"type": "text", "text": x}]})]),
+        ("tool.finished Write content", [base("PostToolUse", tool_name="Write", tool_use_id="t7", tool_input={},
+                                              tool_response={"type": "create", "filePath": "/p", "content": x})]),
+        ("tool.finished Edit old/new", [base("PostToolUse", tool_name="Edit", tool_use_id="t8", tool_input={},
+                                             tool_response={"filePath": "/p", "oldString": x, "newString": x})]),
+        ("tool.finished MCP output", [base("PostToolUse", tool_name="mcp__x__y", tool_use_id="t9", tool_input={},
+                                           tool_response={"result": x})]),
+        ("tool.finished Grep content", [base("PostToolUse", tool_name="Grep", tool_use_id="t10", tool_input={},
+                                             tool_response={"mode": "content", "content": x})]),
+        ("tool.finished WebFetch result", [base("PostToolUse", tool_name="WebFetch", tool_use_id="t11", tool_input={},
+                                                tool_response={"result": x, "code": 200})]),
+        ("tool.finished AskUserQuestion questions", [base("PostToolUse", tool_name="AskUserQuestion", tool_use_id="t12",
+                                                          tool_input={}, tool_response={"questions": [{"question": x}]})]),
+        ("tool.finished error", [base("PostToolUseFailure", tool_name="Bash", tool_use_id="t13", tool_input={}, error=x)]),
+        ("message (the final reply from the hook)", [base("Stop", transcript_path=tp, last_assistant_message=x)]),
+        ("task.created subject", [base("TaskCreated", task_id="7", task_subject=x)]),
+        ("task.completed subject", [base("TaskCompleted", task_id="7", task_subject=x)]),
+        # the verify-only delta's list: every other sent free-text field
+        ("tool.started Read path", [base("PreToolUse", tool_name="Read", tool_use_id="u1", tool_input={"file_path": x})]),
+        ("tool.started Write path", [base("PreToolUse", tool_name="Write", tool_use_id="u2", tool_input={"file_path": x, "content": "c"})]),
+        ("tool.started Edit path", [base("PreToolUse", tool_name="Edit", tool_use_id="u3", tool_input={"file_path": x})]),
+        ("tool.started Grep pattern/path/glob/type", [base("PreToolUse", tool_name="Grep", tool_use_id="u4",
+                                                           tool_input={"pattern": x, "path": x, "glob": x, "type": x})]),
+        ("tool.started Glob pattern/path", [base("PreToolUse", tool_name="Glob", tool_use_id="u5", tool_input={"pattern": x, "path": x})]),
+        ("tool.started WebFetch url", [base("PreToolUse", tool_name="WebFetch", tool_use_id="u6", tool_input={"url": x})]),
+        ("tool.started WebSearch query", [base("PreToolUse", tool_name="WebSearch", tool_use_id="u7", tool_input={"query": x})]),
+        ("tool.started AskUserQuestion input", [base("PreToolUse", tool_name="AskUserQuestion", tool_use_id="u8",
+                                                     tool_input={"questions": [{"question": x}]})]),
+        ("tool.started Agent type", [base("PreToolUse", tool_name="Task", tool_use_id="u9", tool_input={"subagent_type": x})]),
+        ("tool.started generic input", [base("PreToolUse", tool_name="TodoWrite", tool_use_id="u10", tool_input={"todos": [x]})]),
+        ("tool.finished Bash stderr", [base("PostToolUse", tool_name="Bash", tool_use_id="v1", tool_input={},
+                                            tool_response={"stdout": "", "stderr": x})]),
+        ("tool.finished Write path", [base("PostToolUse", tool_name="Write", tool_use_id="v2", tool_input={"file_path": x},
+                                           tool_response={"type": "create", "filePath": x, "content": "c"})]),
+        ("tool.finished MultiEdit", [base("PostToolUse", tool_name="MultiEdit", tool_use_id="v3", tool_response={},
+                                          tool_input={"file_path": x, "edits": [{"old_string": x, "new_string": x}]})]),
+        ("tool.finished NotebookEdit", [base("PostToolUse", tool_name="NotebookEdit", tool_use_id="v4", tool_response={},
+                                             tool_input={"notebook_path": x, "new_source": x, "edit_mode": x})]),
+        ("tool.finished Glob/Grep filenames", [base("PostToolUse", tool_name="Glob", tool_use_id="v5", tool_input={},
+                                                    tool_response={"filenames": [x]})]),
+        ("tool.finished plain string", [base("PostToolUse", tool_name="mcp__x__y", tool_use_id="v6", tool_input={}, tool_response=x)]),
+        ("tool.finished Agent status and string result", [
+            base("PostToolUse", tool_name="Agent", tool_use_id="v7", tool_input={}, tool_response={"status": x, "content": []}),
+            base("PostToolUse", tool_name="Agent", tool_use_id="v8", tool_input={}, tool_response=x)]),
+        ("tool.finished Read type", [base("PostToolUse", tool_name="Read", tool_use_id="v9", tool_input={}, tool_response={"type": x})]),
+    ]
+
+
+@pytest.fixture
+def in_process_report(tmp_path, monkeypatch):
+    """report.main() in this process, every POST collected: fast enough to run every fixture
+    through every field."""
+    import io
+    from fleet import common as C
+    from fleet import report as R
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "plumb.token").write_text("test-token")
+    toml = tmp_path / "s.toml"
+    toml.write_text('[synapse]\nbase_url = "https://syn.example"\nhandle = "plumb"\n[fleet]\nenabled = true\nactivity = true\n')
+    monkeypatch.setattr(C, "CONFIG_PATH", toml)
+    monkeypatch.setattr(C, "HOME_SYNAPSE", home)
+    monkeypatch.setattr(C, "STATE_DIR", home / "fleet")
+    monkeypatch.setenv("MS4CC_FLEET_INLINE", "1")
+    sent: list[dict] = []
+    monkeypatch.setattr(C, "post", lambda cfg, events: sent.extend(events) or 202)
+
+    def run(inp: dict) -> None:
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(inp)))
+        R.main()
+    return run, sent
+
+
+@pytest.mark.parametrize("case", _shared_fixtures()["secret"], ids=lambda c: c["name"])
+def test_every_board_visible_field_is_redacted_on_the_send_path(case, tmp_path, in_process_report):
+    """Cairn's #145 review, S2-2: nothing tested redaction field by field at the outbound
+    payload, which is how the Agent report's `[status] ` prefix (S2-1) got through."""
+    run, sent = in_process_report
+    tp = tmp_path / "proj" / f"{SID}.jsonl"
+    tp.parent.mkdir(parents=True, exist_ok=True)
+    tp.write_text("")
+    run(base("SessionStart", source="startup", transcript_path=str(tp)))
+    leaks = []
+    # a reply tailed from the transcript itself, main and subagent
+    sub = tp.parent / SID / "subagents" / "agent-sa9.jsonl"
+    sub.parent.mkdir(parents=True, exist_ok=True)
+    for path, extra in ((tp, {}), (sub, {"agent_id": "sa9", "agent_type": "Explore"})):
+        sent.clear()
+        with path.open("a") as f:
+            f.write(json.dumps(assistant("m-" + path.stem, case["input"])) + "\n")
+        run(base("PostToolUse", tool_name="Read", tool_use_id="r-" + path.stem, tool_input={}, tool_response="",
+                 transcript_path=str(tp), **extra))
+        if case["leak"] in json.dumps(sent, ensure_ascii=False):
+            leaks.append("message (transcript tail) " + path.name)
+    for field, inputs in _send_path_fields(case["input"], str(tp)):
+        sent.clear()
+        for inp in inputs:
+            run(inp)
+        if not sent:
+            leaks.append(f"{field}: nothing sent")
+        elif case["leak"] in json.dumps(sent, ensure_ascii=False):
+            leaks.append(field)
+    assert not leaks, leaks
+
+
+def test_emit_later_bounds_the_detached_send_with_an_alarm(monkeypatch):
+    """Cairn's #145 review, S2-2: removing the alarm passed every test."""
+    from fleet import common as C
+    calls = []
+    monkeypatch.delenv("MS4CC_FLEET_INLINE", raising=False)
+    monkeypatch.setattr(C, "detach", lambda fn: fn())
+    monkeypatch.setattr(C.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(C.signal, "alarm", lambda s: calls.append(("alarm", s)))
+    monkeypatch.setattr(C, "post", lambda cfg, batch: calls.append(("post", len(batch))))
+    C.emit_later(None, [{"type": "tool.finished"}], lambda: calls.append(("more",)) or [])
+    assert calls[0] == ("alarm", C.SEND_DEADLINE_S * 2) and ("post", 1) in calls

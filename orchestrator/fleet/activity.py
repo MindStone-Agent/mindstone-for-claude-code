@@ -45,6 +45,9 @@ WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 PAIR_TTL_S = 600   # an Agent call not started within this stops pairing (PreToolUse comes before the permission prompt)
 DEFAULT_AGENT_TYPE = "general-purpose"  # what Claude Code runs when subagent_type is left out
 _NO_DROP: frozenset = frozenset()
+# Values Claude Code sets, sent only when they are one of these: anything else could be text.
+_READ_TYPES = frozenset({"text", "image", "notebook", "pdf", "file_unchanged", "parts"})
+_AGENT_STATUSES = frozenset({"completed", "async_launched", "error", "failed", "killed", "running"})
 _ANSWERS = frozenset({"answers", "annotations"})  # AskUserQuestion: the user's own words
 _TS = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})")
 
@@ -126,16 +129,20 @@ def input_text(tool_name: str, ti: object) -> str | None:
     if tool_name == "NotebookEdit":
         return _str(ti.get("notebook_path"))
     if tool_name in ("Glob", "Grep"):
-        parts = [ti.get("pattern")] + [f"{k}={ti[k]}" for k in ("path", "glob", "type") if _str(ti.get(k))]
-        return " ".join(p for p in parts if _str(p)) or None
+        # each value starts its own line, its label after it: a value glued after a label hides
+        # its first line from the line-anchored redaction rules (#145 verify-only delta)
+        parts = [ti.get("pattern")] + [f"{ti[k]} ({k})" for k in ("path", "glob", "type") if _str(ti.get(k))]
+        return "\n".join(p for p in parts if _str(p)) or None
     if tool_name == "WebFetch":
         return _str(ti.get("url"))
     if tool_name == "WebSearch":
         return _str(ti.get("query"))
     if tool_name in AGENT_TOOLS:  # what the subagent was asked to do
-        head = " ".join(p for p in (_str(ti.get("subagent_type")), _str(ti.get("description"))) if p)
+        # each field on its own line: a field glued after another hides its first line from the
+        # line-anchored redaction rules (Cairn's #145 review, S2-1)
+        parts = [p for p in (_str(ti.get("subagent_type")), _str(ti.get("description"))) if p]
         prompt = _str(ti.get("prompt"))
-        return (head + ("\n\n" + prompt if prompt else "")).strip() or None
+        return ("\n".join(parts) + ("\n\n" + prompt if prompt else "")).strip() or None
     return _dump(ti, _ANSWERS if tool_name == "AskUserQuestion" else _NO_DROP)
 
 
@@ -165,7 +172,8 @@ def output_text(tool_name: str, resp: object, ti: object = None) -> str | None:
     if tool_name == "Read":  # the path is in tool.started; the file's contents are never sent
         f = r.get("file") if isinstance(r.get("file"), dict) else None
         if f is None:
-            return f"read ({r.get('type')})" if _str(r.get("type")) else "read"
+            kind = r.get("type") if r.get("type") in _READ_TYPES else None
+            return f"read ({kind})" if kind else "read"
         n, total = f.get("numLines"), f.get("totalLines")
         return f"{n} lines" + (f" of {total}" if isinstance(total, int) and total != n else "") if isinstance(n, int) else "read"
     if tool_name == "Write":
@@ -174,7 +182,7 @@ def output_text(tool_name: str, resp: object, ti: object = None) -> str | None:
         what = r.get("type") if r.get("type") in ("create", "update") else "wrote"
         path = r.get("filePath") or ti.get("file_path") or ""
         size = len(content.encode("utf-8", "replace"))
-        return f"{what} {path} ({_lines(content)} lines, {size:,} bytes)\n" + content
+        return f"{path}\n{what}, {_lines(content)} lines, {size:,} bytes\n" + content  # the path starts its line
     if tool_name == "Edit":
         return _diff(r.get("filePath") or ti.get("file_path"),
                      [(r.get("oldString", ti.get("old_string")), r.get("newString", ti.get("new_string")))])
@@ -183,17 +191,18 @@ def output_text(tool_name: str, resp: object, ti: object = None) -> str | None:
         return _diff(r.get("filePath") or ti.get("file_path"),
                      [(e.get("old_string"), e.get("new_string")) for e in edits if isinstance(e, dict)])
     if tool_name == "NotebookEdit":
-        return f"{ti.get('notebook_path', '')} ({ti.get('edit_mode') or 'replace'})\n" + (_str(ti.get("new_source")) or "")
+        mode = ti.get("edit_mode") if ti.get("edit_mode") in ("replace", "insert", "delete") else "replace"
+        return f"{ti.get('notebook_path', '')}\n({mode})\n" + (_str(ti.get("new_source")) or "")
     if tool_name in AGENT_TOOLS:  # the subagent's report
         if not r:
             return _str(resp)
         texts = [b.get("text") for b in r.get("content") or [] if isinstance(b, dict) and b.get("type") == "text"]
-        status = _str(r.get("status")) or ""
+        status = r.get("status") if r.get("status") in _AGENT_STATUSES else ""
         body = "\n\n".join(t for t in texts if isinstance(t, str) and t.strip())
-        return (f"[{status}] " if status else "") + body or None
+        return (f"[{status}]\n" if status else "") + body or None  # status on its own line (S2-1)
     if tool_name == "AskUserQuestion":  # the questions, never the user's answers
         qs = [q.get("question") for q in r.get("questions") or [] if isinstance(q, dict) and _str(q.get("question"))]
-        return "answered: " + " / ".join(qs) if qs else "answered"
+        return "answered:\n" + "\n".join(qs) if qs else "answered"  # one question per line (S2-1)
     if isinstance(resp, str):
         return resp or None
     if "stdout" in r or "stderr" in r:
