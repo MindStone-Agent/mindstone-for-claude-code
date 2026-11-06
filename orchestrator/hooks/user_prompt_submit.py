@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -64,6 +65,14 @@ MMR_LAMBDA = 0.65    # favor relevance but allow some diversity
 # is not evidence that the store had an answer. Re-run the calibration after any
 # large ingest — the number is a property of this store, not a constant.
 MIN_SIMILARITY = 0.50
+
+# A background task's result arrives as a user turn wrapped in <task-notification>.
+# It is not something a person asked, and recall on it matched other envelopes
+# (#111 M4: 1,363 of 5,607 logged recall rows).
+HARNESS_PROMPT_PREFIXES = ("<task-notification>",)
+# A slash-command name: lowercase, then end of text or whitespace. Paths
+# (/Users/..., /tmp/x) and "//comments" don't match.
+_SLASH_CMD = re.compile(r"/[a-z][\w:-]*(?=\s|$)")
 
 # Per-chunk display budget (chars) — keep context lean
 MAX_CHARS_PER_CHUNK = 800
@@ -141,6 +150,22 @@ def extract_prompt(hook_input: dict) -> str:
         ]
         return "\n".join(texts).strip()
     return ""
+
+def recall_query(prompt: str) -> str:
+    """The part of a prompt worth recalling on; "" means no recall.
+
+    Leading slash-command names are dropped: `/loop /synapse-watch` re-fires on
+    every wakeup and recalled the same chunks each time (#111 M4: 2,634 of 5,607
+    logged recall rows), while `/loop 5m check the deploy` still recalls on
+    "5m check the deploy".
+    """
+    text = prompt.strip()
+    if text.startswith(HARNESS_PROMPT_PREFIXES):
+        return ""
+    while (m := _SLASH_CMD.match(text)):
+        text = text[m.end():].lstrip()
+    return text
+
 
 def truncate(text: str, n: int) -> str:
     if len(text) <= n:
@@ -413,6 +438,7 @@ def main():
         return
 
     # No prompt to work with, or too short to be worth embedding.
+    prompt = recall_query(prompt)
     if not prompt or len(prompt) < 8:
         return  # no output = no injection
 
