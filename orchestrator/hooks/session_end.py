@@ -410,9 +410,118 @@ def reindex_changed_memory() -> tuple[int, int, int, int]:
 # Auto-increment hits based on memory filenames appearing in the transcript
 # ---------------------------------------------------------------------------
 
-# The transcript is JSONL: one RECORD per physical line. Hook injections arrive
-# as a specific record shape, and that is the anchor — not the tag text.
-_HOOK_ATTACHMENT_TYPES = ("hook_additional_context",)
+# The transcript is JSONL: one RECORD per physical line. Record SHAPE is the
+# anchor — not the tag text (#96).
+#
+# ALLOWLIST, NOT DENYLIST. The first structural version dropped only
+# `hook_additional_context` records and credited everything else. Claude Code
+# writes many other record types that name memory files without anyone using
+# them — `file-history-snapshot` (whose trackedFileBackups list up to 91 memory
+# paths), `hook_success` (the SessionStart output, i.e. the whole memory index),
+# `edited_text_file`, `file`, `system`, tool results. Measured 2026-09-25: 447 of
+# 729 Stop runs credited 102–116 of 117 memories, so `hits` was counting turns
+# again (#91 by another route) and `last_applied` pinned decay at ~1.0. A denylist
+# fails OPEN on every record type added later; an allowlist fails closed.
+#
+# A citation is text a human or the model WROTE:
+#   - assistant records: `text`, `thinking`, and `tool_use` input, except a
+#     write whose target is a memory file (see _writes_memory below);
+#   - user records: human-typed text only — not `tool_result` blocks, not
+#     `isMeta` records, not compaction summaries (`isCompactSummary`: the old
+#     context read back, 86% of user-record credits when they were counted), and
+#     not harness-generated strings (task notifications, slash-command wrappers,
+#     local or `!` shell output, system reminders);
+#   - `queued_command` attachments in prompt mode: messages the human typed while
+#     the model was busy (#107), filtered by the same harness prefixes.
+# Writing a memory file is not using it (Cairn, #112): the Write that created
+# it, index edits naming every memory, and checkpoint counter edits would
+# otherwise credit it, so nothing could ever recount to zero. The rule is the
+# same for every tool: a write whose TARGET is a memory file doesn't count;
+# writing another file that names a memory (a LOG entry, a handoff) is authored
+# text and does.
+_WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+# A shell command that writes to a memory file. Linear-time on any input: no
+# unbounded bridge between "memory/" and the write operation.
+_SHELL_MEMORY_WRITE = re.compile(
+    r"(?<![\w>=-])>>?\s*[\"']?\S*memory/\S*\.md"   # > / >> into memory/*.md (not `->`, not `<dir>/memory`)
+    r"|\btee\b[^\n]*memory/\S*\.md"                # | tee [-a] memory/x.md
+    r"|\b(?:sed\s+-i|perl\s+-\w*i\b)[^\n]*memory/" # in-place edit
+)
+_OPEN_W = r"write_text\(|open\([^()\n]*,\s*(?:mode\s*=\s*)?[\"'][rbt+]*[wax]"  # the mode arg, not a path
+_SCRIPT_WRITE = re.compile(_OPEN_W)
+_ANY_WRITE = re.compile(r"(?<![\w>=-])>>?\s*[\"']?[^\s\"'|;&]+\.md\b|\btee\b|\bsed\s+-i|\bperl\s+-\w*i\b|" + _OPEN_W)
+_CD_MEMORY = re.compile(r"\bcd\s+[\"']?\S*memory/?[\"']?(?=[\s;&|]|$)", re.M)
+
+
+def _writes_memory(cmd: str) -> bool:
+    if _SHELL_MEMORY_WRITE.search(cmd):
+        return True
+    if "memory/" in cmd and _SCRIPT_WRITE.search(cmd):
+        return True
+    # `cd .../memory && cat >> x.md`: the target is a bare name relative to it.
+    return bool(_CD_MEMORY.search(cmd) and _ANY_WRITE.search(cmd))
+
+
+_HARNESS_USER_PREFIXES = (
+    "<task-notification>",
+    "<command-name>",
+    "<command-message>",
+    "<command-args>",
+    "<local-command-",
+    "<bash-stdout>",
+    "<bash-stderr>",
+    "<system-reminder>",
+    "<user-prompt-submit-hook>",
+    "Caveat: The messages below were generated",
+)
+
+
+def _authored_strings(rec: dict) -> list[str]:
+    """The human- or model-written text in one transcript record (allowlist)."""
+    rtype = rec.get("type")
+    att = rec.get("attachment")
+    if rtype == "attachment" and isinstance(att, dict) and att.get("type") == "queued_command":
+        if att.get("commandMode") != "prompt":
+            return []
+        prompt = att.get("prompt")
+        blocks = [{"type": "text", "text": prompt}] if isinstance(prompt, str) else prompt
+        return [b["text"] for b in (blocks if isinstance(blocks, list) else [])
+                if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
+                and not b["text"].lstrip().startswith(_HARNESS_USER_PREFIXES)]
+    msg = rec.get("message")
+    if rtype not in ("assistant", "user") or not isinstance(msg, dict):
+        return []
+    if rtype == "user" and (rec.get("isMeta") or rec.get("isCompactSummary")):
+        return []
+    content = msg.get("content")
+    blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content
+    if not isinstance(blocks, list):
+        return []
+    out: list[str] = []
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        bt = b.get("type")
+        if rtype == "assistant":
+            if bt == "text" and isinstance(b.get("text"), str):
+                out.append(b["text"])
+            elif bt == "thinking" and isinstance(b.get("thinking"), str):
+                out.append(b["thinking"])
+            elif bt == "tool_use":
+                inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+                target = inp.get("file_path") or inp.get("notebook_path")
+                if (b.get("name") in _WRITE_TOOLS and isinstance(target, str)
+                        and "/memory/" in target and target.endswith(".md")):
+                    continue
+                cmd = inp.get("command")
+                if isinstance(cmd, str) and _writes_memory(cmd):
+                    continue
+                out.append(json.dumps(inp, ensure_ascii=False))
+        elif bt == "text" and isinstance(b.get("text"), str):
+            text = b["text"]
+            if not text.lstrip().startswith(_HARNESS_USER_PREFIXES):
+                out.append(text)
+    return out
 
 
 def authored_text(chunk: str) -> str:
@@ -446,6 +555,10 @@ def authored_text(chunk: str) -> str:
     EVERY user turn and names the memories it recalled, all of it inside the
     watermark window. Without this, every recalled memory is credited every turn
     and #91 returns in a milder form.
+
+    Parsed records go through `_authored_strings` (an allowlist; see the comment
+    above it). Only the authored TEXT is returned, not the raw record, so names in
+    metadata fields (paths, file backups, tool results) cannot match.
     """
     out = []
     for line in chunk.splitlines():
@@ -463,10 +576,9 @@ def authored_text(chunk: str) -> str:
         except Exception:  # noqa: BLE001
             out.append(line)
             continue
-        att = rec.get("attachment")
-        if isinstance(att, dict) and att.get("type") in _HOOK_ATTACHMENT_TYPES:
-            continue          # a hook printing its own output. Not a citation.
-        out.append(line)
+        if not isinstance(rec, dict):
+            continue
+        out.extend(_authored_strings(rec))
     return "\n".join(out)
 
 
@@ -543,11 +655,26 @@ def auto_increment_hits(archived_path: Path) -> list[str]:
     if not transcript_text.strip():
         return []
 
-    memory_names = {p.name: p for p in MEMORY_DIR.glob("*.md")}
     incremented: list[str] = []
-
     today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
-    for name, path in memory_names.items():
+    for name, path in cited_memories(transcript_text).items():
+        if _bump_memory_hits(path, today):
+            incremented.append(name)
+
+    return incremented
+
+
+def cited_memories(authored: str) -> dict[str, Path]:
+    """Memory files whose name appears in already-filtered authored text.
+
+    Shared by the per-turn counter and the runbook's recount, so both credit by
+    exactly the same rule.
+    """
+    cited: dict[str, Path] = {}
+    for path in MEMORY_DIR.glob("*.md"):
+        name = path.name
+        if name == "MEMORY.md":
+            continue  # the index names every memory; it is not one
         stem = name.replace(".md", "")
         # Match either `name.md` or just `stem` (to avoid false positives,
         # require the stem be "underscore-shaped" — generic English words
@@ -558,12 +685,9 @@ def auto_increment_hits(archived_path: Path) -> list[str]:
             patterns = [re.escape(name)]
         else:
             patterns = [re.escape(name), re.escape(stem)]
-
-        if any(re.search(p, transcript_text) for p in patterns):
-            if _bump_memory_hits(path, today):
-                incremented.append(name)
-
-    return incremented
+        if any(re.search(p, authored) for p in patterns):
+            cited[name] = path
+    return cited
 
 def _bump_memory_hits(path: Path, today: str) -> bool:
     """Increment `hits` and set `last_applied` in a memory file's frontmatter.
