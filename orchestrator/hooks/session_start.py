@@ -948,6 +948,22 @@ def handoff_block(source: str) -> str:
         return ""
 
 
+# A per-session archive is exactly <uuid>.jsonl. Legacy dated copies
+# (YYYY-MM-DD__<uuid>.jsonl) are throwaway paths the DB has never indexed, and
+# recall_usage.jsonl (appended on every recall) is not a transcript at all:
+# picking either by mtime would re-embed from scratch or index nothing and log OK.
+_SESSION_ARCHIVE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$", re.I)
+
+
+def newest_session_archive(transcripts_dir: Path) -> Path | None:
+    archives = sorted(
+        (p for p in transcripts_dir.glob("*.jsonl") if _SESSION_ARCHIVE.match(p.name)),
+        key=lambda p: p.stat().st_mtime, reverse=True,
+    )
+    return archives[0] if archives else None
+
+
 def kick_deferred_embed() -> None:
     """After a compaction, embed the most-recent ARCHIVED (pre-compaction)
     transcript in a detached background process — "embed after compact".
@@ -962,17 +978,9 @@ def kick_deferred_embed() -> None:
     swallowed — a failed embed must never block session start.
     """
     try:
-        # Only consider stable per-session archives (<uuid>.jsonl). Skip any
-        # legacy dated copies (YYYY-MM-DD__<uuid>.jsonl) — those are throwaway
-        # paths the DB has never indexed, so picking one would re-embed the whole
-        # session from scratch. The "__" infix is unique to the dated scheme.
-        archives = sorted(
-            (p for p in TRANSCRIPTS_DIR.glob("*.jsonl") if "__" not in p.name),
-            key=lambda p: p.stat().st_mtime, reverse=True,
-        )
-        if not archives:
+        archive = newest_session_archive(TRANSCRIPTS_DIR)
+        if archive is None:
             return
-        archive = archives[0]
         # index_transcript() takes a Path (it calls path.exists()/path.read_text());
         # passing a bare str crashes with AttributeError. Wrap in Path(). Errors are
         # caught and printed so a failed embed leaves a trace in the log below — a
