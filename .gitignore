@@ -44,6 +44,7 @@ orchestrator/vectors.db
 orchestrator/vectors.db-journal
 # rescrub/backup snapshots hold the unscrubbed text (MS4CC#117)
 orchestrator/vectors.db.bak*
+orchestrator/vectors.db.rescrub-key
 orchestrator/*.db.bak*
 orchestrator/.memory-index-state.json
 orchestrator/transcripts/

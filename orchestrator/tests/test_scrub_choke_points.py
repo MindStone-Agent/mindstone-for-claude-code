@@ -6,6 +6,7 @@ Needs sqlite_vec (the store's extension); skipped where it isn't installed.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import random
@@ -649,6 +650,12 @@ def test_seed_from_is_read_only_and_safe_on_odd_paths(tmp_path, monkeypatch, cap
     assert odd.read_bytes() == before
 
 
+def _fingerprint(out: str) -> str:
+    import re
+
+    return re.search(r"declined_set_fingerprint=([0-9a-f]+)", out).group(1)
+
+
 @pytest.mark.parametrize("proof,bare", [
     ("password: correct-horse-battery9", "I typed correct-horse-battery9 again"),
     ("password=horsebattery", "the horsebattery thing"),
@@ -669,13 +676,46 @@ def test_proven_value_strong_rejects_cannot_pass_silently(tmp_path, monkeypatch,
     out = capsys.readouterr().out
     assert "proven_values_not_hunted_but_bare=1" in out and f"shape={rb.mask(value)} rows=1" in out
     assert value not in out
+    fp = _fingerprint(out)
     # Re-runs remember the value through the first run's snapshot.
     monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
     assert rb.main() == 1
-    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply", "--accept-unhunted", "2"])
-    assert rb.main() == 1, "the accepted count must match exactly"
-    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply", "--accept-unhunted", "1"])
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply", "--accept-unhunted", "0" * len(fp)])
+    assert rb.main() == 1, "only the printed fingerprint accepts"
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply", "--accept-unhunted", fp])
     assert rb.main() == 0
+    assert oct((tmp_path / "vectors.db.rescrub-key").stat().st_mode & 0o777) == "0o600"
+
+
+def test_accepted_fingerprint_is_bound_to_the_exact_declined_set(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "vectors.db"
+    VectorStore(db).init_schema()
+    _raw_insert(db, "password: blue-sky-42x")
+    _raw_insert(db, "we said blue-sky-42x later", source_path="b.jsonl")
+    rb = _load_runbook()
+    _install_embedder(monkeypatch, _FakeEmbedder)
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply"])
+    rb.main()
+    fp = _fingerprint(capsys.readouterr().out)
+    # A real password with the SAME masked shape and count takes the benign
+    # value's place: the old acceptance must not cover it.
+    c = sqlite3.connect(db)
+    c.execute("UPDATE chunks SET text = replace(text, 'blue-sky-42x', 'rose-sea-17q')")
+    c.commit()
+    c.close()
+    _raw_insert(db, "password: rose-sea-17q", source_path="p2.jsonl")
+    monkeypatch.setattr(sys, "argv", ["rescrub", "--db", str(db), "--apply", "--accept-unhunted", fp])
+    assert rb.main() == 1
+    out = capsys.readouterr().out
+    assert _fingerprint(out) != fp and "shape=aaaa-aaa-99a rows=1" in out
+
+
+def test_fingerprint_is_keyed_per_store(tmp_path, monkeypatch, capsys):
+    rb = _load_runbook()
+    a = rb.declined_fingerprint(tmp_path / "a.db", ["horsebattery"])
+    b = rb.declined_fingerprint(tmp_path / "b.db", ["horsebattery"])
+    assert a != b and a == rb.declined_fingerprint(tmp_path / "a.db", ["horsebattery"])
+    assert hashlib.sha256(b"horsebattery").hexdigest()[:20] not in (a, b)
 
 
 def test_unhunted_proven_value_elsewhere_in_the_file_fails_the_byte_gate(tmp_path, monkeypatch, capsys):
