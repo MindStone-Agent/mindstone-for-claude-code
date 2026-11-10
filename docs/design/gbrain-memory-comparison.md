@@ -5,7 +5,7 @@ Research input for a memory design discussion. It proposes nothing for merge and
 - **Question:** does gbrain's approach have ideas that would improve memory in MindStone-Agent (MSA) and in MS4CC?
 - **Short answer:** yes, in how it handles failure and measurement, and no, in how it treats original material.
   - **Worth taking:** its write path never loses text to an embedding failure, its search says in the response when a stage failed, and it measures retrieval with a replayable benchmark. Those three would close several defects we have already recorded.
-  - **Not worth taking:** its summary layer is rewritten in place, and its session transcripts are stored with tool calls and thinking replaced by placeholders, then deleted after 30 days. Both conflict with "compression is the enemy of true continuity".
+  - **Not worth taking:** its summary layer is rewritten in place, and its session transcripts are stored with tool calls and thinking replaced by placeholders, then deleted after 30 days by default. Both conflict with "compression is the enemy of true continuity".
 - **A difference in purpose that explains most of the rest:** gbrain is a knowledge base about the world (people, companies, meetings) that an agent queries. MSA and MS4CC keep an agent's own continuity. gbrain can afford to rewrite a page about a company. We cannot afford to rewrite what the agent lived through.
 
 ## Sources and limits
@@ -80,12 +80,12 @@ Session transcripts captured by its Claude Code hook are **not verbatim**:
 ### Summary layer
 
 - **Compiled truth is rewritten, and the timeline is append-only.** The guide's rule: "REWRITE means rewrite, not append" for compiled truth, "always APPEND (never edit existing entries)" for the timeline. `docs/guides/compiled-truth.md:71`, `:79`, `:103`.
-- **This is mostly a convention the agent follows.** The one mechanical check found covers typed relationships only: a health check lists pages that still assert a relationship their own timeline ended (`src/commands/doctor/checks/edge-validity.ts:5-11`), and a cycle phase proposes closing contradictory ones (`src/core/cycle/edge-contradictions.ts:1-8`). No code was found that checks free-text compiled-truth claims against the timeline.
-- **Search prefers the summary only when asked for low detail**, which is not the default: compiled-truth chunks then get a 2.0 boost, or 1.2 when low detail was inferred from the question. `src/core/search/hybrid.ts:59`, `:92-103`.
+- **This is mostly a convention the agent follows.** The one mechanical check found covers typed relationships only: a health check counts pages that still assert a relationship their own timeline ended (`src/commands/doctor/checks/edge-validity.ts:5-11`). Separately, a cycle phase has a model flag relationships of one subject that cannot both hold, and date arithmetic then proposes or applies closing one (`src/core/cycle/edge-contradictions.ts:1-11`). No code was found that checks free-text compiled-truth claims against the timeline.
+- **Search prefers the summary strongly only when low detail is asked for**: compiled-truth chunks then get a 2.0 boost. On a default search, a question framed around an entity is inferred as low detail and gets a soft 1.2 tilt. `src/core/search/hybrid.ts:59`, `:92-114`; `src/core/search/hybrid/request.ts:227`.
 
 ### Consolidation
 
-- **One cycle** (`runCycle`) runs 31 phases. `src/core/cycle.ts:128-230`. It is started by a command or a background job; how often was not traced.
+- **One cycle** (`runCycle`) defines 31 phases, several off by default or gated. `src/core/cycle.ts:128-230`. It is started by a command or a background job; how often was not traced.
 - **`synthesize`** has a cheap model score each transcript from a sample of at most 24,000 characters, and writes new reflection pages for those that pass. `src/core/cycle/synthesize.ts:147-149`, `:2903-2907`.
 - **A mechanical verifier checks the result**, because of what the project measured: "fewer than half of quoted spans in produced pages were substrings of the source transcript." `src/core/cycle/synthesize-verify.ts:5-7` (header).
 - **`consolidate`** clusters an entity's facts and promotes the highest-confidence fact's own text. It does not ask a model to rewrite, and it marks the source facts `consolidated_into` and never deletes them. `src/core/cycle/phases/consolidate.ts:6-21`, `:284-287`.
@@ -114,7 +114,7 @@ Session transcripts captured by its Claude Code hook are **not verbatim**:
 | --- | --- | --- | --- |
 | **Purpose** | Knowledge about the world, queried by an agent | An agent's own continuity | An agent's own continuity, inside Claude Code |
 | **Source of truth** | Markdown pages in git | Identity and memory files, journals, append-only transcripts (`core/transcript/store.ts:65-74`) | Identity and memory files, LOG, transcript archives (`session_end.py:189-224`) |
-| **Raw transcripts** | Placeholders for tools and thinking; deleted after 30 days | Verbatim, never rewritten | Verbatim archive; the *indexed* copy flattens tool calls to markers (`indexer.py:318-370`) |
+| **Raw transcripts** | Placeholders for tools and thinking; deleted after 30 days by default | Verbatim, never rewritten | Verbatim archive; the *indexed* copy flattens tool calls to markers (`indexer.py:318-370`) |
 | **Index** | Postgres, pgvector, full-text | SQLite tables; vectors as JSON, scanned in JS (`core/memory/sqlite-memory.ts:1346-1361`) | SQLite with sqlite-vec (`vectorstore.py:96-114`) |
 | **When embedding happens** | On write, with a background sweep for the rest | After every completed turn (`gw/index.ts:739-756`) | Only at `/checkpoint` and after a compaction (`session_end.py:671-675`) |
 | **Embedding failure** | Text saved, vector NULL, retried, backlog aged | Chunk left without a vector, found by its words, retried with a refusal ledger (`sqlite-memory.ts:1010-1052`) | **A zero vector is stored** and never retried (`embedder.py:152-160`) |
@@ -125,7 +125,7 @@ Session transcripts captured by its Claude Code hook are **not verbatim**:
 | **Automatic injection** | Pointers and up to 3 pages by name match, plus recent facts; an optional model-gated keyword search | Up to 8 hits, 2,500 tokens, each turn (`recall.ts:31-33`) | 4 memory and 2 transcript chunks each turn (`user_prompt_submit.py:31-32`) |
 | **Deleted sources** | Filtered in the query; chunks cascade | Chunks stay until manual maintenance (`sqlite-memory.ts:1130-1235`) | Chunks stay and remain recallable (`session_end.py:397-399`) |
 | **Summary layer** | Compiled truth, rewritten in place | An authored `invariant:` per critical memory; an index of pointers (`core/memory/invariants.ts:100-112`) | The same, plus a generated index (`memory_index.py:243-287`) |
-| **Consolidation** | A scheduled cycle that writes new pages | **Not implemented**; a scaffold that performs nothing (`core/lifecycle/post-compact.ts:47`) | `/checkpoint`: the model writes a LOG entry and new memory files |
+| **Consolidation** | A cycle, run by command or background job, that writes new pages | **Not implemented**; a scaffold that performs nothing (`core/lifecycle/post-compact.ts:47`) | `/checkpoint`: the model writes a LOG entry and new memory files |
 | **Forgetting** | Decay by kind; soft delete; no age pruning | A recency boost of at most 0.04; nothing removed | Decay in ranking only; nothing removed |
 | **Degradation visible?** | Stamped in the search response | A failed embed during search is caught with no log (`sqlite-memory.ts:1275-1277`) | A count in the LOG at checkpoint. A failed query embed injects unrelated chunks at a score of 0.500. A recall exception gives an empty block that looks like "nothing relevant" |
 | **Retrieval benchmark** | Yes, with replay | None (issue #64) | No judged-query benchmark or replay (issue #18). Two narrower harnesses exist: a floor calibration with positive and negative query classes (`orchestrator/runbooks/calibrate_recall_floor.py`) and a retrievability check with a control (`orchestrator/runbooks/acceptance_harness.py`, A4) |
@@ -161,7 +161,7 @@ Ranked by what they fix against what they cost. Effort is S (days), M (a week or
 ### 3. A retrieval benchmark with capture and replay, used as a gate
 
 - **What gbrain does:** judged queries, standard metrics, and replay of captured queries against a changed build.
-- **Why it ranks this high:** gbrain's own numbers show a plausible-sounding feature, model-written query expansion, cutting recall from 93% to 54%. We have changed ranking several times with no way to see such a drop. MS4CC already logs every candidate per query (`recall_usage.py:44-74`), and MSA does too (`core/memory/recall-usage.ts:54-91`), so most of the capture half exists. Neither log writes a row for a query that returned no candidates (`recall_usage.py:48-49`; `recall-usage.ts:61`), and MS4CC stores only the first 300 characters of the query, so both need a small change before replay is faithful.
+- **Why it ranks this high:** gbrain's own numbers show a plausible-sounding feature, model-written query expansion, cutting recall from 93% to 54%. We have changed ranking several times with no way to see such a drop. MS4CC already logs every candidate per query (`recall_usage.py:44-74`), and MSA does too (`core/memory/recall-usage.ts:54-91`), so most of the capture half exists. Neither log writes a row for a query that returned no candidates (`recall_usage.py:48-49`; `recall-usage.ts:61`), and both store only the first 300 characters of the query (`recall_usage.py:41`, `:53`; `recall-usage.ts:37`, `:63`), so both need a small change before replay is faithful.
 - **Where it lands:** MS4CC issue #18; MSA issue #64. A judged set is the missing part: a few dozen real questions, each with the memory that should come back.
 - **Effort:** M.
 - **Risk:** a small judged set overfits. The earlier floor calibration is a warning here: its margin was +0.0029 (`user_prompt_submit.py:44-65`), which is not a separation. The set must include paraphrases (issue #100) and questions the store cannot answer.
@@ -187,7 +187,7 @@ Ranked by what they fix against what they cost. Effort is S (days), M (a week or
 ### 6. Budget the always-loaded tier when it is written, not when it is loaded
 
 - **What gbrain does:** a write that would push the core tier over its budget is refused. `src/core/persistence/core-guard.ts:1-13`.
-- **Where it lands:** both products already degrade in the open at load. MS4CC admits each critical memory's invariant ahead of its body and names anything omitted in an in-band notice (`session_start.py:449-451`, `:515-516`, `:648-654`); bodies that do not fit are dropped whole, in filename order, by design. MSA's invariant tier degrades per item with an in-band note (`core/memory/invariants.ts:137-201`). Neither checks the budget when a memory is marked critical, so over-flagging (MS4CC issue #64) is found only at load. The check belongs where the mark is made: in MS4CC's `/checkpoint` and `orchestrator/runbooks/invariant_audit.py`.
+- **Where it lands:** both products already degrade in the open at load. MS4CC admits each critical memory's invariant ahead of its body and names anything omitted in an in-band notice (`session_start.py:450-452`, `:515-516`, `:648-654`); bodies that do not fit are dropped whole, in filename order, by design. MSA's invariant tier degrades per item with an in-band note (`core/memory/invariants.ts:137-201`). Neither checks the budget when a memory is marked critical, so over-flagging (MS4CC issue #64) surfaces at load, or when someone runs the audit runbook, which prints the critical tier as a share of the budget but does not fail on it (`orchestrator/runbooks/invariant_audit.py:132-144`). The check belongs where the mark is made: in MS4CC's `/checkpoint`, with that projection turned into a warning.
 - **Effort:** S.
 - **Risk:** refusing a write at checkpoint could lose a memory. It should warn and name what to demote, not refuse.
 
@@ -236,7 +236,7 @@ MS4CC's design doc states the rule's scope: it "is about compressing the **store
 | **Session transcripts lose tool calls, results and thinking** | gbrain's corpus never holds the original. For an agent's own history, what a tool returned and what the agent thought are the texture the rule protects. | `src/core/transcripts/claude-code-jsonl.ts:529-540` |
 | **Transcripts are deleted after 30 days** (the default, once extracted) | The reflection page a model wrote, and the facts extracted from the session, become the only record in the store. That is the exact case the rule names. | `src/commands/hook.ts:150`, `:1916-1919` |
 | **A cheap model decides which transcripts are worth synthesising, from a sample** | A session scored under the threshold produces no reflection page. Whether its transcript is then deleted on the same schedule was not traced. | `src/core/cycle/synthesize.ts:147-149` |
-| **Search can boost the summary over the evidence** | When low detail is asked for (not the default), the rewritten half outranks the dated entries it was written from. This is a ranking preference, not a change to the store, so it is the weakest conflict here. | `src/core/search/hybrid.ts:59`, `:92-103` |
+| **Search can boost the summary over the evidence** | When low detail is asked for, the rewritten half outranks the dated entries it was written from; on a default search an entity-framed question gets a soft 1.2 tilt the same way. This is a ranking preference, not a change to the store, so it is the weakest conflict here. | `src/core/search/hybrid.ts:59`, `:92-114` |
 | **`purge_fact` rewrites history** | It removes a fact from every stored version. This is intentional erasure for privacy, and it is a policy question for us, not a defect in gbrain. | `src/core/facts/purge.ts:1-19` |
 
 Three things that look like compression and are not:
